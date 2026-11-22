@@ -50,6 +50,8 @@ export interface Ledger {
   marketing: number;
   salvage: number;
   awards: number;
+  borrowed: number; // financing: credit-line draws (not part of net cashflow)
+  repaid: number; // financing: principal repaid (not part of net cashflow)
 }
 
 export interface PlayerStats {
@@ -101,6 +103,16 @@ export interface Building {
   invested: number;
   builtTick: number;
   dry: boolean; // currently stocked out
+  lost: LostCustomers; // recent customers this shop failed to win, by reason (decayed)
+  riders: number; // Tram Stop: commuters delivered to this stop
+  auraSales: number; // Park / Plaza: sales made by shops inside the aura
+}
+
+/** Why a shop recently lost customers. Exponentially decayed, so a fix shows up within a minute. */
+export interface LostCustomers {
+  tooPricey: number;
+  queueFull: number;
+  outOfStock: number;
 }
 
 export interface Citizen {
@@ -138,12 +150,14 @@ export interface CityEvent {
   startAt: number;
   endAt: number;
   started: boolean;
+  n?: number; // headline count while the event runs (tourists served, riders delivered, …)
+  take?: number[]; // per player: what the event was worth (or cost) while it ran
 }
 
 export interface GazetteLine {
   tick: number;
   text: string;
-  tone: 'event' | 'market' | 'civic';
+  tone: 'event' | 'market' | 'civic' | 'rival';
 }
 
 export type Fx =
@@ -182,10 +196,19 @@ export interface ResultRow {
   civic: number;
 }
 
+/** Market share over the match: one sample per daypart, share×1000 per player. */
+export interface ShareTrend {
+  perQuarter: number; // samples per quarter
+  samples: number[][];
+}
+
 export interface MatchResult {
   winner: number;
   rows: ResultRow[];
   awards: Award[];
+  trend: ShareTrend;
+  leaders: number[]; // who led the Crown Index at each quarter's close
+  highlight: string; // the front-page headline of the Final Edition
 }
 
 export interface GameState {
@@ -215,6 +238,8 @@ export interface GameState {
   cruiseLeft: number;
   fx: Fx[];
   result: MatchResult | null;
+  trend: number[][]; // market share×1000 per player, sampled every daypart
+  leaders: number[]; // Crown Index leader at each quarter's close
 }
 
 export interface PlayerSetup {

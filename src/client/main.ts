@@ -1,11 +1,12 @@
 // MERCADIA client entry. Owns the frame loop, input, and the hand-offs between the title
 // screen's attract-mode district, solo matches, and multiplayer rooms.
-import { BUILD_KINDS, HOUSES, buildCost, buildName } from '../shared/constants';
+import { HOUSES, buildCost, buildName } from '../shared/constants';
 import { CITY } from '../shared/map';
 import type { ClientMsg, LobbyView } from '../shared/protocol';
 import type { BuildKind, Fx, MatchMode } from '../shared/types';
 import { Foley } from './audio';
 import { Hud, LobbyScreen, TitleScreen, storedName } from './hud';
+import { MatchWatch, devHooksAllowed, disarm, normKey, resolveKey } from './input';
 import { Renderer, type UiState } from './renderer';
 import { LocalSession, NetSession, attractSetups, createRoom, roomExists, soloSetups, type Session } from './session';
 
@@ -31,6 +32,8 @@ const hud = new Hud({
   select,
   leave: () => toTitle(),
   isHost: () => (net ? net.isHost : session.kind === 'solo'),
+  disarm: () => resetUi(),
+  refit: () => refit(),
 });
 
 const title = new TitleScreen({
@@ -57,7 +60,7 @@ const lobby = new LobbyScreen({
 function setInsets(): void {
   const w = window.innerWidth;
   if (phase === 'playing') {
-    renderer.insets = w <= 720 ? { top: 140, right: 0, bottom: 130, left: 0 } : { top: 64, right: w > 1180 ? 120 : 60, bottom: 84, left: 0 };
+    renderer.insets = w <= 720 ? { top: 150, right: 0, bottom: w <= 640 ? 160 : 130, left: 0 } : { top: 64, right: w > 1180 ? 120 : 60, bottom: 84, left: 0 };
   } else {
     // Leave room for the title card: it sits left on wide screens, bottom on phones.
     renderer.insets = w <= 720 ? { top: 10, right: 0, bottom: Math.round(window.innerHeight * 0.52), left: 0 } : { top: 20, right: 0, bottom: 20, left: Math.min(460, Math.round(w * 0.3)) };
@@ -70,12 +73,11 @@ function refit(): void {
   renderer.fit();
 }
 
+/** Drop any armed build tool, hover and selection (new match, final bell, rematch, endless). */
 function resetUi(): void {
-  ui.tool = null;
-  ui.hoverTile = -1;
-  ui.selectedTile = -1;
-  ui.selectedCitizen = -1;
+  disarm(ui);
   stage.classList.remove('building');
+  stage.classList.remove('pointing');
 }
 
 function setUrl(code: string | null): void {
@@ -107,6 +109,7 @@ function playSolo(rivals: number, mode: MatchMode, name: string): void {
   session.dispose();
   const s = new LocalSession('solo', soloSetups(name, rivals), mode, (Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0);
   s.onReject = reject;
+  s.onAccept = accepted;
   session = s;
   ui.me = 0;
   resetUi();
@@ -141,6 +144,7 @@ function enterRoom(code: string, name: string): void {
     },
   });
   n.onReject = reject;
+  n.onAccept = accepted;
   net = n;
 }
 
@@ -169,20 +173,27 @@ function onLobby(l: LobbyView): void {
     title.hide();
     hud.show();
     refit();
-    if (net.me < 0) hud.toast('Match in progress: you are watching as a spectator.');
   }
   ui.me = net.me;
 }
 
+/** A refusal replaces any earlier refusal; it never stacks. */
 function reject(err: string): void {
-  hud.toast(err);
+  hud.refuse(err);
   audio.deny();
+}
+
+/** Something we asked for went through: an old "Not enough cash…" is no longer true. */
+function accepted(): void {
+  hud.clearRefusals();
 }
 
 // ───────────────────────────── Actions ─────────────────────────────
 
 function setTool(k: BuildKind | null): void {
   if (ui.me < 0) return;
+  // No blueprint may be armed over a finished match.
+  if (k && (phase !== 'playing' || session.view.ended)) k = null;
   ui.tool = k;
   stage.classList.toggle('building', !!k);
   if (k) {
@@ -228,7 +239,9 @@ function onFx(f: Fx): void {
       break;
     case 'build':
       audio.build(mine(f.p));
-      if (mine(f.p)) select(f.tile);
+      // Desktop opens the new shop's Inspector beside the city. On a phone the Inspector is a
+      // bottom sheet over the dock, so it waits for a tap and building can continue.
+      if (mine(f.p) && window.innerWidth > 640) select(f.tile);
       break;
     case 'upgrade':
       if (mine(f.p)) audio.fanfare();
@@ -271,6 +284,7 @@ const keys = new Set<string>();
 
 stage.addEventListener('pointerdown', (e) => {
   audio.unlock();
+  ui.touch = e.pointerType === 'touch' || e.pointerType === 'pen';
   stage.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (pointers.size === 1) {
@@ -306,7 +320,8 @@ stage.addEventListener('pointermove', (e) => {
       return;
     }
   }
-  if (e.pointerType === 'mouse' || p) hover(e.clientX, e.clientY);
+  // A finger has no hover: while a blueprint is armed, the preview tile is set by a tap instead.
+  if (e.pointerType === 'mouse' || (p && !(ui.touch && ui.tool))) hover(e.clientX, e.clientY);
 });
 
 function hover(x: number, y: number): void {
@@ -331,19 +346,28 @@ function release(e: PointerEvent): void {
   dragged = false;
   pinch = 0;
   if (wasDrag || e.type === 'pointercancel') return;
-  click(e.clientX, e.clientY, e.shiftKey);
+  click(e.clientX, e.clientY, e.shiftKey, e.pointerType !== 'mouse');
 }
 stage.addEventListener('pointerup', release);
 stage.addEventListener('pointercancel', release);
-stage.addEventListener('pointerleave', () => {
-  if (!pointers.size) ui.hoverTile = -1;
+stage.addEventListener('pointerleave', (e) => {
+  if (!pointers.size && e.pointerType === 'mouse') ui.hoverTile = -1;
 });
 
-function click(x: number, y: number, shift: boolean): void {
+function click(x: number, y: number, shift: boolean, touch = false): void {
   const view = session.view;
   if (ui.tool && ui.me >= 0) {
     const tile = renderer.tileAt(x, y);
-    if (tile >= 0) tryBuild(tile, shift);
+    if (tile < 0) return;
+    // Touch: the first tap on a vacant lot shows the blueprint (reach ring, synergy card);
+    // a second tap on the same lot builds. A mouse already had the preview on hover.
+    if (touch && tile !== ui.hoverTile && CITY.tiles[tile] === 'lot' && !view.buildingAt(tile)) {
+      ui.hoverTile = tile;
+      audio.click();
+      return;
+    }
+    tryBuild(tile, shift);
+    if (touch) ui.hoverTile = -1;
     return;
   }
   const hit = renderer.pick(x, y, view, session.alpha(performance.now()));
@@ -381,37 +405,50 @@ window.addEventListener('keydown', (e) => {
   const t = e.target as HTMLElement;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  if (['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) {
-    keys.add(k);
-    e.preventDefault();
-    return;
-  }
-  if (k === '+' || k === '=') renderer.zoomAt(1.18, renderer.width / 2, renderer.height / 2);
-  else if (k === '-' || k === '_') renderer.zoomAt(1 / 1.18, renderer.width / 2, renderer.height / 2);
-  else if (k === 'm') {
-    audio.unlock();
-    audio.toggle();
-    hud.sync(0, true);
-  } else if (k === 'Escape') {
-    if (ui.tool) setTool(null);
-    else {
-      ui.selectedTile = -1;
-      ui.selectedCitizen = -1;
+  // The policy lives in input.ts: build and speed hotkeys never leak through the Title,
+  // the Lobby or the Victory modal.
+  const act = resolveKey(e.key, { phase, victoryOpen: hud.victoryOpen, ended: session.view.ended, me: ui.me, kind: session.kind, tool: ui.tool });
+  switch (act.a) {
+    case 'pan':
+      keys.add(normKey(e.key));
+      e.preventDefault();
+      break;
+    case 'zoom':
+      renderer.zoomAt(act.factor, renderer.width / 2, renderer.height / 2);
+      break;
+    case 'mute':
+      audio.unlock();
+      audio.toggle();
       hud.sync(0, true);
-    }
-  } else if (k === ' ' && phase === 'playing' && session.kind === 'solo') {
-    e.preventDefault();
-    session.togglePause();
-    hud.sync(0, true);
-  } else if (k === 'f') refit();
-  else if (phase === 'playing' && ui.me >= 0 && k >= '1' && k <= '9') {
-    const kind = BUILD_KINDS[Number(k) - 1];
-    setTool(ui.tool === kind ? null : kind);
+      title.syncSound();
+      break;
+    case 'escape':
+      if (ui.tool) setTool(null);
+      else {
+        ui.selectedTile = -1;
+        ui.selectedCitizen = -1;
+        hud.sync(0, true);
+      }
+      break;
+    case 'pause':
+      e.preventDefault();
+      session.togglePause();
+      hud.sync(0, true);
+      break;
+    case 'fit':
+      refit();
+      break;
+    case 'tool':
+      setTool(act.kind);
+      break;
+    default:
+      // A swallowed Space must not scroll or re-press a focused button behind an overlay.
+      if (e.key === ' ' && (e.target === document.body || e.target === stage)) e.preventDefault();
+      break;
   }
 });
 window.addEventListener('keyup', (e) => {
-  keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+  keys.delete(normKey(e.key));
 });
 window.addEventListener('blur', () => keys.clear());
 window.addEventListener('resize', () => {
@@ -434,9 +471,11 @@ try {
 } catch {
   remembered = null;
 }
+const devHooks = devHooksAllowed(location.hostname, location.search);
 const asked = params.get('canvas');
 const canvasMode = asked === 'cpu' || asked === 'gpu' ? asked : remembered === 'cpu' ? 'cpu' : 'auto';
 let lastFrame = 0;
+const watch = new MatchWatch();
 let frames = 0;
 let slowFrames = 0;
 let probed = 0;
@@ -473,6 +512,12 @@ function frame(now: number): void {
   const fx = session.update(now);
   for (const f of fx) onFx(f);
   const view = session.view;
+  // The final bell, a Rematch and Continue in Endless each change the match on screen:
+  // whatever was armed for the old one is dropped, on every client in the room.
+  if (watch.changed(view) && phase === 'playing') {
+    resetUi();
+    hud.sync(0, true);
+  }
   if (view.ready) {
     const alpha = session.alpha(now);
     renderer.frame(view, alpha, ui, now);
@@ -525,9 +570,24 @@ function frame(now: number): void {
     renderer.cam.x = (x - y) * 32;
     renderer.cam.y = (x + y) * 16;
   },
-  /** Solo and attract only: run the local simulation forward by n ticks at once. */
+  /** True where the dev hooks below are live: local hosts, or any host with ?dev=1. */
+  get dev() {
+    return devHooks;
+  },
+  get tool() {
+    return ui.tool;
+  },
+  get selectedTile() {
+    return ui.selectedTile;
+  },
+  /**
+   * Solo and attract only: run the local simulation forward by n ticks at once.
+   * A cheat on a public host, so it is inert there unless the URL carries ?dev=1.
+   */
   warp(n: number) {
+    if (!devHooks) return false;
     if (session instanceof LocalSession) session.warp(n);
+    return true;
   },
   get skip() {
     return renderer.skip;
@@ -549,6 +609,22 @@ function frame(now: number): void {
   freeLots() {
     const v = session.view;
     return CITY.lots.filter((t) => !v.buildingAt(t));
+  },
+  /** True for a lot that touches the tramway avenue (where a Tram Stop may stand). */
+  avenueSide(tile: number) {
+    return CITY.avenueAdj[tile] >= 0;
+  },
+  /** Screen positions of the citizens on the street. */
+  citizensOnScreen() {
+    return [...session.view.citizens.values()].map((c) => ({ id: c.id, ...renderer.citizenScreen(c, 1) }));
+  },
+  /** The Gazette's recent lines. */
+  gazette() {
+    return session.view.gazette.map((g) => ({ tone: g.tone, text: g.text }));
+  },
+  /** Screen x of the island's two tips against the viewport width (fit checks). */
+  islandSpan() {
+    return renderer.islandSpan();
   },
   /** Screen position of the centre of a tile. */
   tileScreen(tile: number) {

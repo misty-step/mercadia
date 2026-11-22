@@ -43,6 +43,7 @@ export type ClientMsg =
   | { t: 'hello'; name?: string; playerId?: string }
   | { t: 'lobby'; name?: string; house?: number }
   | { t: 'seat'; seat: number; ai: boolean }
+  | { t: 'aifill'; on: boolean } // host: every empty seat becomes an AI rival (on) or stays open (off: pure PvP)
   | { t: 'mode'; mode: MatchMode }
   | { t: 'start' }
   | { t: 'speed'; speed: number }
@@ -59,7 +60,7 @@ export type ServerMsg =
   | { t: 'pong'; at: number }
   | Snap;
 
-const MSG_TYPES = new Set(['hello', 'lobby', 'seat', 'mode', 'start', 'speed', 'cmd', 'rematch', 'endless', 'ping']);
+const MSG_TYPES = new Set(['hello', 'lobby', 'seat', 'aifill', 'mode', 'start', 'speed', 'cmd', 'rematch', 'endless', 'ping']);
 
 /** Parse and shallow-validate a client frame. Returns null for anything malformed. */
 export function parseClientMsg(raw: unknown): ClientMsg | null {
@@ -84,6 +85,9 @@ export function parseClientMsg(raw: unknown): ClientMsg | null {
       break;
     case 'seat':
       if (typeof o.seat !== 'number' || typeof o.ai !== 'boolean') return null;
+      break;
+    case 'aifill':
+      if (typeof o.on !== 'boolean') return null;
       break;
     case 'mode':
       if (o.mode !== 'blitz' && o.mode !== 'standard' && o.mode !== 'endless') return null;
@@ -144,7 +148,14 @@ export interface Snap {
 
 const toView = (b: Building): BuildingView => {
   const { queue, serving, ...rest } = b;
-  return { ...rest, rating: Math.round(b.rating * 100) / 100, q: queue.length, sv: serving.length / 2 };
+  const r1 = (v: number): number => Math.round(v * 10) / 10;
+  return {
+    ...rest,
+    rating: Math.round(b.rating * 100) / 100,
+    lost: { tooPricey: r1(b.lost.tooPricey), queueFull: r1(b.lost.queueFull), outOfStock: r1(b.lost.outOfStock) },
+    q: queue.length,
+    sv: serving.length / 2,
+  };
 };
 
 /** Encodes GameState into snapshots, sending only buildings that changed since the last one. */
@@ -295,6 +306,7 @@ export interface EventView {
 
 const zeroLedger = (): Ledger => ({
   revenue: 0, wages: 0, supplies: 0, rent: 0, interest: 0, construction: 0, civic: 0, marketing: 0, salvage: 0, awards: 0,
+  borrowed: 0, repaid: 0,
 });
 
 /** What the renderer and HUD read. Rebuilt incrementally from snapshots. */

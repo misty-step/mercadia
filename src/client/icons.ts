@@ -30,6 +30,7 @@ export const ICONS: Record<string, string> = {
   shark: svg('<path d="M3 16.5c4-1 6.5-4.5 8-11 2.2 3.2 3 6.5 2.8 9.6 2.4.2 4.8-.6 7.2-2.6-.6 4-4 6.5-9 6.5H3z"/>'),
   patron: svg('<path d="M4 20h16M5.5 20V10.5M9.8 20V10.5M14.2 20V10.5M18.5 20V10.5"/><path d="M3.5 10.5 12 4l8.5 6.5z"/>'),
   fit: svg('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
+  chevron: svg('<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>'),
 };
 
 export const icon = (name: string): string => ICONS[name] ?? '';
@@ -60,5 +61,31 @@ export function dial(phase: number): string {
     <path d="M2 17.6h26" stroke="rgba(30,26,22,0.4)" stroke-width="1.2" stroke-linecap="round"/>
     <circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.4" fill="${night ? '#5A66A8' : phase > 0.55 ? '#D48C1C' : '#D4A34A'}"/>
     ${night ? `<circle cx="${(x + 1.5).toFixed(1)}" cy="${(y - 1.2).toFixed(1)}" r="2.6" fill="#FAF7F0"/>` : ''}
+  </svg>`;
+}
+
+/**
+ * The winning House's crest for the Final Edition: a shield in the House colour with its
+ * initial, a brass crown above and a laurel either side.
+ */
+export function crest(color: string, dark: string, light: string, letter: string): string {
+  const leaf = (x: number, y: number, r: number, flip: boolean): string =>
+    `<ellipse cx="${x}" cy="${y}" rx="5.2" ry="2.3" transform="rotate(${flip ? -r : r} ${x} ${y})" fill="#84A98C"/>`;
+  const laurel = [0, 1, 2, 3, 4]
+    .map((i) => {
+      const y = 70 - i * 9.5;
+      const dx = 9 + i * 1.2 - i * i * 0.5;
+      return leaf(48 - 30 - dx + 6, y, 52 - i * 9, false) + leaf(48 + 30 + dx - 6, y, 52 - i * 9, true);
+    })
+    .join('');
+  return `<svg class="crest" viewBox="0 0 96 96" role="img" aria-label="Crest of the winning House">
+    ${laurel}
+    <path d="M26 30h44v22c0 14-9 23-22 28-13-5-22-14-22-28z" fill="${color}"/>
+    <path d="M48 30h22v22c0 14-9 23-22 28z" fill="${dark}"/>
+    <path d="M26 30h44v7H26z" fill="${light}" opacity=".55"/>
+    <path d="M30 14l7 8 11-12 11 12 7-8-3 14H33z" fill="#D4A34A"/>
+    <path d="M48 10l11 12 7-8-3 14H48z" fill="#B98A34"/>
+    <path d="M33 28h30v3.4H33z" fill="#7A5A16"/>
+    <text x="48" y="63" text-anchor="middle" font-family="Fraunces, Georgia, serif" font-weight="700" font-size="27" fill="#FAF7F0">${letter}</text>
   </svg>`;
 }

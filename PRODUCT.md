@@ -32,12 +32,23 @@ the final quarter closes wins the district.
 
 1. **Read the street.** Build mode shows each vacant lot's bonuses (Corner, Canal-front,
    Transit) and a live foot-traffic rating from one to five pips. The build dock shows unmet
-   demand per shop type.
+   demand per shop type, and every tool has a tooltip with its cost, peak hours and reach.
+   Hovering a lot with a blueprint lists its synergies and competition (`+Plaza Aura`,
+   `+Tram Footfall`, `1 rival Roastery nearby`). A civic blueprint draws its reach on the map:
+   a ring and a wash on every lot it will lift. A Tram Stop blueprint traces the tramway and
+   greys out the inland lots that cannot take one.
 2. **Build.** Six shop archetypes serve six desires; three civic projects reshape traffic.
 3. **Manage.** Click an owned shop to set its price stance, upgrade it, fire a Promo Blitz,
-   restock, or sell.
+   restock, or sell. The Inspector opens with a one-line diagnosis of why the shop is missing
+   sales: `Passed by: 7 too pricey · 4 queue full`, `Off-peak — Coffee peaks in Morning`,
+   `Undercut — 1 cheaper rival Bistro nearby`. Any shop running a Promo Blitz, a rival's
+   included, shows a badge with the seconds left.
 4. **React.** The Mercadia Gazette forecasts a city event a few seconds ahead. Rain fills
-   cinemas, a cruise ship fills boutiques, a supply crunch punishes late restocking.
+   cinemas, a cruise ship fills boutiques, a supply crunch punishes late restocking. While an
+   event is forecast or running, the shops it lifts and the landmark it arrives through (the
+   Harbor Pier, the tram platforms) are marked on the map. When it ends the Gazette prints a
+   receipt: `Harbor Cruise closed — 28 tourists served · Top earner: Cobalt`. Undercutting a
+   nearby rival of the same trade, or launching a Promo Blitz, makes a rivalry headline.
 5. **Close the quarter.** Each quarter is one day, morning to lantern-lit twilight. The ledger
    closes, the leaderboard settles, the next day begins.
 
@@ -88,13 +99,19 @@ Craft +20%, Prestige +45%), a stockroom, wages, and rent.
 | Tram Stop | §240 | Trams pause and drop commuters on the block; transit bonus nearby; prestige |
 | Festival Plaza | §340 | +30% appeal aura over two tiles; tourists gather here; most prestige |
 
+A civic project's Inspector shows what it has done: **Riders delivered** for a Tram Stop,
+**Nearby shops boosted** and **Boosted sales** for a Park or Plaza.
+
 ### Money
 
 Revenue arrives per sale. Supplies are paid when stock is bought: Auto-Restock costs a 15%
 convenience premium, Manual Restock does not, and a Supply Crunch raises both. Payroll runs
 every ten seconds and takes wages, rent, and loan interest. The Emergency Credit Line lends
-§400 at a time. A property sells for 60% of what was invested in it. The Ledger drawer shows
-all of this per quarter and for the match.
+§400 at a time, and the Borrow button states the exact rate (`Borrow §400 · 18%/qtr` in
+Standard, `7.2%/qtr` in Blitz). A property sells for 60% of what was invested in it. The
+Ledger drawer shows all of this per quarter and for the match, followed by a **Financing**
+section (loan draws, loan repayments) and **Change in cash**, so opening cash plus the ledger
+equals the cash in hand to the §.
 
 ### City events — the Mercadia Gazette
 
@@ -105,26 +122,46 @@ canvas atmosphere, and changes the numbers.
 ### Winning
 
 **Crown Index = Net Worth ÷ 10 + Market Share % × 3 + Civic Prestige × 4.**
-The leaderboard and the market-share tug-of-war bar show it live. The victory summary compares
-all Houses and names the *Corner King*, the *Price Shark*, and the *Civic Patron*. Then:
-Rematch, or Continue in Endless.
+The leaderboard and the market-share bar show it live, in the same rank order. Hovering a
+House, or toggling *Worth + Share + Prestige* in the leaderboard header, breaks its Crown into
+the three whole-number parts, which always sum to the Crown.
+
+The match ends on **The Mercadia Gazette — Final Edition**: the winning House's crest, a
+headline for how the match was won (photo finish, late surge, landslide, wire to wire), the
+full Crown breakdown for every House, a market-share chart quarter by quarter, and the
+*Corner King*, *Price Shark* and *Civic Patron* honours. Then: Rematch, or Continue in
+Endless. Build and speed hotkeys do nothing while it is open, and nothing armed for the
+finished match carries into the next one.
 
 ## Modes
 
 - **Solo.** One human and one to three AI tycoons. Blitz (2 quarters, about a minute each),
   Standard (4 quarters, about 2.5 minutes each), or Endless Sandbox. Pause, 1×, 2×, 3×.
-- **Multiplayer room.** Two to four seats, any mix of humans and AI. The server is
-  authoritative at 10 Hz. A dropped player reconnects into the same seat. If the host leaves,
-  the next connected player becomes host. The host sets pace: 1×, 1.5×, 2×.
+- **Multiplayer room.** Two to four seats, any mix of humans and AI. *No AI (Pure PvP)* in
+  the lobby clears every AI seat in one click for a human-only duel. The server is
+  authoritative at 10 Hz. A dropped player reconnects into the same seat, and so does a
+  player who closed the tab (or whose phone evicted it) and reopened the invite link. A
+  latecomer watches as a spectator and is told so in a fixed, high-contrast notice. If the
+  host leaves, the next connected player becomes host. The host sets pace: 1×, 1.5×, 2×.
+- **Leaving.** Leave during a live match takes two clicks: the first turns the button into
+  `Leave?` for four seconds, the second leaves.
 
 ### AI tycoons
 
 - **Vesper, the Aggressive Discounter.** Takes high-traffic corners, undercuts the nearest
-  rival of the same trade, fires Promo Blitzes.
+  rival of the same trade, opens beside premium-priced rivals, fires Promo Blitzes. From
+  Quarter 3, if he trails on prestige, he turns civic: parks, one stop, one plaza.
 - **Aurelia, the Boutique Perfectionist.** Claims canal and plaza frontage, builds Bistros and
-  Boutiques, upgrades to Level 3 quickly, prices at Craft and Prestige.
+  Boutiques, upgrades to Level 3 quickly, prices at Craft and Prestige. A finished shop that
+  keeps losing customers to its price steps back to Craft until the queue returns.
 - **Orson, the Transit Expansionist.** Builds Tram Stops and Pocket Parks to create traffic
   corridors, then fills them with shops as fast as cash allows.
+
+All three know what each trade is really worth and save up for a better shop rather than
+pile into coffee. Over twelve seeded Standard matches no persona wins more than five, and
+their average Crown Index is within 5% of each other (`npm run balance`). In **Blitz** the
+tycoons wait nine seconds before their first move, stagger after that, and think at half
+pace through the first 45 seconds, so human players can contest first place from Quarter 1.
 
 ## What MERCADIA is not
 
@@ -137,6 +174,9 @@ Rematch, or Continue in Endless.
 
 - The city is alive within one second of load, before any click.
 - 85% or more of the viewport is uninterrupted city during play at 1440×900.
-- The layout stays unclipped at 1024×768 and 390×844.
+- The layout stays unclipped at 1024×768 and 390×844. At 390×844 the build dock is tabbed
+  (*Shops (6)* / *Civic (3)*), Fit view shows the island tip to tip, a first tap previews a
+  blueprint and a second builds it, and the Inspector is a bottom sheet that keeps the
+  selected block in view.
 - Solo and multiplayer run the same deterministic simulation code.
 - The console stays clean: zero errors in a solo match and in a two-browser room.

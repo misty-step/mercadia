@@ -10,21 +10,29 @@ import {
   EVENTS,
   HOUSES,
   LOAN_MAX,
+  LOAN_RATE,
   LOAN_STEP,
   MODES,
+  START_CASH,
+  PROMO_COOLDOWN,
   PROMO_COST,
+  PROMO_TICKS,
   SHOPS,
   STANCES,
   buildCost,
   buildName,
   isShop,
+  loanRateLabel,
 } from '../shared/constants';
+import { civicImpact, eventTouches, initials, lotSynergy, shopDiagnosis, toolTooltip } from '../shared/insight';
 import { CITY, tx, ty, walkDist } from '../shared/map';
 import type { BuildingView, CitizenView, CityView, LobbyView } from '../shared/protocol';
 import {
   TAKINGS_PER_MIN,
   citizenName,
   citizenTile,
+  crownParts,
+  ledgerCashChange,
   ledgerNet,
   lotBonuses,
   priceOf,
@@ -36,9 +44,10 @@ import {
   upgradeCost,
   wageOf,
 } from '../shared/sim';
-import { CS, type BuildKind, type Command, type Fx, type Ledger, type MatchMode } from '../shared/types';
+import { CS, type BuildKind, type Command, type Fx, type Ledger, type MatchMode, type MatchResult } from '../shared/types';
 import type { Foley } from './audio';
-import { dial, icon, trophy } from './icons';
+import { crest, dial, icon } from './icons';
+import { Confirm } from './input';
 import type { Renderer, UiState } from './renderer';
 import type { Session } from './session';
 
@@ -51,7 +60,20 @@ export interface HudHost {
   select(tile: number): void;
   leave(): void;
   isHost(): boolean;
+  /** Drop any armed build tool and selection (rematch, endless, final bell). */
+  disarm(): void;
+  /** Fit the district to the free area of the screen. */
+  refit(): void;
 }
+
+const SPECTATOR_TEXT = 'Match in progress: you are watching as a spectator.';
+/** Viewports at or below this width get the tabbed dock and the bottom-sheet inspector. */
+const narrow = (): boolean => window.innerWidth <= 640;
+const phone = (): boolean => window.innerWidth <= 720;
+const soundLabel = (muted: boolean): string => (muted ? 'Unmute sound (M)' : 'Mute sound (M)');
+const setAttr = (el: Element | null | undefined, name: string, value: string): void => {
+  if (el && el.getAttribute(name) !== value) el.setAttribute(name, value);
+};
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 export const esc = (s: string): string =>
@@ -111,7 +133,14 @@ export class Hud {
   private banner = $('banner');
   private toasts = $('toasts');
   private victory = $('victory');
+  private docktabs = $('docktabs');
+  private spectator = $('spectator');
 
+  private leaveConfirm = new Confirm(4000);
+  private boardOpen = false;
+  private dockTab: 'shops' | 'civic' = 'shops';
+  private sheetCollapsed = false;
+  private revealedFor = -1;
   private lastSync = 0;
   private builtFor = '';
   private inspKey = '';
@@ -140,6 +169,12 @@ export class Hud {
     this.ledger.hidden = true;
     this.ledgerOpen = false;
     this.victory.hidden = true;
+    this.leaveConfirm.reset();
+    this.boardOpen = false;
+    this.dockTab = 'shops';
+    this.sheetCollapsed = false;
+    this.revealedFor = -1;
+    this.clearRefusals();
     this.sync(0, true);
   }
 
@@ -148,19 +183,38 @@ export class Hud {
     this.victory.hidden = true;
     this.lotcard.hidden = true;
     this.speech.hidden = true;
+    this.leaveConfirm.reset();
+    this.clearRefusals();
   }
 
   get visible(): boolean {
     return !this.root.hidden;
   }
 
-  toast(text: string, good = false): void {
+  /** True while the Final Edition modal owns the screen. */
+  get victoryOpen(): boolean {
+    return !this.victory.hidden;
+  }
+
+  toast(text: string, tone: boolean | 'good' | 'bad' | 'info' = false): void {
+    const kind = tone === true ? 'good' : tone === false ? 'info' : tone;
     const el = document.createElement('div');
-    el.className = good ? 'toast good' : 'toast';
+    el.className = kind === 'info' ? 'toast' : `toast ${kind}`;
     el.textContent = text;
     this.toasts.appendChild(el);
     while (this.toasts.children.length > 3) this.toasts.firstElementChild?.remove();
     window.setTimeout(() => el.remove(), 2700);
+  }
+
+  /** A refusal ("Not enough cash…"). Only one is ever on screen: a new one replaces the old. */
+  refuse(text: string): void {
+    this.clearRefusals();
+    this.toast(text, 'bad');
+  }
+
+  /** The player's next action went through, so any standing refusal is stale: remove it now. */
+  clearRefusals(): void {
+    this.toasts.querySelectorAll('.toast.bad').forEach((el) => el.remove());
   }
 
   showBanner(title: string, sub: string): void {
@@ -201,8 +255,35 @@ export class Hud {
       if (act === 'pause') s().togglePause();
       else if (act === 'speed') s().setSpeed(Number(btn.dataset.v));
       else if (act === 'sound') this.host.audio.toggle();
-      else if (act === 'leave') this.host.leave();
-      else if (act === 'fit') this.host.renderer.fit();
+      else if (act === 'leave') {
+        // Leaving a live match throws the city away: it takes a second, deliberate click.
+        const live = this.host.ui.me >= 0 && !s().view.ended;
+        if (!live || this.leaveConfirm.click(performance.now())) {
+          this.leaveConfirm.reset();
+          this.host.leave();
+          return;
+        }
+      } else if (act === 'fit') this.host.refit();
+      if (act !== 'leave') this.leaveConfirm.reset();
+      this.sync(0, true);
+    });
+
+    this.board.addEventListener('click', (e) => {
+      // The header toggle everywhere; on a phone the whole strip is the toggle.
+      if (!(e.target as HTMLElement).closest('[data-act="breakdown"]') && !phone()) return;
+      this.host.audio.click();
+      this.boardOpen = !this.boardOpen;
+      this.sync(0, true);
+    });
+
+    this.docktabs.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-tab]');
+      if (!btn) return;
+      this.host.audio.click();
+      this.dockTab = btn.dataset.tab === 'civic' ? 'civic' : 'shops';
+      // A blueprint from the other tab would be armed but invisible: drop it.
+      const tool = this.host.ui.tool;
+      if (tool && isShop(tool) !== (this.dockTab === 'shops')) this.host.setTool(null);
       this.sync(0, true);
     });
 
@@ -236,6 +317,9 @@ export class Hud {
       switch (act) {
         case 'close':
           this.host.select(-1);
+          break;
+        case 'collapse':
+          this.sheetCollapsed = !this.sheetCollapsed;
           break;
         case 'stance':
           cmd({ c: 'price', id, stance: Number(btn.dataset.v) });
@@ -272,10 +356,14 @@ export class Hud {
       if (!btn) return;
       const act = btn.dataset.act as string;
       this.host.audio.click();
-      if (act === 'rematch') s().rematch();
-      else if (act === 'endless') s().endless();
-      else if (act === 'leave') this.host.leave();
-      if (act !== 'leave') this.victory.hidden = true;
+      if (act === 'rematch' || act === 'endless') {
+        // Nothing armed for the finished match may carry into the next one.
+        this.host.disarm();
+        if (act === 'rematch') s().rematch();
+        else s().endless();
+        this.victory.hidden = true;
+        this.sync(0, true);
+      } else if (act === 'leave') this.host.leave();
     });
   }
 
@@ -337,9 +425,10 @@ export class Hud {
         .map((v) => `<button data-act="speed" data-v="${v}" title="${v}× speed">${v}×</button>`)
         .join('')}</div>`;
     } else if (session.kind === 'multi') {
-      const dis = this.host.isHost() ? '' : 'disabled';
-      pace = `<div class="pace" title="${this.host.isHost() ? 'Room pace' : 'The host sets the pace'}">${[1, 1.5, 2]
-        .map((v) => `<button data-act="speed" data-v="${v}" ${dis}>${v}×</button>`)
+      const host = this.host.isHost();
+      const tip = host ? 'Room pace' : 'Host controls match speed';
+      pace = `<div class="pace" title="${tip}">${[1, 1.5, 2]
+        .map((v) => `<button data-act="speed" data-v="${v}" title="${host ? `${v}× speed for everyone` : tip}" aria-label="${v}× speed${host ? '' : ' — host controls match speed'}" ${host ? '' : 'disabled'}>${v}×</button>`)
         .join('')}</div>`;
     }
     this.clock.innerHTML = `<span class="wordmark">MERCADIA</span>
@@ -347,17 +436,21 @@ export class Hud {
       ${pace}
       <div class="tools">
         <button class="iconbtn" data-act="fit" title="Fit the district to the screen" aria-label="Fit view">${icon('fit')}</button>
-        <button class="iconbtn" data-act="sound" data-f="sound" title="Sound (M)" aria-label="Sound"></button>
-        <button class="iconbtn" data-act="leave" title="Leave the match" aria-label="Leave">${icon('leave')}</button>
+        <button class="iconbtn" data-act="sound" data-f="sound" title="${soundLabel(this.host.audio.muted)}" aria-label="${soundLabel(this.host.audio.muted)}" aria-pressed="${this.host.audio.muted}"></button>
+        <button class="iconbtn leave" data-act="leave" data-f="leave" title="Leave the match" aria-label="Leave the match">${icon('leave')}</button>
       </div>`;
     // Leaderboard.
-    this.board.innerHTML = `<h3>Crown Index</h3><div class="rows">${view.players
+    this.board.innerHTML = `<div class="bhead"><h3>Crown Index</h3>
+      <button class="bktoggle" data-act="breakdown" aria-expanded="false" title="Crown Index = Worth (net worth ÷ 10) + Share (market share % × 3) + Prestige (civic prestige × 4). Click to show each House's parts.">Worth + Share + Prestige</button></div>
+      <div class="rows">${view.players
       .map(
         (p, i) => `<div class="row${i === me ? ' me' : ''}" data-p="${i}">
           <i class="chip" style="background:${HOUSES[p.house].color}"></i>
           <span class="nm">${esc(i === me ? 'You' : p.name)}<small>${esc(HOUSES[p.house].short)}</small></span>
+          <span class="ini">${esc(initials(p.name, i === me))}</span>
           <span class="crown" data-f="crown"></span>
           <span class="sub"><span data-f="cash"></span><span data-f="share"></span></span>
+          <span class="parts" data-f="parts"></span>
         </div>`,
       )
       .join('')}</div>
@@ -369,17 +462,25 @@ export class Hud {
       <div class="line"><span>Net worth</span><b data-f="nw"></b></div>
       <div class="line"><span>Debt</span><b data-f="debt"></b></div>
       <div class="acts">
-        <button class="btn" data-act="borrow" title="Emergency Credit Line: borrow ${money(LOAN_STEP)} at interest">Borrow ${money(LOAN_STEP)}</button>
-        <button class="btn" data-act="repay" title="Repay up to ${money(LOAN_STEP)}">Repay</button>
+        <button class="btn" data-act="borrow" title="Emergency Credit Line: borrow ${money(LOAN_STEP)} (limit ${money(LOAN_MAX)}). Interest is ${(LOAN_RATE * 100).toFixed(1)}% of your debt at every payroll (10 s) — ${loanRateLabel(view.quarterTicks)}." aria-label="Borrow ${money(LOAN_STEP)} at ${loanRateLabel(view.quarterTicks)}">Borrow ${money(LOAN_STEP)}<small> · ${loanRateLabel(view.quarterTicks)}</small></button>
+        <button class="btn" data-act="repay" title="Repay up to ${money(LOAN_STEP)} of principal">Repay</button>
         <button class="btn" data-act="ledger" title="Ledger" aria-label="Ledger">${icon('ledger')}</button>
       </div>`;
     this.ledger.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center"><h3>Ledger</h3><button class="iconbtn" data-act="close" aria-label="Close ledger">${icon('close')}</button></div><div data-f="body"></div>`;
     // Dock.
     this.dock.hidden = !playing;
+    this.docktabs.hidden = !playing;
+    this.docktabs.innerHTML = `<div class="seg" role="tablist" aria-label="Build palette">
+        <button role="tab" data-tab="shops" aria-controls="dock">Shops (6)</button>
+        <button role="tab" data-tab="civic" aria-controls="dock">Civic (3)</button>
+      </div><span class="armhint" data-f="armhint"></span>`;
+    // Spectators get a persistent, high-contrast notice where the dock would be.
+    this.spectator.hidden = playing || session.kind !== 'multi';
+    this.spectator.textContent = SPECTATOR_TEXT;
     this.dock.innerHTML =
       BUILD_KINDS.map((k, i) => {
         const shop = isShop(k);
-        return `${i === 6 ? '<span class="sep"></span>' : ''}<button class="tool" data-kind="${k}" aria-label="${buildName(k)}, ${money(buildCost(k))}">
+        return `${i === 6 ? '<span class="sep"></span>' : ''}<button class="tool" data-kind="${k}" data-group="${shop ? 'shops' : 'civic'}" title="${esc(toolTooltip(k))}" aria-label="${buildName(k)}, ${money(buildCost(k))}">
           <span class="key">${i + 1}</span>${shop ? '<span class="want"><i></i><i></i><i></i></span>' : ''}
           ${icon(k)}<span class="nm">${buildName(k).replace('Pocket ', '').replace('Festival ', '')}</span><span class="cost">${money(buildCost(k))}</span>
         </button>`;
@@ -395,7 +496,20 @@ export class Hud {
     const part = Math.min(3, Math.floor(view.dayPhase * 4));
     setText(q('part'), view.ended ? 'Final bell' : DAYPART_NAMES[part]);
     setHtml(q('dial'), dial(view.dayPhase));
-    setHtml(q('sound'), icon(this.host.audio.muted ? 'mute' : 'sound'));
+    const muted = this.host.audio.muted;
+    const sound = q('sound');
+    setHtml(sound, icon(muted ? 'mute' : 'sound'));
+    setAttr(sound, 'aria-pressed', String(muted));
+    setAttr(sound, 'aria-label', soundLabel(muted));
+    setAttr(sound, 'title', soundLabel(muted));
+    // Leave: the first click arms it for four seconds, the second click leaves.
+    if (view.ended) this.leaveConfirm.reset();
+    const leave = q('leave');
+    const armed = this.leaveConfirm.armed(performance.now());
+    toggle(leave, 'armed', armed);
+    setHtml(leave, armed ? 'Leave?' : icon('leave'));
+    setAttr(leave, 'aria-label', armed ? 'Leave? Click again to abandon this match' : 'Leave the match');
+    setAttr(leave, 'title', armed ? 'Click again to leave — your city will be abandoned' : 'Leave the match');
     const speed = session.kind === 'multi' ? view.speed : session.speed;
     this.clock.querySelectorAll<HTMLElement>('[data-act="speed"]').forEach((b) => toggle(b, 'on', !session.paused && Number(b.dataset.v) === speed));
     toggle(this.clock.querySelector('[data-act="pause"]'), 'on', session.paused);
@@ -411,16 +525,16 @@ export class Hud {
       if (ev.started) {
         pct = 100 * (1 - (view.tick - ev.startAt) / Math.max(1, ev.endAt - ev.startAt));
         key = `L${ev.kind}${ev.startAt}`;
-        html = `<div class="tk-top"><span class="tk-label live">Live</span><span class="tk-title">${def.title}</span><span class="tk-effect">${def.effect}</span></div><div class="tk-line">${def.headline}</div>`;
+        html = `<div class="tk-top"><span class="tk-label live">Live</span><span class="tk-title">${def.title}</span><span class="tk-effect">${def.effect}</span></div><div class="tk-fx" title="What this event changes">${def.effect}</div><div class="tk-line">${def.headline}</div>`;
       } else {
         pct = 100 * ((view.tick - ev.announceAt) / Math.max(1, ev.startAt - ev.announceAt));
         key = `F${ev.kind}${ev.startAt}`;
-        html = `<div class="tk-top"><span class="tk-label">Forecast</span><span class="tk-title">${def.title}</span><span class="tk-effect">${def.effect}</span></div><div class="tk-line">${def.forecast}</div>`;
+        html = `<div class="tk-top"><span class="tk-label">Forecast</span><span class="tk-title">${def.title}</span><span class="tk-effect">${def.effect}</span></div><div class="tk-fx" title="What this event will change">${def.effect}</div><div class="tk-line">${def.forecast}</div>`;
       }
     } else {
       const last = view.gazette[view.gazette.length - 1];
       key = `G${last ? last.tick + last.text : ''}`;
-      html = `<div class="tk-top"><span class="tk-label">Mercadia Gazette</span></div><div class="tk-line" style="color:var(--ink);font-size:12.5px">${esc(last ? last.text : 'All quiet along the canal.')}</div>`;
+      html = `<div class="tk-top quiet"><span class="tk-label">Mercadia Gazette</span></div><div class="tk-line news${last && last.tone === 'rival' ? ' rival' : ''}">${esc(last ? last.text : 'All quiet along the canal.')}</div>`;
     }
     if (key !== this.tickerKey) {
       this.tickerKey = key;
@@ -438,14 +552,30 @@ export class Hud {
     view.players.forEach((p, i) => {
       const row = this.board.querySelector<HTMLElement>(`.row[data-p="${i}"]`);
       if (!row) return;
-      row.style.order = String(order.indexOf(i));
+      const rank = String(order.indexOf(i));
+      if (row.style.order !== rank) row.style.order = rank;
       setText(row.querySelector('[data-f="crown"]'), String(p.crown));
       setText(row.querySelector('[data-f="cash"]'), money(p.cash));
       setText(row.querySelector('[data-f="share"]'), total > 0 ? `${Math.round(p.share * 100)}% share` : '—');
+      // Worth + Share + Prestige = Crown, exactly.
+      const parts = crownParts(p);
+      setHtml(row.querySelector('[data-f="parts"]'), `<b>${parts.worth}</b> worth + <b>${parts.share}</b> share + <b>${parts.prestige}</b> prestige`);
+      setAttr(
+        row,
+        'title',
+        `${i === this.host.ui.me ? 'You' : p.name} — Crown ${parts.crown} = Worth ${parts.worth} (net worth ${money(p.netWorth)} ÷ 10) + Share ${parts.share} (${Math.round(p.share * 100)}% × 3) + Prestige ${parts.prestige} (${p.prestige.toFixed(1)} × 4)`,
+      );
+      // The share bar reads in the same order as the ranked strip above it.
       const seg = this.board.querySelector<HTMLElement>(`.bar i[data-s="${i}"]`);
-      if (seg) seg.style.width = `${total > 0 ? (p.share / total) * 100 : 100 / view.players.length}%`;
+      if (seg) {
+        seg.style.width = `${total > 0 ? (p.share / total) * 100 : 100 / view.players.length}%`;
+        if (seg.style.order !== rank) seg.style.order = rank;
+        setAttr(seg, 'title', `${i === this.host.ui.me ? 'You' : p.name}: ${Math.round(p.share * 100)}% of recent sales`);
+      }
       if (lead < 0 || p.share > view.players[lead].share) lead = i;
     });
+    toggle(this.board, 'open', this.boardOpen);
+    setAttr(this.board.querySelector('[data-act="breakdown"]'), 'aria-expanded', String(this.boardOpen));
     setText(this.board.querySelector('[data-f="lead"]'), total > 0 && lead >= 0 ? `${HOUSES[view.players[lead].house].short} leads` : 'No sales yet');
   }
 
@@ -486,6 +616,20 @@ export class Hud {
         btn.querySelectorAll('.want i').forEach((el, i) => toggle(el, 'on', i < level));
       }
     });
+    // Narrow screens: one tap between the six shops and the three civic projects.
+    const tool = this.host.ui.tool;
+    if (tool) this.dockTab = isShop(tool) ? 'shops' : 'civic';
+    if (this.dock.dataset.tab !== this.dockTab) this.dock.dataset.tab = this.dockTab;
+    this.docktabs.querySelectorAll<HTMLElement>('[data-tab]').forEach((el) => {
+      const on = el.dataset.tab === this.dockTab;
+      toggle(el, 'on', on);
+      setAttr(el, 'aria-selected', String(on));
+    });
+    setText(
+      this.docktabs.querySelector('[data-f="armhint"]'),
+      !tool ? (this.dockTab === 'civic' ? 'Parks, stops and plazas lift every shop around them' : 'Bars show unmet demand') : tool === 'tramstop' ? 'Tram Stop: place along the tramway avenue' : `${buildName(tool)}: tap a green lot`,
+    );
+    toggle(this.docktabs, 'armed', !!tool);
     this.renderHint();
   }
 
@@ -510,7 +654,7 @@ export class Hud {
     hint.hidden = false;
     const blurb = isShop(k) ? SHOPS[k].blurb : CIVICS[k].blurb;
     let extra = '';
-    if (this.host.ui.tool === k && !this.hintKind) extra = '<em>Click a green lot · Esc cancels</em>';
+    if (this.host.ui.tool === k) extra = k === 'tramstop' ? '<em>Place along the tramway avenue · Esc cancels</em>' : '<em>Click a green lot · Esc cancels</em>';
     else if (isShop(k)) {
       const di = DESIRES.indexOf(SHOPS[k].desire);
       const lvl = this.demandLevel(view, di, 1);
@@ -537,6 +681,8 @@ export class Hud {
     if (tile < 0) {
       if (!this.inspector.hidden) this.inspector.hidden = true;
       this.inspKey = '';
+      this.revealedFor = -1;
+      toggle(this.root, 'sheet', false);
       return;
     }
     const b = view.buildingAt(tile);
@@ -554,6 +700,10 @@ export class Hud {
       this.refs = {};
       this.inspector.querySelectorAll<HTMLElement>('[data-f]').forEach((el) => (this.refs[el.dataset.f as string] = el));
     }
+    toggle(this.inspector, 'collapsed', this.sheetCollapsed);
+    setAttr(this.refs.collapse, 'aria-expanded', String(!this.sheetCollapsed));
+    toggle(this.root, 'sheet', true);
+    this.reveal(tile);
     if (!b) {
       if (kindOfTile === 'lot') setHtml(this.refs.pips, pipsHtml(trafficPips(view, tile)));
       return;
@@ -561,11 +711,38 @@ export class Hud {
     const r = this.refs;
     if (!isShop(b.kind)) {
       setText(r.prestige, view.players[b.owner] ? view.players[b.owner].prestige.toFixed(1) : '0');
+      // Live impact: riders delivered by a Tram Stop, shops boosted by a Park or Plaza.
+      civicImpact(view, b).forEach((row, i) => setText(r[`impact${i}`], row.value));
       this.syncSell(b, mine);
       return;
     }
     const def = SHOPS[b.kind];
     const cap = queueCap(b);
+    // Why is this shop missing sales? One line, most urgent cause first.
+    const diag = shopDiagnosis(b, { daypart: Math.min(3, Math.floor(view.dayPhase * 4)), buildings: view.buildings });
+    if (r.diag) {
+      setText(r.diag, diag ? diag.text : '');
+      if (diag && r.diag.dataset.tone !== diag.tone) r.diag.dataset.tone = diag.tone;
+    }
+    // A forecast or running Gazette event that touches this trade.
+    if (r.evt) {
+      const ev = view.event;
+      const touch = ev ? eventTouches(ev.kind, b.kind) : null;
+      r.evt.hidden = !touch;
+      if (ev && touch) {
+        setText(r.evt, `${ev.started ? 'Live' : 'Forecast'} · ${EVENTS[ev.kind].title}: ${EVENTS[ev.kind].effect}`);
+        if (r.evt.dataset.tone !== touch) r.evt.dataset.tone = touch;
+      }
+    }
+    // Promo Blitz badge with a live countdown — on rival shops too, so a blitz is never a mystery.
+    if (r.promoBadge) {
+      const left = b.promoUntil - view.tick;
+      r.promoBadge.hidden = left <= 0;
+      if (left > 0) {
+        setText(r.promoTime, `${Math.ceil(left / 10)}s`);
+        (r.promoBar as HTMLElement).style.width = `${Math.max(0, Math.min(100, (left / PROMO_TICKS) * 100))}%`;
+      }
+    }
     setText(r.price, money(priceOf(b)));
     setText(r.queue, `${b.q}/${cap}`);
     toggle(r.queue, 'warn', b.q >= cap - 1 && b.q < cap);
@@ -607,13 +784,13 @@ export class Hud {
         setHtml(promo, `Blitz running · ${Math.ceil((b.promoUntil - view.tick) / 10)}s`);
         pm.hidden = false;
         toggle(pm, 'promo', true);
-        meter.style.width = `${((b.promoUntil - view.tick) / 200) * 100}%`;
+        meter.style.width = `${((b.promoUntil - view.tick) / PROMO_TICKS) * 100}%`;
       } else if (view.tick < b.promoReadyAt) {
         promo.disabled = true;
         setHtml(promo, `Promo ready in ${Math.ceil((b.promoReadyAt - view.tick) / 10)}s`);
         pm.hidden = false;
         toggle(pm, 'promo', false);
-        meter.style.width = `${(1 - (b.promoReadyAt - view.tick) / 400) * 100}%`;
+        meter.style.width = `${(1 - (b.promoReadyAt - view.tick) / PROMO_COOLDOWN) * 100}%`;
       } else {
         promo.disabled = cash < PROMO_COST || view.ended;
         setHtml(promo, `Promo Blitz · 20s<span class="cost">${money(PROMO_COST)}</span>`);
@@ -636,6 +813,25 @@ export class Hud {
     this.syncSell(b, mine);
   }
 
+  /**
+   * On a phone the Inspector is a bottom sheet. Once per selection, pan the camera so the
+   * selected block sits in the strip of city left visible between the score strip and the sheet.
+   */
+  private reveal(tile: number): void {
+    if (this.revealedFor === tile) return;
+    this.revealedFor = tile;
+    if (!narrow()) return;
+    const r = this.host.renderer;
+    const top = this.board.getBoundingClientRect().bottom + 8;
+    const bottom = this.inspector.getBoundingClientRect().top - 8;
+    if (bottom - top < 60) return;
+    const p = r.tileToScreen(tx(tile) + 0.5, ty(tile) + 0.5, 12);
+    const wantY = top + (bottom - top) * 0.58;
+    const dx = p.x < 40 || p.x > r.width - 40 ? r.width / 2 - p.x : 0;
+    const dy = p.y < top + 44 || p.y > bottom - 14 ? wantY - p.y : 0;
+    if (dx || dy) r.pan(dx, dy);
+  }
+
   private syncSell(b: BuildingView, mine: boolean): void {
     const sell = this.refs.sell as HTMLButtonElement | undefined;
     if (!sell || !mine) return;
@@ -645,7 +841,7 @@ export class Hud {
   }
 
   private inspectorHtml(view: CityView, tile: number, b: BuildingView | undefined, mine: boolean): string {
-    const close = `<button class="iconbtn" data-act="close" aria-label="Close">${icon('close')}</button>`;
+    const close = `<button class="iconbtn sheetbtn" data-act="collapse" data-f="collapse" aria-label="Collapse or expand details" title="Collapse or expand details" aria-expanded="true">${icon('chevron')}</button><button class="iconbtn" data-act="close" aria-label="Close" title="Close (Esc)">${icon('close')}</button>`;
     const kind = CITY.tiles[tile];
     if (!b) {
       if (kind === 'lot') {
@@ -676,9 +872,13 @@ export class Hud {
     const tags = this.bonusTags(view, tile);
     if (!isShop(b.kind)) {
       const def = CIVICS[b.kind];
-      return `${head}${tags}<p>${def.blurb}</p>
+      const impact = civicImpact(view, b)
+        .map((row, i) => `<div class="impact"><label>${row.label}</label><b data-f="impact${i}">${row.value}</b></div>`)
+        .join('');
+      return `${head}${tags}<div class="impacts">${impact}</div>
+        <div class="more"><p>${def.blurb}</p>
         <div class="stats"><div><label>Upkeep</label><b>${money(def.rent * 6)}/m</b></div><div><label>Prestige</label><b data-f="prestige"></b></div><div><label>Built</label><b>${money(b.invested)}</b></div></div>
-        ${mine ? `<button class="btn wide danger" data-act="sell" data-f="sell"></button>` : ''}`;
+        ${mine ? `<button class="btn wide danger" data-act="sell" data-f="sell"></button>` : ''}</div>`;
     }
     const def = SHOPS[b.kind];
     const stats = `<div class="stats">
@@ -692,14 +892,16 @@ export class Hud {
       <div><label>Turned away</label><b data-f="turned"></b></div>
       <div><label>${mine ? 'Serves' : 'Stance'}</label><b ${mine ? '' : 'data-f="stance"'} style="font-size:11px">${mine ? def.desire : ''}</b></div>
     </div>`;
-    if (!mine) return `${head}${tags}${stats}<p>${def.blurb}</p>`;
-    return `${head}${tags}${stats}
+    const promoBadge = `<div class="promobadge" data-f="promoBadge" hidden><span>Promo Blitz</span><b data-f="promoTime"></b><i><u data-f="promoBar"></u></i></div>`;
+    const diag = `<div class="diag" data-f="diag" role="status"></div><div class="evt" data-f="evt" hidden></div>`;
+    if (!mine) return `${head}${promoBadge}${diag}${tags}${stats}<div class="more"><p>${def.blurb}</p></div>`;
+    return `${head}${promoBadge}${diag}${tags}${stats}<div class="more">
       <div class="grp"><h4>Price stance</h4><div class="seg">${STANCES.map((s, i) => `<button data-act="stance" data-v="${i}" title="${s.name} ${s.label}">${s.name}<small>${s.label}</small></button>`).join('')}</div></div>
       <div class="grp"><button class="btn wide" data-act="upgrade" data-f="upgrade"></button></div>
       <div class="grp"><button class="btn wide" data-act="promo" data-f="promo"></button><div class="meter" data-f="promoMeter" style="margin-top:4px" hidden><i></i></div></div>
       <div class="grp"><h4>Stockroom</h4><div class="meter" data-f="stockMeter"><i></i></div>
         <div class="rowline"><button class="btn" data-act="restock" data-f="restock"></button><button class="switch" data-act="auto" data-f="auto" title="Auto-Restock buys at a 15% premium when stock runs low"><i></i>Auto</button></div></div>
-      <div class="grp"><button class="btn wide danger" data-act="sell" data-f="sell"></button></div>`;
+      <div class="grp"><button class="btn wide danger" data-act="sell" data-f="sell"></button></div></div>`;
   }
 
   // ───────────────────────────── Ledger ─────────────────────────────
@@ -712,17 +914,25 @@ export class Hud {
       if (n === 0) return '<td class="zero">—</td>';
       return `<td class="${sign < 0 ? 'neg' : ''}">${sign < 0 ? '−' : ''}${Math.abs(n).toLocaleString('en-US')}</td>`;
     };
-    const net = (l: Ledger): string => {
-      const n = Math.round(ledgerNet(l));
+    const signed = (v: number): string => {
+      const n = Math.round(v);
       return `<td class="${n < 0 ? 'neg' : n > 0 ? 'pos' : 'zero'}">${n < 0 ? '−' : ''}${Math.abs(n).toLocaleString('en-US')}</td>`;
     };
+    const net = (l: Ledger): string => signed(ledgerNet(l));
+    const change = (l: Ledger): string => signed(ledgerCashChange(l));
+    const me = view.players[this.host.ui.me];
     const rows = LEDGER_ROWS.map(
       ([k, label, sign], i) => `<tr class="${i === 3 || i === 8 ? 'sep' : ''}"><td>${label}</td>${cell(lg.cur[k], sign)}${cell(lg.last[k], sign)}${cell(lg.total[k], sign)}</tr>`,
     ).join('');
     setHtml(
       this.ledger.querySelector('[data-f="body"]'),
       `<table><thead><tr><th></th><th>This Q</th><th>Last Q</th><th>Match</th></tr></thead><tbody>${rows}
-       <tr class="net"><td>Net cashflow</td>${net(lg.cur)}${net(lg.last)}${net(lg.total)}</tr></tbody></table>`,
+       <tr class="net"><td>Net cashflow</td>${net(lg.cur)}${net(lg.last)}${net(lg.total)}</tr>
+       <tr class="fin"><td colspan="4">Financing</td></tr>
+       <tr><td>Loan draws</td>${cell(lg.cur.borrowed, 1)}${cell(lg.last.borrowed, 1)}${cell(lg.total.borrowed, 1)}</tr>
+       <tr><td>Loan repayments</td>${cell(lg.cur.repaid, -1)}${cell(lg.last.repaid, -1)}${cell(lg.total.repaid, -1)}</tr>
+       <tr class="net"><td>Change in cash</td>${change(lg.cur)}${change(lg.last)}${change(lg.total)}</tr></tbody></table>
+       <p class="recon">Opening ${money(START_CASH)} + match change = <b>${money(START_CASH + ledgerCashChange(lg.total))}</b> in hand${me && me.debt > 0 ? ` · ${money(me.debt)} owed at ${loanRateLabel(view.quarterTicks)}` : ''}</p>`,
     );
   }
 
@@ -738,17 +948,33 @@ export class Hud {
     const stamp = view.seed * 100 + view.quarter;
     if (this.victoryFor === stamp) return;
     this.victoryFor = stamp;
-    const res = view.result;
+    this.victory.innerHTML = this.editionHtml(session, view.result);
+    this.victory.hidden = false;
+    // Focus the page itself, never a button: a stray Space or Enter must not start a rematch.
+    this.victory.querySelector<HTMLElement>('.victory')?.focus({ preventScroll: true });
+    this.host.audio.award();
+  }
+
+  /** The Mercadia Gazette — Final Edition: the victory summary laid out as a front page. */
+  private editionHtml(session: Session, res: MatchResult): string {
+    const view = session.view;
     const me = this.host.ui.me;
+    const who = (id: number): string => esc(id === me ? 'You' : (view.players[id]?.name ?? ''));
     const win = view.players[res.winner];
     const house = HOUSES[win.house];
-    const rows = res.rows
-      .slice()
-      .sort((a, b) => b.crown - a.crown)
-      .map((r) => {
+    const ranked = res.rows.slice().sort((a, b) => b.crown - a.crown || a.player - b.player);
+    const top = crownParts(ranked[0]);
+    const rows = ranked
+      .map((r, i) => {
         const p = view.players[r.player];
-        return `<tr class="${r.player === res.winner ? 'win' : ''}"><td><i style="background:${HOUSES[p.house].color}"></i>${esc(r.player === me ? 'You' : p.name)}<small>${p.kind === 'ai' && p.persona ? AI_PERSONAS[p.persona].title : HOUSES[p.house].short}</small></td>
-          <td>${r.crown}</td><td>${money(r.netWorth)}</td><td>${Math.round(r.share * 100)}%</td><td>${Math.round(r.prestige)}</td><td>${money(r.revenue)}</td><td>${r.served}</td><td>${r.shops}+${r.civic}</td></tr>`;
+        const parts = crownParts(r);
+        return `<tr class="${r.player === res.winner ? 'win' : ''}${r.player === me ? ' me' : ''}">
+          <td><span class="rk">${i + 1}</span><i style="background:${HOUSES[p.house].color}"></i>${who(r.player)}<small>${p.kind === 'ai' && p.persona ? AI_PERSONAS[p.persona].title : HOUSES[p.house].short}</small>
+            <em>${money(r.revenue)} revenue · ${r.served} served · ${r.shops} shop${r.shops === 1 ? '' : 's'} + ${r.civic} civic</em></td>
+          <td title="Net worth ${money(r.netWorth)} ÷ 10">${parts.worth}<small>${money(r.netWorth)}</small></td>
+          <td title="Market share ${Math.round(r.share * 100)}% × 3">${parts.share}<small>${Math.round(r.share * 100)}%</small></td>
+          <td title="Civic Prestige ${r.prestige} × 4">${parts.prestige}<small>${Math.round(r.prestige)} pts</small></td>
+          <td class="total">${parts.crown}</td></tr>`;
       })
       .join('');
     const awardIcon: Record<string, string> = { corner: 'corner', shark: 'shark', patron: 'patron' };
@@ -758,24 +984,124 @@ export class Hud {
         const title = k === 'corner' ? 'Corner King' : k === 'shark' ? 'Price Shark' : 'Civic Patron';
         if (!a) return `<div class="award"><div class="a-title">${icon(awardIcon[k])}${title}</div><div class="a-detail">Unclaimed this match</div></div>`;
         const p = view.players[a.player];
-        return `<div class="award"><div class="a-title">${icon(awardIcon[k])}${title}</div><div class="a-who"><i style="background:${HOUSES[p.house].color}"></i>${esc(a.player === me ? 'You' : p.name)}</div><div class="a-detail">${esc(a.detail)}</div></div>`;
+        return `<div class="award"><div class="a-title">${icon(awardIcon[k])}${title}</div><div class="a-who"><i style="background:${HOUSES[p.house].color}"></i>${who(a.player)}</div><div class="a-detail">${esc(a.detail)}</div></div>`;
       })
       .join('');
     const canDecide = session.kind === 'solo' || this.host.isHost();
     const headline = res.winner === me ? 'The district is yours.' : `${house.name} takes the district.`;
-    this.victory.innerHTML = `<div class="victory" role="dialog" aria-label="Match summary">
-      <div class="top">${trophy(house.color)}<div><div class="kicker">Final bell · ${MODES[view.mode].name}</div><h2>${headline}</h2>
-      <div class="lead">${esc(res.winner === me ? 'You' : win.name)} closed on a Crown Index of <b class="mono">${res.rows[res.winner].crown}</b>.</div></div></div>
-      <table><thead><tr><th>House</th><th>Crown</th><th>Net worth</th><th>Share</th><th>Prestige</th><th>Revenue</th><th>Served</th><th>Built</th></tr></thead><tbody>${rows}</tbody></table>
+    const quarters = view.endless ? `Quarter ${view.quarter}` : `${view.totalQuarters} quarters`;
+    return `<div class="victory edition" role="dialog" aria-modal="true" aria-label="Mercadia Gazette, Final Edition: match summary" tabindex="-1">
+      <header class="masthead">
+        <span class="m-side">Final Edition</span>
+        <span class="m-name">The Mercadia Gazette</span>
+        <span class="m-side r">${MODES[view.mode].name} · ${quarters}</span>
+      </header>
+      <div class="front">
+        ${crest(house.color, house.dark, house.light, house.short.charAt(0))}
+        <div class="story">
+          <div class="kicker">Closing bell · ${esc(house.name)}</div>
+          <h2>${headline}</h2>
+          ${res.highlight ? `<p class="highlight">${esc(res.highlight)}</p>` : ''}
+          <div class="equation" aria-label="Winning Crown Index breakdown">
+            <span><b>${top.worth}</b><small>Worth</small></span><i>+</i>
+            <span><b>${top.share}</b><small>Share</small></span><i>+</i>
+            <span><b>${top.prestige}</b><small>Prestige</small></span><i>=</i>
+            <span class="sum"><b>${top.crown}</b><small>Crown</small></span>
+          </div>
+        </div>
+      </div>
+      <div class="cols">
+        <section class="standings">
+          <h3>Crown Index · Worth + Share + Prestige</h3>
+          <table><thead><tr><th>House</th><th title="Net worth ÷ 10">Worth</th><th title="Market share % × 3">Share</th><th title="Civic Prestige × 4">Prestige</th><th>Crown</th></tr></thead><tbody>${rows}</tbody></table>
+        </section>
+        <section class="trend">
+          <h3>Market share, quarter by quarter</h3>
+          ${this.sparkline(view, res, me)}
+        </section>
+      </div>
+      <h3 class="sect">Honours</h3>
       <div class="awards">${awards}</div>
       <div class="acts">
-        <button class="btn primary big" data-act="rematch" ${canDecide ? '' : 'disabled'}>Rematch</button>
-        <button class="btn big" data-act="endless" ${canDecide ? '' : 'disabled'}>Continue in Endless</button>
-        <button class="btn big" data-act="leave">Leave</button>
+        <button class="btn primary big" data-act="rematch" ${canDecide ? '' : 'disabled'} title="A fresh district, same Houses">Rematch</button>
+        <button class="btn big strong" data-act="endless" ${canDecide ? '' : 'disabled'} title="Keep this city running with no final bell">Continue in Endless</button>
+        <button class="btn big quiet" data-act="leave">Leave</button>
         ${canDecide ? '' : '<div class="note">The host decides what happens next.</div>'}
       </div></div>`;
-    this.victory.hidden = false;
-    this.host.audio.award();
+  }
+
+  /**
+   * Inline SVG: each House's market share through the match, one sample per daypart, with a
+   * hairline at every quarter's close. Lines carry the House colour; labels stay in ink.
+   */
+  private sparkline(view: CityView, res: MatchResult, me: number): string {
+    const samples = res.trend?.samples ?? [];
+    const per = Math.max(1, res.trend?.perQuarter ?? 4);
+    const n = samples.length;
+    if (n < 2) return '<p class="nodata">Too short a match to chart.</p>';
+    const W = 270;
+    const H = 150;
+    const L = 26;
+    const R = 60;
+    const T = 10;
+    const B = 22;
+    const pw = W - L - R;
+    const ph = H - T - B;
+    let max = 0;
+    for (const row of samples) for (const v of row) max = Math.max(max, v);
+    const top = Math.max(400, Math.ceil(max / 100) * 100); // share ×1000, rounded up to 10%
+    const X = (i: number): number => L + (pw * i) / (n - 1);
+    const Y = (v: number): number => T + ph * (1 - v / top);
+    const f = (v: number): string => v.toFixed(1);
+    // Quarter gridlines and labels.
+    const q0 = Math.max(0, view.quarter - Math.ceil(n / per));
+    const quarters = Math.ceil(n / per);
+    const every = Math.max(1, Math.ceil(quarters / 8));
+    let grid = '';
+    for (let q = 1; q <= quarters; q++) {
+      const end = Math.min(n - 1, q * per - 1);
+      const start = (q - 1) * per - 1; // the previous quarter's closing sample
+      const x0 = start < 0 ? L : X(start);
+      const x1 = X(end);
+      if (q < quarters) grid += `<line x1="${f(x1)}" y1="${T}" x2="${f(x1)}" y2="${T + ph}" class="g"/>`;
+      if ((q - 1) % every === 0) grid += `<text x="${f((x0 + x1) / 2)}" y="${H - 6}" text-anchor="middle" class="ax">Q${q0 + q}</text>`;
+      const shares = view.players.map((p, i) => `${i === me ? 'You' : p.name} ${Math.round((samples[end][i] ?? 0) / 10)}%`).join(' · ');
+      grid += `<rect x="${f(x0)}" y="${T}" width="${f(Math.max(1, x1 - x0))}" height="${ph}" class="hit"><title>End of Q${q0 + q}: ${esc(shares)}</title></rect>`;
+    }
+    const half = Math.round(top / 2);
+    const yaxis = [0, half, top]
+      .map((v) => `<line x1="${L}" y1="${f(Y(v))}" x2="${L + pw}" y2="${f(Y(v))}" class="${v === 0 ? 'base' : 'g'}"/><text x="${L - 5}" y="${f(Y(v) + 3)}" text-anchor="end" class="ax">${Math.round(v / 10)}%</text>`)
+      .join('');
+    // Lines, drawn so the winner sits on top.
+    const order = view.players.map((p) => p.id).sort((a, b) => (a === res.winner ? 1 : 0) - (b === res.winner ? 1 : 0));
+    const lines = order
+      .map((id) => {
+        const p = view.players[id];
+        const pts = samples.map((row, i) => `${f(X(i))},${f(Y(row[id] ?? 0))}`).join(' ');
+        return `<polyline points="${pts}" fill="none" stroke="${HOUSES[p.house].color}" stroke-width="${id === res.winner ? 2.4 : 2}" stroke-linejoin="round" stroke-linecap="round"><title>${id === me ? 'You' : esc(p.name)} — market share</title></polyline>`;
+      })
+      .join('');
+    // End dots with a surface ring, and direct labels nudged apart so they never collide.
+    const last = samples[n - 1];
+    const ends = view.players.map((p) => ({ id: p.id, y: Y(last[p.id] ?? 0), v: last[p.id] ?? 0 })).sort((a, b) => a.y - b.y);
+    const labelY = ends.map((e) => e.y);
+    for (let i = 1; i < labelY.length; i++) labelY[i] = Math.max(labelY[i], labelY[i - 1] + 12);
+    const overflow = labelY.length ? labelY[labelY.length - 1] - (T + ph + 4) : 0;
+    if (overflow > 0) for (let i = 0; i < labelY.length; i++) labelY[i] -= overflow;
+    for (let i = labelY.length - 2; i >= 0; i--) labelY[i] = Math.min(labelY[i], labelY[i + 1] - 12);
+    const dots = ends
+      .map((e, i) => {
+        const p = view.players[e.id];
+        const name = initials(p.name, e.id === me);
+        return `<circle cx="${f(X(n - 1))}" cy="${f(e.y)}" r="4" fill="${HOUSES[p.house].color}" stroke="#FAF7F0" stroke-width="2"><title>${e.id === me ? 'You' : esc(p.name)}: ${Math.round(e.v / 10)}% at the final bell</title></circle>
+          <text x="${f(X(n - 1) + 9)}" y="${f(labelY[i] + 3.5)}" class="lb${e.id === res.winner ? ' w' : ''}">${esc(name)} ${Math.round(e.v / 10)}%</text>`;
+      })
+      .join('');
+    const legend = view.players
+      .map((p, i) => `<span><i style="background:${HOUSES[p.house].color}"></i>${i === me ? 'You' : esc(p.name)}</span>`)
+      .join('');
+    return `<svg class="spark" viewBox="0 0 ${W} ${H}" role="img" aria-label="Market share by quarter for each House">${yaxis}${grid}${lines}${dots}</svg>
+      <div class="legend">${legend}</div>`;
   }
 
   // ───────────────────────────── Per-frame cards ─────────────────────────────
@@ -800,20 +1126,25 @@ export class Hud {
       if (bon.transit) perks.push(ui.tool === 'arcade' ? '+30% pull' : '+10% pull');
       if (bon.parks) perks.push(`park +${bon.parks * 20}%`);
       if (bon.plaza) perks.push('plaza +30%');
+      const badges = lotSynergy(view, hov, ui.tool, ui.me)
+        .filter((bd) => !illegal || bd.tone === 'minus')
+        .map((bd) => `<span class="syn ${bd.tone}">${esc(bd.text)}</span>`)
+        .join('');
       const verdict = illegal
-        ? '<span class="why">A Tram Stop must touch the avenue</span>'
+        ? '<span class="why">Inland lot — a Tram Stop must touch the avenue</span>'
         : me.cash < cost
           ? `<span class="why">Needs ${money(cost - me.cash)} more</span>`
-          : `<span class="ok">${money(cost)} · click to build</span>`;
+          : `<span class="ok">${money(cost)} · ${ui.touch ? 'tap again' : 'click'} to build</span>`;
       setHtml(
         this.lotcard,
         `<b>${names.length ? names.join(' · ') : 'Mid-block'} lot</b>
          <div class="traffic">Foot traffic ${pipsHtml(trafficPips(view, hov))}</div>
-         ${perks.length ? `<div style="color:var(--ink-2)">${perks.join(' · ')}</div>` : ''}<div>${verdict}</div>`,
+         ${perks.length && !illegal ? `<div style="color:var(--ink-2)">${perks.join(' · ')}</div>` : ''}
+         ${badges ? `<div class="syns">${badges}</div>` : ''}<div>${verdict}</div>`,
       );
       const p = r.tileToScreen(tx(hov) + 0.5, ty(hov) + 0.5, 34);
       this.lotcard.style.left = `${Math.round(clampN(p.x, 90, r.width - 90))}px`;
-      this.lotcard.style.top = `${Math.round(Math.max(96, p.y))}px`;
+      this.lotcard.style.top = `${Math.round(Math.max(phone() ? 250 : 130, p.y))}px`;
       this.lotcard.hidden = false;
     } else if (!this.lotcard.hidden) this.lotcard.hidden = true;
     // Speech card.
@@ -821,9 +1152,15 @@ export class Hud {
     if (c) {
       setHtml(this.speech, this.speechHtml(view, c));
       const p = r.citizenScreen(c, alpha);
-      this.speech.style.left = `${Math.round(clampN(p.x, 110, r.width - 110))}px`;
-      this.speech.style.top = `${Math.round(Math.max(150, p.y))}px`;
       this.speech.hidden = false;
+      // Never let the card ride up into the clock, ticker or score strip: when there is no
+      // room above the citizen, it docks below them instead.
+      const safeTop = (phone() ? this.board.getBoundingClientRect().bottom : this.clock.getBoundingClientRect().bottom) + 6;
+      const h = this.speech.offsetHeight || 120;
+      const below = p.y - h < safeTop;
+      toggle(this.speech, 'below', below);
+      this.speech.style.left = `${Math.round(clampN(p.x, 122, r.width - 122))}px`;
+      this.speech.style.top = `${Math.round(below ? Math.max(safeTop, p.y + 20 * r.cam.zoom + 8) : p.y)}px`;
     } else if (!this.speech.hidden) {
       this.speech.hidden = true;
       if (ui.selectedCitizen >= 0) ui.selectedCitizen = -1; // they went home
@@ -958,7 +1295,18 @@ export class TitleScreen {
         <div class="err" role="alert"></div>
       </div>
       <div class="foot"><span>Drag to pan · scroll to zoom · click anyone</span>
-        <button class="iconbtn" data-act="sound" title="Sound" aria-label="Sound">${icon(this.host.audio.muted ? 'mute' : 'sound')}</button></div>`;
+        <button class="iconbtn" data-act="sound" title="${soundLabel(this.host.audio.muted)}" aria-label="${soundLabel(this.host.audio.muted)}" aria-pressed="${this.host.audio.muted}">${icon(this.host.audio.muted ? 'mute' : 'sound')}</button></div>`;
+  }
+
+  /** Reflect a mute toggled elsewhere (the M key) without re-rendering the form. */
+  syncSound(): void {
+    const btn = this.el.querySelector<HTMLElement>('[data-act="sound"]');
+    if (!btn) return;
+    const muted = this.host.audio.muted;
+    btn.innerHTML = icon(muted ? 'mute' : 'sound');
+    btn.setAttribute('aria-pressed', String(muted));
+    btn.setAttribute('aria-label', soundLabel(muted));
+    btn.setAttribute('title', soundLabel(muted));
   }
 
   private async onClick(e: Event): Promise<void> {
@@ -975,7 +1323,7 @@ export class TitleScreen {
       this.render();
     } else if (act === 'sound') {
       this.host.audio.toggle();
-      this.render();
+      this.syncSound();
     } else if (act === 'solo') {
       this.host.playSolo(this.rivals, this.mode, this.name());
     } else if (act === 'create') {
@@ -1102,6 +1450,16 @@ export class LobbyScreen {
       .join('');
     const participants = lobby.seats.filter((s) => s.kind !== 'open').length;
     const humans = lobby.seats.filter((s) => s.kind === 'human').length;
+    const aiSeats = lobby.seats.filter((s) => s.kind === 'ai').length;
+    const openSeats = lobby.seats.filter((s) => s.kind === 'open').length;
+    const pvp = aiSeats === 0;
+    // One click between a table padded with AI rivals and a pure human duel.
+    const pvpBtn = host
+      ? `<button class="btn pvp${pvp ? ' on' : ''}" data-act="pvp" data-v="${pvp ? '1' : '0'}" aria-pressed="${pvp}" ${pvp && openSeats === 0 ? 'disabled' : ''}
+           title="${pvp ? 'Put Vesper, Aurelia and Orson back in the empty seats' : 'Clear every AI seat: only invited humans play (1v1 up to 4 players)'}">${pvp ? (openSeats ? 'Pure PvP on · Add AI rivals' : 'Pure PvP · table full') : 'No AI (Pure PvP)'}</button>`
+      : pvp
+        ? '<span class="badge">Pure PvP</span>'
+        : '';
     const modes: [MatchMode, string, string][] = [['blitz', 'Blitz', '2 quarters'], ['standard', 'Standard', '4 quarters'], ['endless', 'Endless', 'sandbox']];
     const copied = performance.now() < this.copied;
     this.el.innerHTML = `
@@ -1110,6 +1468,7 @@ export class LobbyScreen {
         <button class="btn" data-act="copy">${icon(copied ? 'check' : 'copy')}${copied ? 'Link copied' : 'Copy Invite Link'}</button></div>
       <p class="sub">${humans} of 4 players here. Share the link or the code; friends can join until the match starts.</p>
       <div class="seats">${seats}</div>
+      ${pvpBtn ? `<div class="pvprow">${pvpBtn}<span>${pvp ? `${humans} human${humans === 1 ? '' : 's'}, no AI` : `${aiSeats} AI rival${aiSeats === 1 ? '' : 's'} will fill in`}</span></div>` : ''}
       <div class="opts"><label>Length</label><div class="seg">${modes
         .map(([v, label, small]) => `<button data-act="mode" data-v="${v}" class="${v === lobby.mode ? 'on' : ''}" ${host ? '' : 'disabled'}>${label}<small>${small}</small></button>`)
         .join('')}</div></div>
@@ -1117,7 +1476,7 @@ export class LobbyScreen {
         ${host ? `<button class="btn primary big" data-act="start" ${participants < 2 ? 'disabled' : ''}>Start Match</button>` : '<button class="btn primary big" disabled>Waiting for the host</button>'}
         <button class="btn big" data-act="leave">Leave</button>
       </div>
-      <div class="err status" role="status" style="margin-top:6px;color:var(--ink-2);font-weight:500">${esc(this.status || (host && participants < 2 ? 'Add an AI rival or invite a player to start.' : ''))}</div>`;
+      <div class="err status" role="status" style="margin-top:6px;color:var(--ink-2);font-weight:500">${esc(this.status || (host && participants < 2 ? (pvp ? 'Pure PvP needs a second player: share the link.' : 'Add an AI rival or invite a player to start.') : ''))}</div>`;
     if (typing) {
       const input = this.el.querySelector<HTMLInputElement>('#l-name');
       if (input) {
@@ -1158,6 +1517,10 @@ export class LobbyScreen {
         break;
       case 'mode':
         this.host.send({ t: 'mode', mode: btn.dataset.v as MatchMode });
+        break;
+      case 'pvp':
+        // data-v is the current state: "1" means Pure PvP is on, so the click brings AI back.
+        this.host.send({ t: 'aifill', on: btn.dataset.v === '1' });
         break;
       case 'start':
         this.host.send({ t: 'start' });

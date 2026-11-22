@@ -270,8 +270,9 @@ describe('Cashflow: payroll, rent and credit', () => {
     expect(applyCommand(s, 0, { c: 'borrow' }).ok).toBe(false);
     expect(p.debt).toBe(LOAN_MAX);
     expect(p.cash).toBe(100 + LOAN_MAX);
-    // Borrowing is not income: nothing is booked and net worth does not move.
-    expect(p.ledger).toEqual(emptyLedger());
+    // Borrowing is not income: it is booked as financing only, and net worth does not move.
+    expect(p.ledger).toEqual({ ...emptyLedger(), borrowed: LOAN_MAX });
+    expect(ledgerNet(p.ledger)).toBe(0);
     expect(netWorth(s, p)).toBe(100);
     // Interest at the payroll.
     run(s, PAYROLL_TICKS);
@@ -644,10 +645,11 @@ describe('Cashflow: ledger and net worth', () => {
     const l: Ledger = {
       revenue: 1000, salvage: 200, awards: 50,
       wages: 1, supplies: 2, rent: 4, interest: 8, construction: 16, civic: 32, marketing: 64,
+      borrowed: 400, repaid: 150, // financing is not cashflow from trading
     };
     expect(ledgerNet(l)).toBe(1250 - 127);
     for (const key of Object.keys(l) as (keyof Ledger)[]) {
-      const sign = key === 'revenue' || key === 'salvage' || key === 'awards' ? 1 : -1;
+      const sign = key === 'borrowed' || key === 'repaid' ? 0 : key === 'revenue' || key === 'salvage' || key === 'awards' ? 1 : -1;
       expect(ledgerNet({ ...emptyLedger(), [key]: 10 })).toBe(10 * sign);
     }
   });

@@ -36,8 +36,8 @@ and `/ws` to the Worker on 8787, so run `npm run dev` beside it.
 
 ```bash
 npm test          # Vitest: 162 tests across map, citizens, cashflow, events, AI, match, room, protocol
-npm run smoke     # Playwright: API, a solo match, and two browsers in one room (needs npm run dev)
-npm run balance   # headless AI-only matches; prints the economy per persona (npx tsx)
+npm run smoke     # Playwright: API, solo, a 390×844 phone, and browsers sharing one room (needs npm run dev)
+npm run balance   # headless seeded matches; `npm run balance -- 12 all` adds Blitz and the 2-human Blitz probe
 ```
 
 `npm run smoke` drives a local Chrome through `playwright-core`. Set `CHROME=/path/to/chrome`

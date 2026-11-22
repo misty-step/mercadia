@@ -3,6 +3,7 @@
 import { CIVICS, DAY_DEMAND, DESIRES, LOAN_MAX, LOAN_RATE, LOAN_STEP, PAYROLL_TICKS, PROMO_COST, PROMO_TICKS, SHOPS, SHOP_KINDS, buildCost, isShop } from './constants';
 import { CITY, chebyshev, manhattan } from './map';
 import {
+  REV_DECAY,
   applyCommand,
   buildingAt,
   daypart,
@@ -49,18 +50,56 @@ export const TEMPERAMENTS: Record<AiPersona, Temperament> = {
     reserve: 40,
     minReturn: 0.36,
     think: 13,
-    kinds: { roastery: 1.15, bistro: 1.0, arcade: 1.4, boutique: 0.75, cinema: 1.1, nightmarket: 1.1 },
+    kinds: { roastery: 0.95, bistro: 1.0, arcade: 1.4, boutique: 0.75, cinema: 1.1, nightmarket: 1.1 },
     lot: { corner: 0.3, canal: 0.1, transit: 1.3, aura: 0.5, traffic: 0.4, cluster: 0.6 },
   },
 };
+
+/**
+ * Blitz is two short quarters, so a head start decides it. In Blitz the tycoons take a breath
+ * before their first move and think a little slower through the first morning, which leaves
+ * human players room to contest first place from Quarter 1.
+ */
+export const BLITZ_OPENING = { firstMove: 90, stagger: 30, slowUntil: 450, slowdown: 2 };
+
+/** Earliest tick at which the n-th AI seat may act. */
+export function openingDelay(s: Pick<GameState, 'mode' | 'players'>, playerId: number): number {
+  if (s.mode !== 'blitz') return 0;
+  let nth = 0;
+  for (const q of s.players) {
+    if (q.id === playerId) break;
+    if (q.kind === 'ai') nth++;
+  }
+  return BLITZ_OPENING.firstMove + nth * BLITZ_OPENING.stagger;
+}
+
+/** Ticks between this persona's decisions right now. */
+export function thinkInterval(s: Pick<GameState, 'mode' | 'tick'>, persona: AiPersona): number {
+  const base = TEMPERAMENTS[persona].think;
+  return s.mode === 'blitz' && s.tick < BLITZ_OPENING.slowUntil ? Math.round(base * BLITZ_OPENING.slowdown) : base;
+}
+
+/** How far a tycoon trails the district's most prestigious House. */
+export function prestigeGap(s: Pick<GameState, 'players'>, p: Pick<Player, 'id' | 'prestige'>): number {
+  let lead = 0;
+  for (const q of s.players) if (q.id !== p.id) lead = Math.max(lead, q.prestige);
+  return lead - p.prestige;
+}
+
+/** Vesper turns civic when the prestige race is being lost: from Quarter 3, trailing by this much. */
+export const VESPER_CIVIC = { fromQuarter: 3, gap: 10, minShops: 3, parks: 3, stops: 1, plazas: 1 };
 
 const freeLots = (s: GameState): number[] => CITY.lots.filter((t) => !buildingAt(s, t));
 const mine = (s: GameState, p: Player): Building[] => s.buildings.filter((b) => b.owner === p.id);
 const myShops = (s: GameState, p: Player): Building[] => mine(s, p).filter((b) => isShop(b.kind));
 
 /** District-wide gross margin a trade can support per payroll, and the most one shop can take. */
-const TRADE_POOL: Record<ShopKind, number> = { roastery: 110, bistro: 130, arcade: 80, boutique: 75, cinema: 110, nightmarket: 70 };
-const TRADE_CAP: Record<ShopKind, number> = { roastery: 30, bistro: 46, arcade: 34, boutique: 42, cinema: 60, nightmarket: 34 };
+// Re-measured over twelve seeded matches: coffee is a thin, crowded trade; fashion, culture
+// and the night market carry far more margin per door than the tycoons used to believe.
+const TRADE_POOL: Record<ShopKind, number> = { roastery: 90, bistro: 150, arcade: 80, boutique: 120, cinema: 120, nightmarket: 80 };
+const TRADE_CAP: Record<ShopKind, number> = { roastery: 28, bistro: 50, arcade: 34, boutique: 70, cinema: 70, nightmarket: 40 };
+/** A tycoon holds off a cheap shop when a much better trade is this close to affordable. */
+export const SAVE_UP = { reach: 220, better: 1.45 };
 
 /**
  * Expected return on opening one more shop of this trade, as a fraction of its cost earned
@@ -110,7 +149,7 @@ export function lotAppeal(s: GameState, p: Player, tile: number, kind: BuildKind
   return v;
 }
 
-function bestShopBuild(s: GameState, p: Player, budget: number): Command | null {
+function bestShopBuild(s: GameState, p: Player, budget: number, saveUp = false): Command | null {
   const temp = TEMPERAMENTS[p.persona ?? 'vesper'];
   const lots = freeLots(s);
   if (!lots.length) return null;
@@ -119,18 +158,31 @@ function bestShopBuild(s: GameState, p: Player, budget: number): Command | null 
   const floor = temp.minReturn * (left < 1.2 ? 2.4 : left < 2.2 ? 1.3 : 1);
   let best: Command | null = null;
   let bestScore = 0;
+  let nearScore = 0; // the best trade just out of reach
+  const discounter = p.persona === 'vesper';
   for (const kind of SHOP_KINDS) {
-    if (SHOPS[kind].cost > budget) continue;
-    const ret = tradeOutlook(s, p, kind);
+    const near = SHOPS[kind].cost > budget;
+    if (near && (!saveUp || SHOPS[kind].cost > budget + SAVE_UP.reach)) continue;
+    // The Discounter hunts premium pricing: a rival charging Craft or Prestige for a trade is
+    // an invitation to open the same trade next door for less.
+    const marks = discounter ? s.buildings.filter((b) => b.kind === kind && b.owner !== p.id && b.stance >= 2) : [];
+    const ret = tradeOutlook(s, p, kind) * (marks.length ? UNDERCUT.outlook : 1);
     if (ret < floor) continue;
     for (const tile of lots) {
-      const score = ret * temp.kinds[kind] * (1 + 0.6 * lotAppeal(s, p, tile, kind));
+      let score = ret * temp.kinds[kind] * (1 + 0.6 * lotAppeal(s, p, tile, kind));
+      if (marks.some((b) => manhattan(b.tile, tile) <= UNDERCUT.reach)) score *= UNDERCUT.beside;
+      if (near) {
+        if (score > nearScore) nearScore = score;
+        continue;
+      }
       if (score > bestScore) {
         bestScore = score;
         best = { c: 'build', tile, kind };
       }
     }
   }
+  // Something much better is nearly affordable: keep the cash and wait for it.
+  if (saveUp && nearScore > bestScore * SAVE_UP.better) return null;
   return best;
 }
 
@@ -192,15 +244,33 @@ function pricing(s: GameState, p: Player, out: Command[]): void {
       const rival = nearestRivalStance(s, b);
       want = rival >= 0 ? Math.max(0, rival - 1) : 1;
       // No point starving a shop that is already turning people away.
-      if (want === 0 && b.queue.length >= queueCap(b) - 1) want = 1;
+      if (want === 0 && b.queue.length >= Math.ceil(queueCap(b) / 2)) want = 1;
     } else if (p.persona === 'aurelia') {
       want = b.level >= 3 ? 3 : 2;
+      // Prestige has to be earned: a finished shop that keeps losing customers to its price,
+      // with nobody at the door, steps back to Craft until the queue returns.
+      if (want === 3 && b.queue.length <= 1 && (b.lost.tooPricey >= AURELIA_RETREAT || starving(s, b, 2))) want = 2;
     } else {
       want = b.queue.length >= queueCap(b) - 1 && b.level >= 2 ? 2 : 1;
     }
     if (want !== b.stance) out.push({ c: 'price', id: b.id, stance: want });
   }
 }
+
+/** Recent customers lost to price at which Aurelia concedes Prestige for Craft. */
+export const AURELIA_RETREAT = 4;
+/** Vesper's appetite for opening beside a premium-priced rival of the same trade. */
+export const UNDERCUT = { outlook: 1.35, beside: 1.5, reach: 3 };
+/** How many shops Aurelia will run: base + perQuarter × the current quarter. */
+export const AURELIA_DOORS = { base: 4, perQuarter: 1.5 };
+/** Cash below which a tycoon with emptying shelves borrows rather than run dry. */
+export const LIQUIDITY_FLOOR = 90;
+
+/** What a shop has been taking per payroll lately. */
+const takingsPerPayroll = (b: Building): number => b.recent * (1 - REV_DECAY) * PAYROLL_TICKS;
+/** A shop open long enough to judge whose takings do not cover `times` its wages and rent. */
+const starving = (s: GameState, b: Building, times: number): boolean =>
+  s.tick - b.builtTick >= 300 && takingsPerPayroll(b) < times * (wageOf(b) + rentOf(b));
 
 /** Gross margin a Promo Blitz could plausibly add: half the shop's idle capacity for 20 s. */
 function promoUpside(b: Building): number {
@@ -212,7 +282,7 @@ function promoUpside(b: Building): number {
 function promos(s: GameState, p: Player, out: Command[], spare: number): void {
   const part = daypart(s);
   // Vesper blitzes on thinner odds than the others.
-  const need = PROMO_COST * (p.persona === 'vesper' ? 0.45 : p.persona === 'orson' ? 1.0 : 1.5);
+  const need = PROMO_COST * (p.persona === 'vesper' ? 0.6 : p.persona === 'orson' ? 1.0 : 1.5);
   for (const b of myShops(s, p)) {
     if (s.tick < b.promoReadyAt || spare < PROMO_COST) continue;
     if (b.queue.length > queueCap(b) / 2 || b.stock < 6) continue; // already busy, or nothing to sell
@@ -253,6 +323,13 @@ export function aiDecide(s: GameState, playerId: number): Command[] {
     }
     return out;
   }
+  // A till too thin to restock is the start of a death spiral: shelves empty, sales stop, and
+  // the cash never comes back. Draw on the credit line before it gets there (not in the final
+  // stretch, where a loan can no longer pay for itself).
+  if (!finalStretch && p.cash < LIQUIDITY_FLOOR && p.debt + LOAN_STEP <= LOAN_MAX && shops.some((b) => b.dry || b.stock <= SHOPS[b.kind as ShopKind].stockMax * 0.2)) {
+    out.push({ c: 'borrow' });
+    return out;
+  }
   let cash = p.cash;
   if (p.debt > 0 && cash > 650) {
     out.push({ c: 'repay' });
@@ -280,8 +357,11 @@ export function aiDecide(s: GameState, playerId: number): Command[] {
   let capital: Command | null = null;
 
   if (persona === 'orson') {
-    const stopsWanted = Math.min(3, 1 + Math.floor(shops.length / 4));
-    const parksWanted = Math.min(4, Math.floor(shops.length / 2));
+    // Two short quarters leave no time for a corridor to pay back: in Blitz he keeps to one
+    // stop and a couple of parks, and puts the rest into doors.
+    const blitz = s.mode === 'blitz';
+    const stopsWanted = blitz ? 1 : Math.min(3, 1 + Math.floor(shops.length / 4));
+    const parksWanted = Math.min(blitz ? 2 : 4, Math.floor(shops.length / (blitz ? 3 : 2)));
     if (count('tramstop') < stopsWanted && spare >= CIVICS.tramstop.cost) {
       const tile = bestCivicLot(s, p, 'tramstop');
       if (tile >= 0) capital = { c: 'build', tile, kind: 'tramstop' };
@@ -290,7 +370,7 @@ export function aiDecide(s: GameState, playerId: number): Command[] {
       const tile = bestCivicLot(s, p, 'park');
       if (tile >= 0) capital = { c: 'build', tile, kind: 'park' };
     }
-    if (!capital) capital = bestShopBuild(s, p, spare);
+    if (!capital) capital = bestShopBuild(s, p, spare, shops.length >= 2);
     // Expansion on credit, but never into the final stretch.
     if (!capital && !finalStretch && p.debt === 0 && shops.length >= 2 && spare < 180 && bestShopBuild(s, p, 400)) {
       out.push({ c: 'borrow' });
@@ -298,10 +378,23 @@ export function aiDecide(s: GameState, playerId: number): Command[] {
     if (!capital && (spare > 700 || freeLots(s).length === 0)) capital = pickUpgrade(s, p, spare);
   } else if (persona === 'aurelia') {
     const unfinished = shops.some((b) => b.level < 3);
+    // A perfectionist keeps a short list of doors: a few more each quarter, never a chain.
+    const doors = AURELIA_DOORS.base + AURELIA_DOORS.perQuarter * s.quarter;
+    const full = shops.length >= doors;
     if (shops.length >= 2 && unfinished) {
       capital = pickUpgrade(s, p, spare);
       // She will not open a third door while the first two are unfinished, unless flush.
-      if (!capital && spare > 700) capital = bestShopBuild(s, p, spare - 300);
+      if (!capital && !full && spare > 700) capital = bestShopBuild(s, p, spare - 300);
+    } else if (full) {
+      // The list is full: she polishes the block around it instead.
+      if (count('plaza') < 1 && spare >= CIVICS.plaza.cost) {
+        const tile = bestCivicLot(s, p, 'plaza');
+        if (tile >= 0) capital = { c: 'build', tile, kind: 'plaza' };
+      }
+      if (!capital && count('park') < 2 && spare >= CIVICS.park.cost + 200) {
+        const tile = bestCivicLot(s, p, 'park');
+        if (tile >= 0) capital = { c: 'build', tile, kind: 'park' };
+      }
     } else {
       if (shops.length >= 2 && count('plaza') < 1 && spare >= CIVICS.plaza.cost) {
         const tile = bestCivicLot(s, p, 'plaza');
@@ -311,12 +404,31 @@ export function aiDecide(s: GameState, playerId: number): Command[] {
         const tile = bestCivicLot(s, p, 'park');
         if (tile >= 0) capital = { c: 'build', tile, kind: 'park' };
       }
-      if (!capital) capital = bestShopBuild(s, p, spare);
+      if (!capital) capital = bestShopBuild(s, p, spare, shops.length >= 1);
     }
   } else {
-    // Vesper: volume first, then muscle.
-    capital = bestShopBuild(s, p, spare);
-    if (!capital) {
+    // Vesper: volume first, then muscle. But a Crown is not won on turnover alone: from
+    // Quarter 3, if he trails on prestige, he puts spare cash into parks, a stop and a plaza.
+    const v = VESPER_CIVIC;
+    let saving = false;
+    if (s.quarter >= v.fromQuarter && shops.length >= v.minShops && prestigeGap(s, p) >= v.gap) {
+      const wants: CivicKind[] = [];
+      if (count('park') < Math.min(v.parks, Math.floor(shops.length / 2))) wants.push('park');
+      if (count('plaza') < v.plazas) wants.push('plaza');
+      if (count('tramstop') < v.stops) wants.push('tramstop');
+      for (const kind of wants) {
+        if (spare < CIVICS[kind].cost) continue;
+        const tile = bestCivicLot(s, p, kind);
+        if (tile >= 0) {
+          capital = { c: 'build', tile, kind };
+          break;
+        }
+      }
+      // Nothing affordable yet: hold the next shop back and save toward the cheapest project.
+      saving = !capital && wants.length > 0 && spare < CIVICS.park.cost;
+    }
+    if (!capital && !saving) capital = bestShopBuild(s, p, spare, shops.length >= 2);
+    if (!capital && !saving) {
       // Muscle up only the shops that are turning customers away.
       const busy = shops.filter((b) => b.level < 3 && b.turned > 5 + b.served * 0.1 && upgradeCost(b) <= spare - 100);
       if (busy.length) capital = { c: 'upgrade', id: busy.sort((a, b) => b.turned - a.turned)[0].id };
@@ -342,9 +454,9 @@ export function aiThink(s: GameState, playerId: number): Command[] {
 export function advance(s: GameState): void {
   if (s.phase !== 'playing') return;
   for (const p of s.players) {
-    if (p.kind !== 'ai' || s.tick < p.aiNext) continue;
+    if (p.kind !== 'ai' || s.tick < p.aiNext || s.tick < openingDelay(s, p.id)) continue;
     aiThink(s, p.id);
-    p.aiNext = s.tick + TEMPERAMENTS[p.persona ?? 'vesper'].think;
+    p.aiNext = s.tick + thinkInterval(s, p.persona ?? 'vesper');
   }
   tick(s);
 }

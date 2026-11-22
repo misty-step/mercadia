@@ -1,7 +1,8 @@
 // The city renderer: Canvas 2D, isometric 2:1, device-pixel aware.
 // Frame order: ground → water shimmer → shadows → depth-sorted actors → colour grade →
 // light pass → weather → overlays → paper grain.
-import { HOUSES, buildCost, isShop } from '../shared/constants';
+import { HOUSES, PROMO_TICKS, TRANSIT_RADIUS, auraRadius, buildCost, isShop } from '../shared/constants';
+import { civicReach, eventHighlights } from '../shared/insight';
 import { CITY, H, W, idx, tx, ty } from '../shared/map';
 import type { BuildingView, CitizenView, CityView } from '../shared/protocol';
 import { hash32, lotBonuses, loopPoint, queueCap, stopTiles, trafficPips } from '../shared/sim';
@@ -28,6 +29,8 @@ export interface UiState {
   hoverTile: number;
   selectedTile: number;
   selectedCitizen: number;
+  /** The last pointer was a finger: build previews take a first tap, building a second. */
+  touch?: boolean;
 }
 
 export type Pick = { kind: 'citizen'; id: number } | { kind: 'tile'; tile: number } | null;
@@ -41,7 +44,7 @@ interface Sprite {
 }
 
 interface Floater {
-  kind: 'coin' | 'star' | 'turn' | 'text' | 'puff' | 'spark';
+  kind: 'coin' | 'star' | 'turn' | 'text' | 'puff' | 'spark' | 'pill';
   x: number;
   y: number;
   z: number;
@@ -88,6 +91,11 @@ const G_TOP = -40;
 const G_W = 940;
 const G_H = 530;
 export const WORLD = { cx: -20, cy: 190, w: 900, h: 560 };
+/** The true left and right tips of the island slab in world px: harbor corner to station corner. */
+const TIP_LEFT = (LAND_X0 - HARBOR_Y1) * 32;
+const TIP_RIGHT = (LAND_X1 - LAND_Y0) * 32;
+const INK = '#1E1A16';
+const CREAM = '#FAF7F0';
 
 const GRADE: { p: number; c: [number, number, number]; n: number }[] = [
   { p: 0.0, c: [255, 224, 192], n: 0.3 }, // dawn
@@ -211,14 +219,22 @@ export class Renderer {
   fitZoom(): number {
     const fw = this.width - this.insets.left - this.insets.right;
     const fh = this.height - this.insets.top - this.insets.bottom;
-    return clamp(Math.min(fw / WORLD.w, fh / WORLD.h), 0.4, 2.6);
+    return clamp(Math.min(fw / WORLD.w, fh / WORLD.h), 0.34, 2.6);
   }
 
   fit(): void {
-    // On a phone, fitting the whole district leaves it tiny: start closer and let the player pan.
-    this.cam.zoom = this.width <= 720 ? Math.max(this.fitZoom(), 0.6) : this.fitZoom();
-    this.cam.x = WORLD.cx + (this.insets.right - this.insets.left) / 2 / this.cam.zoom;
+    // Fit means the whole island, tip to tip. In portrait the width is the limit, so the view
+    // is centred on the slab itself and neither the harbor corner nor the station corner crops.
+    this.cam.zoom = this.fitZoom();
+    const portrait = this.height > this.width;
+    const cx = portrait ? (TIP_LEFT + TIP_RIGHT) / 2 : WORLD.cx;
+    this.cam.x = cx + (this.insets.right - this.insets.left) / 2 / this.cam.zoom;
     this.cam.y = WORLD.cy + (this.insets.bottom - this.insets.top) / 2 / this.cam.zoom;
+  }
+
+  /** Screen x of the island's left and right tips (for fit checks). */
+  islandSpan(): { left: number; right: number; width: number } {
+    return { left: this.worldToScreen(TIP_LEFT, 0).x, right: this.worldToScreen(TIP_RIGHT, 0).x, width: this.width };
   }
 
   pan(dxScreen: number, dyScreen: number): void {
@@ -703,7 +719,7 @@ export class Renderer {
       }
       case 'promo': {
         const p = at(f.b);
-        if (p) this.floaters.push({ kind: 'text', x: p.x, y: p.y, z: p.z + 4, t0: now, life: 1600, text: 'PROMO BLITZ', color: HOUSES[view.players[f.p]?.house ?? 0].dark });
+        if (p) this.floaters.push({ kind: 'pill', x: p.x, y: p.y, z: p.z + 12, t0: now, life: 1900, text: 'PROMO BLITZ', color: HOUSES[view.players[f.p]?.house ?? 0].color });
         break;
       }
       case 'restock': {
@@ -1730,17 +1746,38 @@ export class Renderer {
         const ok = legal && afford;
         const hover = lot === ui.hoverTile;
         const col = ok ? '#1F8A55' : '#C67A12';
+        if (!legal) {
+          // An inland lot can never take a Tram Stop: greyed out and struck through, so the
+          // avenue-side lots read as the only choices before any click.
+          this.diamond(x, y, 0.06);
+          g.fillStyle = `rgba(30,26,22,${hover ? 0.2 : 0.1})`;
+          g.fill();
+          g.strokeStyle = 'rgba(30,26,22,0.42)';
+          g.lineWidth = 0.7;
+          g.setLineDash([1.6, 1.8]);
+          g.stroke();
+          g.setLineDash([]);
+          const mx = wxOf(x + 0.5, y + 0.5);
+          const my = wyOf(x + 0.5, y + 0.5);
+          g.beginPath();
+          g.moveTo(mx - 3, my - 1.5);
+          g.lineTo(mx + 3, my + 1.5);
+          g.moveTo(mx + 3, my - 1.5);
+          g.lineTo(mx - 3, my + 1.5);
+          g.strokeStyle = 'rgba(30,26,22,0.5)';
+          g.lineWidth = 0.9;
+          g.stroke();
+          continue;
+        }
+        const strong = ui.tool === 'tramstop'; // the avenue-side lots must pop
         this.diamond(x, y, 0.04);
-        g.fillStyle = ok ? `rgba(46,160,100,${hover ? 0.42 : 0.14})` : `rgba(212,140,28,${hover ? 0.4 : legal ? 0.12 : 0.05})`;
+        g.fillStyle = ok ? `rgba(46,160,100,${hover ? 0.46 : strong ? 0.3 : 0.14})` : `rgba(212,140,28,${hover ? 0.4 : strong ? 0.22 : 0.12})`;
         g.fill();
         g.strokeStyle = col;
-        g.lineWidth = hover ? 1.6 : 0.8;
+        g.lineWidth = hover ? 1.6 : strong ? 1.2 : 0.8;
         g.setLineDash(ok ? [] : [2.2, 1.8]);
-        g.globalAlpha = legal ? 1 : 0.45;
         g.stroke();
         g.setLineDash([]);
-        g.globalAlpha = 1;
-        if (!legal) continue;
         // Bonus dots and projected-traffic pips on every candidate lot.
         const bon = lotBonuses(world, lot);
         const pips = trafficPips(world, lot);
@@ -1775,28 +1812,9 @@ export class Renderer {
         g.globalAlpha = afford ? 0.72 : 0.4;
         this.blit(sp, x, y, 1 + Math.sin(now / 220) * 0.8);
         g.globalAlpha = 1;
-        const r = ui.tool === 'park' ? 1 : ui.tool === 'plaza' ? 2 : 0;
-        if (r > 0) {
-          g.beginPath();
-          g.moveTo(wxOf(x - r, y - r), wyOf(x - r, y - r));
-          g.lineTo(wxOf(x + 1 + r, y - r), wyOf(x + 1 + r, y - r));
-          g.lineTo(wxOf(x + 1 + r, y + 1 + r), wyOf(x + 1 + r, y + 1 + r));
-          g.lineTo(wxOf(x - r, y + 1 + r), wyOf(x - r, y + 1 + r));
-          g.closePath();
-          g.fillStyle = 'rgba(132,169,140,0.16)';
-          g.fill();
-          g.strokeStyle = C.sageDark;
-          g.lineWidth = 1;
-          g.setLineDash([3, 2.4]);
-          g.stroke();
-          g.setLineDash([]);
-        }
-        if (ui.tool === 'tramstop') {
-          const av = CITY.avenueAdj[hov];
-          this.diamond(tx(av), ty(av), 0.1);
-          g.strokeStyle = C.brass;
-          g.lineWidth = 1.4;
-          g.stroke();
+        // Blueprint reach: every lot this civic project will lift, and every shop already there.
+        if (ui.tool === 'park' || ui.tool === 'plaza' || ui.tool === 'tramstop') {
+          this.reachPreview(view, hov, ui.tool, ui.me, now);
         }
       }
     } else if (ui.hoverTile >= 0 && !ui.tool) {
@@ -1821,30 +1839,48 @@ export class Renderer {
       g.strokeStyle = col;
       g.lineWidth = 1.3;
       g.stroke();
-      // Aura footprint of a selected civic.
-      if (b && (b.kind === 'park' || b.kind === 'plaza')) {
-        const r = b.kind === 'park' ? 1 : 2;
-        g.beginPath();
-        g.moveTo(wxOf(x - r, y - r), wyOf(x - r, y - r));
-        g.lineTo(wxOf(x + 1 + r, y - r), wyOf(x + 1 + r, y - r));
-        g.lineTo(wxOf(x + 1 + r, y + 1 + r), wyOf(x + 1 + r, y + 1 + r));
-        g.lineTo(wxOf(x - r, y + 1 + r), wyOf(x - r, y + 1 + r));
-        g.closePath();
-        g.strokeStyle = C.sageDark;
-        g.lineWidth = 0.9;
-        g.setLineDash([3, 2.4]);
-        g.stroke();
-        g.setLineDash([]);
-      }
+      // Reach of a selected civic project: its ring and the shops it lifts.
+      if (b && (b.kind === 'park' || b.kind === 'plaza' || b.kind === 'tramstop')) this.reachPreview(view, b.tile, b.kind, ui.me, now, true);
     }
-    // Tram stop rings: where trams will call.
+    // Tram Stop blueprint: trace the tramway and ring the platforms where trams already call.
     if (ui.tool === 'tramstop') {
+      g.beginPath();
+      CITY.loop.forEach((t, i) => {
+        const px = wxOf(tx(t) + 0.5, ty(t) + 0.5);
+        const py = wyOf(tx(t) + 0.5, ty(t) + 0.5, 0.4);
+        if (i === 0) g.moveTo(px, py);
+        else g.lineTo(px, py);
+      });
+      g.closePath();
+      g.strokeStyle = `rgba(212,163,74,${0.5 + 0.25 * Math.sin(now / 320)})`;
+      g.lineWidth = 2.2;
+      g.lineJoin = 'round';
+      g.setLineDash([5, 3]);
+      g.lineDashOffset = -(now / 90) % 8;
+      g.stroke();
+      g.setLineDash([]);
+      g.lineDashOffset = 0;
       for (const st of stopTiles(view)) {
         this.diamond(tx(st), ty(st), 0.12);
-        g.strokeStyle = 'rgba(212,163,74,0.9)';
-        g.lineWidth = 1;
+        g.strokeStyle = 'rgba(212,163,74,0.95)';
+        g.lineWidth = 1.2;
         g.stroke();
       }
+    }
+    this.eventFocus(view, now);
+    // Promo Blitz pills: ink on cream, drawn after the colour grade so they stay crisp at
+    // twilight and over canal water. Every House's blitz shows, with its seconds left.
+    for (const b of view.buildings) {
+      if (!isShop(b.kind) || view.tick >= b.promoUntil) continue;
+      const secs = Math.ceil((b.promoUntil - view.tick) / 10);
+      const stacked = b.dry || b.q >= queueCap(b);
+      this.pill(
+        wxOf(tx(b.tile), ty(b.tile)),
+        wyOf(tx(b.tile), ty(b.tile)) - buildingHeight(b.kind, b.level) - (stacked ? 19 : 10),
+        `PROMO BLITZ ${secs}s`,
+        houseTone(view.players[b.owner]?.house ?? -1).color,
+        Math.min(1, (b.promoUntil - view.tick) / PROMO_TICKS + 0.25),
+      );
     }
     // Queue-length ticks above the player's own busy shops.
     if (me) {
@@ -1860,6 +1896,171 @@ export class Renderer {
           g.fillRect(x - w / 2 + i * 2.2, y, 1.5, 2.6);
         }
       }
+    }
+  }
+
+  /** A high-contrast label: ink text on solid cream with an ink hairline and a House dot. */
+  private pill(x: number, y: number, text: string, dot: string | null, alpha = 1): void {
+    const g = this.ctx;
+    // Sized in world units but never allowed to shrink below a readable 8.5 px on screen.
+    const k = Math.max(1, 8.5 / (6 * this.cam.zoom));
+    g.font = `700 ${6 * k}px ${SANS}`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    const tw = g.measureText(text).width;
+    const pad = (dot ? 6.6 : 4.2) * k;
+    const w = tw + pad + 4.2 * k;
+    const h = 10 * k;
+    const prev = g.globalAlpha;
+    g.globalAlpha = prev * clamp(alpha, 0, 1);
+    g.fillStyle = CREAM;
+    roundRect(g, x - w / 2, y - h / 2, w, h, h / 2);
+    g.fill();
+    g.strokeStyle = INK;
+    g.lineWidth = 0.65 * k;
+    g.stroke();
+    if (dot) {
+      g.beginPath();
+      g.arc(x - w / 2 + 5 * k, y, 1.9 * k, 0, Math.PI * 2);
+      g.fillStyle = dot;
+      g.fill();
+    }
+    g.fillStyle = INK;
+    g.fillText(text, x + (dot ? 2.2 * k : 0), y + 0.4 * k);
+    g.globalAlpha = prev;
+  }
+
+  /**
+   * The reach of a civic project standing (or about to stand) on `tile`: a clean ring around
+   * the footprint, a wash on every lot inside it, and a marker on each shop it will lift.
+   */
+  private reachPreview(view: CityView, tile: number, kind: 'park' | 'plaza' | 'tramstop', me: number, now: number, quiet = false): void {
+    const g = this.ctx;
+    const x = tx(tile);
+    const y = ty(tile);
+    const reach = civicReach(view, tile, kind);
+    const tram = kind === 'tramstop';
+    const hue = tram ? '212,163,74' : '95,138,108';
+    const line = tram ? C.brass : C.sageDark;
+    for (const l of reach.lots) {
+      this.diamond(tx(l), ty(l), 0.08);
+      g.fillStyle = `rgba(${hue},${quiet ? 0.16 : 0.3})`;
+      g.fill();
+      g.strokeStyle = `rgba(${hue},${quiet ? 0.5 : 0.85})`;
+      g.lineWidth = 0.7;
+      g.stroke();
+    }
+    // The ring itself: cream under the colour so it reads on paving, turf and water alike.
+    g.beginPath();
+    if (tram) {
+      const av = CITY.avenueAdj[tile];
+      // A Tram Stop reaches along streets: a diamond of TRANSIT_RADIUS around its platform.
+      const ax = tx(av) + 0.5;
+      const ay = ty(av) + 0.5;
+      const r = TRANSIT_RADIUS + 0.5;
+      g.moveTo(wxOf(ax - r, ay), wyOf(ax - r, ay));
+      g.lineTo(wxOf(ax, ay - r), wyOf(ax, ay - r));
+      g.lineTo(wxOf(ax + r, ay), wyOf(ax + r, ay));
+      g.lineTo(wxOf(ax, ay + r), wyOf(ax, ay + r));
+    } else {
+      const r = auraRadius(kind);
+      g.moveTo(wxOf(x - r, y - r), wyOf(x - r, y - r));
+      g.lineTo(wxOf(x + 1 + r, y - r), wyOf(x + 1 + r, y - r));
+      g.lineTo(wxOf(x + 1 + r, y + 1 + r), wyOf(x + 1 + r, y + 1 + r));
+      g.lineTo(wxOf(x - r, y + 1 + r), wyOf(x - r, y + 1 + r));
+    }
+    g.closePath();
+    g.lineJoin = 'round';
+    g.strokeStyle = 'rgba(250,247,240,0.9)';
+    g.lineWidth = quiet ? 2 : 2.8;
+    g.stroke();
+    g.strokeStyle = line;
+    g.lineWidth = quiet ? 0.9 : 1.4;
+    g.setLineDash([4, 2.6]);
+    g.lineDashOffset = quiet ? 0 : -(now / 110) % 6.6;
+    g.stroke();
+    g.setLineDash([]);
+    g.lineDashOffset = 0;
+    if (tram) {
+      const av = CITY.avenueAdj[tile];
+      this.diamond(tx(av), ty(av), 0.1);
+      g.strokeStyle = C.brass;
+      g.lineWidth = 1.4;
+      g.stroke();
+    }
+    // Shops inside: yours get a full marker, a rival's an outlined one — an aura lifts both.
+    for (const b of reach.shops) {
+      const mx = wxOf(tx(b.tile), ty(b.tile));
+      const my = wyOf(tx(b.tile), ty(b.tile)) - buildingHeight(b.kind, b.level) - 5;
+      const mine = b.owner === me;
+      g.beginPath();
+      g.moveTo(mx, my - 3.2);
+      g.lineTo(mx + 2.8, my + 1.4);
+      g.lineTo(mx - 2.8, my + 1.4);
+      g.closePath();
+      g.fillStyle = mine ? line : CREAM;
+      g.fill();
+      g.strokeStyle = mine ? CREAM : line;
+      g.lineWidth = 0.7;
+      g.stroke();
+    }
+  }
+
+  /**
+   * A forecast or running Gazette event points at what it touches: a brass outline and an
+   * up-chevron on the shops it lifts, a slate down-chevron on the ones it hurts, and a slow
+   * ring on the landmark it arrives through (the Harbor Pier, the tram platforms).
+   */
+  private eventFocus(view: CityView, now: number): void {
+    const ev = view.event;
+    if (!ev) return;
+    const g = this.ctx;
+    const hi = eventHighlights(view, ev.kind, stopTiles(view));
+    const live = ev.started;
+    const k = 0.5 + 0.5 * Math.sin(now / (live ? 260 : 420));
+    const mark = (tile: number, up: boolean): void => {
+      const x = tx(tile);
+      const y = ty(tile);
+      const b = view.buildingAt(tile);
+      this.diamond(x, y, 0.02);
+      g.strokeStyle = up ? `rgba(212,163,74,${(live ? 0.55 : 0.4) + 0.35 * k})` : `rgba(70,75,87,${0.4 + 0.25 * k})`;
+      g.lineWidth = live ? 1.5 : 1;
+      g.setLineDash(live ? [] : [2.4, 2]);
+      g.stroke();
+      g.setLineDash([]);
+      const mx = wxOf(x, y) + 9;
+      const my = wyOf(x, y) - (b ? buildingHeight(b.kind, b.level) : 0) - 4 - (up ? k * 1.4 : -k * 1.4);
+      const d = up ? -1 : 1;
+      g.beginPath();
+      g.moveTo(mx - 2.6, my - d * 1.4);
+      g.lineTo(mx, my + d * 1.6);
+      g.lineTo(mx + 2.6, my - d * 1.4);
+      g.lineCap = 'round';
+      g.lineJoin = 'round';
+      g.strokeStyle = CREAM;
+      g.lineWidth = 2.4;
+      g.stroke();
+      g.strokeStyle = up ? '#8A6410' : '#464B57';
+      g.lineWidth = 1.2;
+      g.stroke();
+    };
+    for (const t of hi.boost) mark(t, true);
+    for (const t of hi.dampen) mark(t, false);
+    for (const t of hi.landmarks) {
+      const cx = wxOf(tx(t) + 0.5, ty(t) + 0.5);
+      const cy = wyOf(tx(t) + 0.5, ty(t) + 0.5);
+      for (let i = 0; i < 2; i++) {
+        const ph = (now / 1600 + i * 0.5) % 1;
+        g.beginPath();
+        g.ellipse(cx, cy, 10 + ph * 22, 5 + ph * 11, 0, 0, Math.PI * 2);
+        g.strokeStyle = `rgba(212,163,74,${(1 - ph) * (live ? 0.85 : 0.55)})`;
+        g.lineWidth = 1.3;
+        g.stroke();
+      }
+    }
+    if (ev.kind === 'cruise') {
+      const p = CITY.pierTile;
+      this.pill(wxOf(tx(p) + 0.5, ty(p) + 1.6), wyOf(tx(p) + 0.5, ty(p) + 1.6) - 16, live ? 'HARBOR PIER · TOURISTS ASHORE' : 'HARBOR PIER · LINER DUE', null, 0.95);
     }
   }
 
@@ -1920,6 +2121,13 @@ export class Renderer {
           g.fill();
           break;
         }
+        case 'pill': {
+          // Launch call-out: ink on cream, so it reads over roofs, paving and teal water.
+          this.pill(x, y - rise * 9, f.text ?? '', f.color ?? null, fade);
+          g.textAlign = 'center';
+          g.textBaseline = 'middle';
+          break;
+        }
         case 'turn': {
           const yy = y - rise * 8;
           // A little amber arrow turning back on itself.
@@ -1970,8 +2178,10 @@ export class Renderer {
         best = c.id;
       }
     }
-    if (best >= 0) return { kind: 'citizen', id: best };
-    // Buildings: test the tall silhouettes front to back.
+    // A citizen right under the pointer wins outright.
+    if (best >= 0 && bd <= 6 / this.cam.zoom) return { kind: 'citizen', id: best };
+    // Buildings: test the tall silhouettes front to back. A tap inside one selects the
+    // building even with a passer-by close to it, so shops stay easy to hit zoomed out on a phone.
     const hits = view.buildings
       .slice()
       .sort((a, b) => tx(b.tile) + ty(b.tile) - (tx(a.tile) + ty(a.tile)));
@@ -1981,6 +2191,7 @@ export class Renderer {
         if (this.worldToTile(w.x, w.y + (h * k) / 4) === b.tile) return { kind: 'tile', tile: b.tile };
       }
     }
+    if (best >= 0) return { kind: 'citizen', id: best };
     const t = this.worldToTile(w.x, w.y);
     return t >= 0 ? { kind: 'tile', tile: t } : null;
   }

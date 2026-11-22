@@ -3,7 +3,7 @@
 import { advance } from './ai';
 import { AI_ORDER, AI_PERSONAS, HOUSES } from './constants';
 import { SnapEncoder, type ClientMsg, type LobbyView, type ServerMsg } from './protocol';
-import { applyCommand, continueEndless, createGame } from './sim';
+import { applyCommand, continueEndless, createGame, upgradeState } from './sim';
 import type { AiPersona, GameState, MatchMode, PlayerSetup } from './types';
 
 export interface Seat {
@@ -68,7 +68,7 @@ export class RoomCore {
   constructor(code: string, seed: number, restore?: { room: RoomState; game: GameState | null }) {
     if (restore) {
       this.room = { ...restore.room, acc: restore.room.acc ?? 0 };
-      this.game = restore.game;
+      this.game = restore.game ? upgradeState(restore.game) : null;
       return;
     }
     this.room = {
@@ -277,6 +277,17 @@ export class RoomCore {
         if (s.kind === 'human') return reject('That seat is taken');
         s.aiFill = msg.ai;
         s.kind = msg.ai ? 'ai' : 'open';
+        this.nameAis();
+        return [this.lobbyAll()];
+      }
+      case 'aifill': {
+        // One click between "AI rivals fill the table" and a pure human duel.
+        if (!isHost) return reject('Only the host fills seats');
+        if (r.status !== 'lobby') return reject('The match has already started');
+        for (const s of r.seats) {
+          s.aiFill = msg.on;
+          if (s.kind !== 'human') s.kind = msg.on ? 'ai' : 'open';
+        }
         this.nameAis();
         return [this.lobbyAll()];
       }

@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { TEMPERAMENTS, advance, aiDecide, aiThink, lotAppeal, tradeOutlook } from '../src/shared/ai';
+import { TEMPERAMENTS, VESPER_CIVIC, advance, aiDecide, aiThink, lotAppeal, tradeOutlook } from '../src/shared/ai';
 import { BUILD_KINDS, LOAN_MAX, LOAN_STEP, PROMO_COST, SHOPS, SHOP_KINDS, TRANSIT_RADIUS, isShop } from '../src/shared/constants';
 import { CITY, chebyshev, idx, manhattan, tx, ty } from '../src/shared/map';
 import { applyCommand, buildingAt, buildingById, createGame, queueCap } from '../src/shared/sim';
@@ -69,6 +69,10 @@ interface MatchLog {
   budgetShopTicks: number[];
   orsonParks: number;
   orsonParksBesideOwnShop: number;
+  civicsAtHalf: number[]; // civic projects each House held when Quarter 2 closed
+  prestigeAtHalf: number[];
+  lv3Ticks: number; // ticks Aurelia's finished (Level 3) shops stood
+  lv3PrestigeTicks: number; // … of which priced at Prestige
 }
 
 function playMatch(seed: number): MatchLog {
@@ -89,6 +93,10 @@ function playMatch(seed: number): MatchLog {
     budgetShopTicks: PERSONAS.map(() => 0),
     orsonParks: 0,
     orsonParksBesideOwnShop: 0,
+    civicsAtHalf: [],
+    prestigeAtHalf: [],
+    lv3Ticks: 0,
+    lv3PrestigeTicks: 0,
   };
   const flag = (msg: string): void => {
     if (log.problems.length < 20) log.problems.push(`t${s.tick}: ${msg}`);
@@ -138,6 +146,14 @@ function playMatch(seed: number): MatchLog {
       } else if (b.level !== 1 || b.stance !== 1) flag('a civic project was upgraded or repriced');
       if (b.kind === 'tramstop' && CITY.avenueAdj[b.tile] < 0) flag('tram stop off the avenue');
       if (b.level === 3) log.firstLv3[b.owner] = Math.min(log.firstLv3[b.owner], s.tick);
+      if (b.owner === AURELIA && b.level === 3 && isShop(b.kind)) {
+        log.lv3Ticks++;
+        if (b.stance === 3) log.lv3PrestigeTicks++;
+      }
+    }
+    if (s.tick === (s.totalQuarters * s.quarterTicks) / 2) {
+      log.civicsAtHalf = PERSONAS.map((_, p) => s.buildings.filter((b) => b.owner === p && !isShop(b.kind)).length);
+      log.prestigeAtHalf = s.players.map((p) => p.prestige);
     }
     s.players.forEach((p, i) => {
       log.minCash[i] = Math.min(log.minCash[i], p.cash);
@@ -217,11 +233,14 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
       // He lays every park beside a shop of his own …
       expect(log.orsonParks).toBeGreaterThanOrEqual(1);
       expect(log.orsonParksBesideOwnShop, `seed ${log.seed}`).toBe(log.orsonParks);
-      // … holds the largest civic estate in town, and out-ranks the discounters on prestige.
+      // … holds the largest civic estate in town through the first half (the discounters only
+      // turn civic from Quarter 3), always a larger one than Aurelia, and leads both
+      // discounters on prestige at half-time.
       for (const other of [VESPER, AURELIA, VESPER_2]) {
-        expect(civicsOf(log.s, ORSON).length, `seed ${log.seed}`).toBeGreaterThanOrEqual(civicsOf(log.s, other).length);
+        expect(log.civicsAtHalf[ORSON], `seed ${log.seed}`).toBeGreaterThan(log.civicsAtHalf[other]);
       }
-      for (const v of [VESPER, VESPER_2]) expect(log.s.players[ORSON].prestige).toBeGreaterThan(log.s.players[v].prestige);
+      expect(civicsOf(log.s, ORSON).length, `seed ${log.seed}`).toBeGreaterThanOrEqual(civicsOf(log.s, AURELIA).length);
+      for (const v of [VESPER, VESPER_2]) expect(log.prestigeAtHalf[ORSON]).toBeGreaterThan(log.prestigeAtHalf[v] + 10);
       // He never discounts.
       expect(log.budgetShopTicks[ORSON]).toBe(0);
       expect(log.s.players[ORSON].stats.budgetSales).toBe(0);
@@ -272,39 +291,57 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
       expect(log.aureliaThoughts).toBeGreaterThan(200);
       expect(log.aureliaBelowCraft, `seed ${log.seed}`).toBe(0);
       expect(log.budgetShopTicks[AURELIA]).toBe(0);
-      // At the final bell: Craft below Level 3, Prestige once a shop is finished (the price follows
-      // an upgrade at her next thought, so a shop finished at the very end may still read Craft).
+      // At the final bell: Craft below Level 3; a finished shop is at Prestige or, if it has
+      // been losing its customers to the price, back at Craft — never lower.
       for (const b of mine) {
         if (b.builtTick >= log.s.tick - TEMPERAMENTS.aurelia.think) continue;
         expect(b.stance).toBeGreaterThanOrEqual(2);
         if (b.level < 3) expect(b.stance).toBe(2);
         else finished.push(b.stance);
       }
+      // Prestige is her default for a finished shop: it holds that price for a real share of
+      // the match in every seed.
+      expect(log.lv3Ticks, `seed ${log.seed}`).toBeGreaterThan(1000);
+      // Prestige is where a finished shop starts, and where it returns when the queue does;
+      // between rushes it concedes to Craft. Both prices are part of every match.
+      const share = log.lv3PrestigeTicks / log.lv3Ticks;
+      expect(share, `seed ${log.seed}`).toBeGreaterThan(0.08);
+      expect(share, `seed ${log.seed}`).toBeLessThan(0.95);
     }
-    expect(finished.filter((stance) => stance === 3).length).toBeGreaterThan(finished.length * 0.8);
+    expect(finished.length).toBeGreaterThanOrEqual(SEEDS.length * 2);
+    expect(finished.every((stance) => stance >= 2)).toBe(true);
     expect(firstToLv3).toBeGreaterThanOrEqual(3);
     for (const other of [VESPER, ORSON, VESPER_2]) expect(lv3[AURELIA]).toBeGreaterThan(lv3[other]);
   });
 
-  it('Vesper, the Aggressive Discounter, never builds a civic project, runs Budget prices and fires Promo Blitzes', () => {
+  it('Vesper, the Aggressive Discounter, builds only shops through Quarter 2, runs Budget prices and fires Promo Blitzes', () => {
     let blitzes = 0;
+    let lateCivics = 0;
     for (const log of logs) {
+      const half = (log.s.totalQuarters * log.s.quarterTicks) / 2;
       for (const v of [VESPER, VESPER_2]) {
-        expect(log.builds[v].every((b) => isShop(b.kind)), `seed ${log.seed}`).toBe(true);
-        expect(civicsOf(log.s, v)).toHaveLength(0);
-        expect(log.s.players[v].stats.civicBuilt).toBe(0);
-        expect(log.s.players[v].totalLedger.civic).toBe(0);
+        // Volume first: nothing civic before Quarter 3 …
+        expect(log.builds[v].filter((b) => b.tick < half).every((b) => isShop(b.kind)), `seed ${log.seed}`).toBe(true);
+        expect(log.civicsAtHalf[v], `seed ${log.seed}`).toBe(0);
+        // … then, trailing on prestige, he adapts: a few parks, one stop, one plaza at most.
+        const civic = log.builds[v].filter((b) => !isShop(b.kind));
+        for (const b of civic) expect(b.tick, `seed ${log.seed}`).toBeGreaterThanOrEqual(half);
+        expect(civic.filter((b) => b.kind === 'park').length).toBeLessThanOrEqual(VESPER_CIVIC.parks);
+        expect(civic.filter((b) => b.kind === 'tramstop').length).toBeLessThanOrEqual(VESPER_CIVIC.stops);
+        expect(civic.filter((b) => b.kind === 'plaza').length).toBeLessThanOrEqual(VESPER_CIVIC.plazas);
+        lateCivics += civic.length;
+        expect(log.s.players[v].stats.civicBuilt).toBe(civic.length);
         expect(log.budgetShopTicks[v], `seed ${log.seed}`).toBeGreaterThan(1000);
         expect(log.s.players[v].stats.budgetSales, `seed ${log.seed}`).toBeGreaterThan(50);
         blitzes += log.s.players[v].stats.promos;
         expect(log.s.players[v].totalLedger.marketing).toBe(log.s.players[v].stats.promos * PROMO_COST);
       }
-      // The Price Shark award goes to a Vesper every time; Civic Patron never does.
+      // The Price Shark award goes to a Vesper every time.
       const shark = log.s.result?.awards.find((a) => a.key === 'shark');
       expect([VESPER, VESPER_2]).toContain(shark?.player);
-      const patron = log.s.result?.awards.find((a) => a.key === 'patron');
-      expect([AURELIA, ORSON]).toContain(patron?.player);
     }
+    // The late civic turn is real: across five matches the two Vespers dedicate several projects.
+    expect(lateCivics).toBeGreaterThanOrEqual(SEEDS.length);
     // Promo Blitzes are part of his game (his trigger is tested in a constructed situation below;
     // match by match the count varies a lot — see the report).
     expect(blitzes).toBeGreaterThanOrEqual(10);

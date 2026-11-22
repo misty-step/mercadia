@@ -141,6 +141,11 @@ export const LOAN_STEP = 400;
 export const LOAN_MAX = 1200;
 export const LOAN_RATE = 0.012; // per payroll
 export const PAYROLL_TICKS = 100;
+/** Interest a standing loan costs over one quarter, as a fraction (0.18 = 18%). */
+export const loanRatePerQuarter = (quarterTicks: number): number => LOAN_RATE * (quarterTicks / PAYROLL_TICKS);
+/** "18%/qtr" — the exact rate shown on the Borrow button. */
+export const loanRateLabel = (quarterTicks: number): string =>
+  `${(Math.round(loanRatePerQuarter(quarterTicks) * 1000) / 10).toString()}%/qtr`;
 export const AUTO_RESTOCK_PREMIUM = 1.15;
 export const AUTO_RESTOCK_AT = 0.2;
 
@@ -152,6 +157,12 @@ export const MODES: Record<MatchMode, { name: string; quarters: number; quarterT
   endless: { name: 'Endless Sandbox', quarters: 0, quarterTicks: 1500, slots: [0.1, 0.42, 0.74], span: 0.18 },
 };
 export const FORECAST_LEAD = 0.05; // of a quarter
+export const TREND_PER_QUARTER = 4; // market-share samples kept per quarter (one per daypart)
+export const TREND_MAX = 96;
+/** Per-tick decay of a shop's lost-customer counters (half-life about 45 s). */
+export const LOST_DECAY = 0.9985;
+/** Ticks between rivalry headlines, so the Gazette is punchy rather than noisy. */
+export const RIVALRY_QUIET = 150;
 
 export const DAYPART_NAMES = ['Morning', 'Noon', 'Golden Hour', 'Twilight'] as const;
 
@@ -280,6 +291,10 @@ export const CRUISE_TOURISTS = 24;
 
 export const PARK_AURA = 0.2;
 export const PLAZA_AURA = 0.3;
+export const PARK_RADIUS = 1; // Chebyshev tiles
+export const PLAZA_RADIUS = 2;
+/** Aura reach of a civic project in tiles (0 for a Tram Stop, whose reach is TRANSIT_RADIUS along streets). */
+export const auraRadius = (k: BuildKind): number => (k === 'park' ? PARK_RADIUS : k === 'plaza' ? PLAZA_RADIUS : 0);
 export const CORNER_PULL = 1.15;
 export const CANAL_APPEAL = 1.1;
 export const CANAL_APPEAL_BISTRO = 1.2;

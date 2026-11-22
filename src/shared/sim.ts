@@ -26,13 +26,16 @@ import {
   LEVEL_APPEAL,
   LEVEL_SERVERS,
   LEVEL_SPEED,
+  LOST_DECAY,
   LOAN_MAX,
   LOAN_RATE,
   LOAN_STEP,
   MODES,
   PARK_AURA,
+  PARK_RADIUS,
   PAYROLL_TICKS,
   PLAZA_AURA,
+  PLAZA_RADIUS,
   POP_MAX,
   POP_TARGET,
   PRESTIGE_AURA_SALE,
@@ -44,6 +47,7 @@ import {
   PROMO_PULL,
   PROMO_TICKS,
   RENT_HIKE,
+  RIVALRY_QUIET,
   SALVAGE,
   SHOPS,
   STANCES,
@@ -51,6 +55,8 @@ import {
   SUPPLY_CRUNCH,
   TRANSIT_PULL,
   TRANSIT_RADIUS,
+  TREND_MAX,
+  TREND_PER_QUARTER,
   UPGRADE_COST,
   buildCost,
   buildName,
@@ -75,9 +81,11 @@ import {
   type GameState,
   type GazetteLine,
   type Ledger,
+  type LostCustomers,
   type LotBonuses,
   type MatchResult,
   type Player,
+  type ResultRow,
   type ShopKind,
   type Tram,
 } from './types';
@@ -127,11 +135,18 @@ export const TAKINGS_PER_MIN = (1 - REV_DECAY) * 600;
 
 export const emptyLedger = (): Ledger => ({
   revenue: 0, wages: 0, supplies: 0, rent: 0, interest: 0,
-  construction: 0, civic: 0, marketing: 0, salvage: 0, awards: 0,
+  construction: 0, civic: 0, marketing: 0, salvage: 0, awards: 0, borrowed: 0, repaid: 0,
 });
 
+/** Net cashflow from trading and building. Financing (loan draws and repayments) is not income. */
 export const ledgerNet = (l: Ledger): number =>
   l.revenue + l.salvage + l.awards - l.wages - l.supplies - l.rent - l.interest - l.construction - l.civic - l.marketing;
+/** Net financing: credit drawn minus principal repaid. */
+export const ledgerFinancing = (l: Ledger): number => (l.borrowed ?? 0) - (l.repaid ?? 0);
+/** What actually happened to the wallet: net cashflow plus financing. */
+export const ledgerCashChange = (l: Ledger): number => ledgerNet(l) + ledgerFinancing(l);
+
+export const noLoss = (): LostCustomers => ({ tooPricey: 0, queueFull: 0, outOfStock: 0 });
 
 export function createGame(opts: GameOptions): GameState {
   const mode = MODES[opts.mode];
@@ -180,6 +195,8 @@ export function createGame(opts: GameOptions): GameState {
     cruiseLeft: 0,
     fx: [],
     result: null,
+    trend: [],
+    leaders: [],
   };
   scheduleEvents(state);
   // The streets are already busy at tick zero.
@@ -356,15 +373,25 @@ export function chooseShop(
 ): Building | null {
   let best: Building | null = null;
   let bestScore = 0;
+  // A real first choice (not a probe, not a second try) records the shops that were in the
+  // running but for their price or an empty stockroom: the Inspector's lost-customer diagnosis.
+  const record = jitter && c.tried.length === 0;
+  let missed: [Building, number, keyof LostCustomers][] | null = null;
   for (const b of s.buildings) {
     if (!isShop(b.kind) || SHOPS[b.kind].desire !== desire) continue;
-    if (b.dry || b.stock <= 0) continue;
-    if (priceOf(b) > c.budget) continue;
     if (c.tried.includes(b.id)) continue;
+    const dry = b.dry || b.stock <= 0;
+    if (dry || priceOf(b) > c.budget) {
+      if (record) (missed ??= []).push([b, shopScore(s, b, c.arch, fromTile), dry ? 'outOfStock' : 'tooPricey']);
+      continue;
+    }
     let sc = shopScore(s, b, c.arch, fromTile);
     if (jitter) {
       // Too dear for what it is — unless a Promo Blitz is on.
-      if (b.stance > 1 && s.tick >= b.promoUntil && rand(s) > acceptance(s, b, c.arch)) continue;
+      if (b.stance > 1 && s.tick >= b.promoUntil && rand(s) > acceptance(s, b, c.arch)) {
+        if (record) (missed ??= []).push([b, sc, 'tooPricey']);
+        continue;
+      }
       sc *= 0.85 + 0.3 * rand(s);
     }
     if (sc > bestScore) {
@@ -372,6 +399,8 @@ export function chooseShop(
       best = b;
     }
   }
+  // Only a shop that would have won the customer counts them as lost.
+  if (missed) for (const [b, sc, why] of missed) if (sc > 0 && sc >= bestScore * 0.9) b.lost[why]++;
   return best;
 }
 
@@ -392,6 +421,16 @@ export function marketShares(s: Pick<GameState, 'players'>): number[] {
 export function crownIndex(s: GameState, p: Player): number {
   const share = marketShares(s)[p.id];
   return Math.round(netWorth(s, p) * CROWN.netWorth + share * 100 * CROWN.share + p.prestige * CROWN.prestige);
+}
+
+/**
+ * The Crown Index split into its three whole-number parts, which always sum to the crown:
+ * Worth (net worth ÷ 10) + Share (market share % × 3) + Prestige (civic prestige × 4).
+ */
+export function crownParts(p: { crown: number; netWorth: number; prestige: number }): { worth: number; share: number; prestige: number; crown: number } {
+  const worth = Math.round(p.netWorth * CROWN.netWorth);
+  const prestige = Math.round(p.prestige * CROWN.prestige);
+  return { worth, share: p.crown - worth - prestige, prestige, crown: p.crown };
 }
 
 export function standings(s: GameState): { player: number; crown: number }[] {
@@ -428,7 +467,35 @@ export function buildResult(s: GameState): MatchResult {
   const patron = top((p) => p.prestige);
   if (patron)
     awards.push({ key: 'patron', title: 'Civic Patron', player: patron.id, detail: `${Math.round(patron.prestige)} Civic Prestige` });
-  return { winner: standings(s)[0].player, rows, awards };
+  const winner = standings(s)[0].player;
+  return {
+    winner,
+    rows,
+    awards,
+    trend: { perQuarter: TREND_PER_QUARTER, samples: (s.trend ?? []).map((r) => r.slice()) },
+    leaders: (s.leaders ?? []).slice(),
+    highlight: matchHighlight(s, rows, winner),
+  };
+}
+
+/** The Final Edition's front-page headline: the story of how the match was won. */
+export function matchHighlight(s: GameState, rows: ResultRow[], winner: number): string {
+  const short = (id: number): string => HOUSES[s.players[id].house].short;
+  const order = rows.slice().sort((a, b) => b.crown - a.crown || a.player - b.player);
+  if (order.length < 2) return `${short(winner)} has the district to itself.`;
+  const margin = order[0].crown - order[1].crown;
+  const second = order[1].player;
+  const points = `${margin} Crown point${margin === 1 ? '' : 's'}`;
+  if (margin <= Math.max(3, Math.round(order[0].crown * 0.04))) return `Photo finish: ${short(winner)} edges ${short(second)} by ${points}.`;
+  const earlier = (s.leaders ?? []).slice(0, -1);
+  const before = earlier.length ? earlier[earlier.length - 1] : winner;
+  if (before !== winner && s.players[before]) return `Late surge: ${short(winner)} overtakes ${short(before)} in the final quarter.`;
+  if (order[1].crown > 0 && order[0].crown >= order[1].crown * 1.5) return `Landslide: ${short(winner)} finishes ${points} clear of ${short(second)}.`;
+  if (earlier.length >= 2 && earlier.every((l) => l === winner)) return `Wire to wire: ${short(winner)} led at every closing bell.`;
+  let star: Building | null = null;
+  for (const b of s.buildings) if (b.owner === winner && isShop(b.kind) && (!star || b.revenue > star.revenue)) star = b;
+  if (star && star.revenue > 0) return `${short(winner)}'s ${buildName(star.kind)} was the talk of the district: §${Math.round(star.revenue).toLocaleString('en-US')} taken.`;
+  return `${short(winner)} finishes ${points} clear of ${short(second)}.`;
 }
 
 // ───────────────────────────── Ledger helpers ─────────────────────────────
@@ -445,6 +512,32 @@ export function pushGazette(s: GameState, text: string, tone: GazetteLine['tone'
 }
 
 const houseName = (p: Player): string => HOUSES[p.house].short;
+
+/** Rivalry headlines are rationed: at most one every RIVALRY_QUIET ticks. */
+function pushRivalry(s: GameState, text: string): boolean {
+  for (let i = s.gazette.length - 1; i >= 0; i--) {
+    if (s.gazette[i].tone !== 'rival') continue;
+    if (s.tick - s.gazette[i].tick < RIVALRY_QUIET) return false;
+    break;
+  }
+  pushGazette(s, text, 'rival');
+  return true;
+}
+
+/** The nearest rival shop of the same trade within reach, or undefined. */
+function nearbyRival(s: GameState, b: Building, reach = 5): Building | undefined {
+  let best: Building | undefined;
+  let bd = reach + 1;
+  for (const o of s.buildings) {
+    if (o.kind !== b.kind || o.owner === b.owner) continue;
+    const d = manhattan(o.tile, b.tile);
+    if (d < bd) {
+      bd = d;
+      best = o;
+    }
+  }
+  return best;
+}
 
 // ───────────────────────────── Commands ─────────────────────────────
 
@@ -477,6 +570,8 @@ function restock(s: GameState, b: Building, auto: boolean): boolean {
   const cost = priceUp(units * unit);
   p.cash -= cost;
   book(p, 'supplies', cost);
+  const crunch = activeEvent(s);
+  if (crunch && crunch.kind === 'supplycrunch') tally(crunch, p.id, cost - cost / SUPPLY_CRUNCH, 0);
   b.stock += units;
   b.dry = false;
   return true;
@@ -524,6 +619,9 @@ export function applyCommand(s: GameState, playerId: number, cmd: Command): CmdR
         invested: cost,
         builtTick: s.tick,
         dry: false,
+        lost: noLoss(),
+        riders: 0,
+        auraSales: 0,
       };
       s.buildings.push(b);
       p.cash -= cost;
@@ -542,6 +640,7 @@ export function applyCommand(s: GameState, playerId: number, cmd: Command): CmdR
       if (p.debt + LOAN_STEP > LOAN_MAX) return fail('Credit line is exhausted');
       p.debt += LOAN_STEP;
       p.cash += LOAN_STEP;
+      book(p, 'borrowed', LOAN_STEP);
       return OK;
     }
     case 'repay': {
@@ -550,6 +649,7 @@ export function applyCommand(s: GameState, playerId: number, cmd: Command): CmdR
       if (amt <= 0) return fail('Not enough cash');
       p.debt -= amt;
       p.cash -= amt;
+      book(p, 'repaid', amt);
       return OK;
     }
     default:
@@ -562,11 +662,14 @@ export function applyCommand(s: GameState, playerId: number, cmd: Command): CmdR
     case 'price': {
       if (!isShop(b.kind)) return fail('Only shops set prices');
       if (!Number.isInteger(cmd.stance) || cmd.stance < 0 || cmd.stance > 3) return fail('Unknown price stance');
-      if (cmd.stance === 0 && b.stance !== 0) {
-        const rival = s.buildings.find((o) => o.kind === b.kind && o.owner !== b.owner && manhattan(o.tile, b.tile) <= 5);
-        const last = s.gazette[s.gazette.length - 1];
-        if (rival && (!last || last.tone !== 'market' || s.tick - last.tick > 150))
-          pushGazette(s, `Price war: ${houseName(p)} slashes ${buildName(b.kind)} prices against ${houseName(s.players[rival.owner])}.`, 'market');
+      if (cmd.stance < b.stance) {
+        // Undercutting the rival next door is front-page news.
+        const rival = nearbyRival(s, b);
+        if (rival && rival.stance > cmd.stance)
+          pushRivalry(
+            s,
+            `Price war: ${houseName(p)} undercuts ${houseName(s.players[rival.owner])}'s ${buildName(b.kind)} — ${STANCES[cmd.stance].name} against ${STANCES[rival.stance].name}.`,
+          );
       }
       b.stance = cmd.stance;
       return OK;
@@ -593,6 +696,13 @@ export function applyCommand(s: GameState, playerId: number, cmd: Command): CmdR
       b.promoReadyAt = b.promoUntil + PROMO_COOLDOWN;
       p.stats.promos++;
       s.fx.push({ k: 'promo', b: b.id, p: playerId });
+      const rival = nearbyRival(s, b, 6);
+      pushRivalry(
+        s,
+        rival
+          ? `Promo Blitz! ${houseName(p)}'s ${buildName(b.kind)} is poaching ${houseName(s.players[rival.owner])}'s queue.`
+          : `Promo Blitz! ${houseName(p)}'s ${buildName(b.kind)} papers the lanes with flyers.`,
+      );
       return OK;
     }
     case 'restock': {
@@ -663,8 +773,64 @@ export function forceEvent(s: GameState, kind: EventKind, ticks = 250): CityEven
   return ev;
 }
 
+/** Count something toward the running event's closing receipt. */
+function tally(e: CityEvent, player: number, amount: number, count = 1): void {
+  e.n = (e.n ?? 0) + count;
+  const take = (e.take ??= []);
+  take[player] = (take[player] ?? 0) + amount;
+}
+
+/** Which sales an event's receipt counts: the trade it boosted, or the crowd it brought. */
+function eventCounts(e: CityEvent, b: Building, c: Pick<Citizen, 'arch'>): boolean {
+  switch (e.kind) {
+    case 'cruise':
+      return c.arch === 'tourist';
+    case 'cloudburst':
+      return b.kind === 'cinema' || b.kind === 'roastery';
+    case 'lantern':
+      return b.kind === 'nightmarket' || b.kind === 'arcade';
+    case 'critic':
+      return b.kind === 'bistro' || b.kind === 'roastery';
+    default:
+      return false;
+  }
+}
+
+/** The one-line Gazette receipt published when an event closes. */
+export function eventReceipt(s: Pick<GameState, 'players'>, e: CityEvent): string | null {
+  const n = Math.round(e.n ?? 0);
+  const take = e.take ?? [];
+  let top = -1;
+  let total = 0;
+  s.players.forEach((p) => {
+    const v = take[p.id] ?? 0;
+    total += v;
+    if (v > 0 && (top < 0 || v > (take[top] ?? 0))) top = p.id;
+  });
+  const who = top >= 0 ? houseName(s.players[top] as Player) : '';
+  const earner = who ? ` · Top earner: ${who}` : '';
+  switch (e.kind) {
+    case 'cruise':
+      return n > 0 ? `Harbor Cruise closed — ${n} tourist${n === 1 ? '' : 's'} served${earner}` : 'Harbor Cruise closed — the tourists found no shop to their taste.';
+    case 'cloudburst':
+      return n > 0 ? `Cloudburst passed — ${n} sheltered in cinemas and roasteries${earner}` : 'Cloudburst passed — nobody had a dry seat to sell.';
+    case 'lantern':
+      return n > 0 ? `Lantern Festival closed — ${n} night-trade sales${earner}` : 'Lantern Festival closed — the lanes glowed, the tills stayed quiet.';
+    case 'freeride':
+      return `Free-Ride Day ended — ${n} rider${n === 1 ? '' : 's'} delivered to the stops.`;
+    case 'renthike':
+      return total >= 1 ? `Rent Hike lifted — §${Math.round(total)} extra rent paid · Hardest hit: ${who}` : 'Rent Hike lifted — no tenant felt it.';
+    case 'supplycrunch':
+      return total >= 1 ? `Supply Crunch eased — §${Math.round(total)} extra paid for stock · Hardest hit: ${who}` : 'Supply Crunch eased — every stockroom rode it out.';
+    default:
+      return null; // the critic's verdict is its own receipt
+  }
+}
+
 function startEvent(s: GameState, e: CityEvent): void {
   e.started = true;
+  e.n = 0;
+  e.take = s.players.map(() => 0);
   pushGazette(s, EVENTS[e.kind].headline, 'event');
   s.fx.push({ k: 'event', kind: e.kind, phase: 'start' });
   if (e.kind === 'cruise') s.cruiseLeft = CRUISE_TOURISTS;
@@ -679,6 +845,8 @@ function endEvent(s: GameState, e: CityEvent): void {
   if (e.kind === 'freeride') s.trams = s.trams.filter((t) => !t.special);
   if (e.kind === 'cruise') s.cruiseLeft = 0;
   if (e.kind === 'critic') awardGoldenFork(s);
+  const receipt = eventReceipt(s, e);
+  if (receipt) pushGazette(s, receipt, 'event');
 }
 
 function awardGoldenFork(s: GameState): void {
@@ -738,7 +906,13 @@ function stepTrams(s: GameState): void {
       t.dwell--;
       if (t.drops > 0 && t.dwell % 4 === 0) {
         t.drops--;
-        if (s.citizens.length < POP_MAX) spawnCitizen(s, { arch: rand(s) < 0.75 ? 'commuter' : 'local', at: t.dropTile });
+        if (s.citizens.length < POP_MAX) {
+          spawnCitizen(s, { arch: rand(s) < 0.75 ? 'commuter' : 'local', at: t.dropTile });
+          // Riders delivered: credited to every Tram Stop that serves this platform.
+          for (const b of s.buildings) if (b.kind === 'tramstop' && CITY.avenueAdj[b.tile] === t.dropTile) b.riders++;
+          const ev = activeEvent(s);
+          if (ev && ev.kind === 'freeride') ev.n = (ev.n ?? 0) + 1;
+        }
       }
       continue;
     }
@@ -981,6 +1155,7 @@ function moveToward(c: Citizen, gx: number, gy: number, speed: number): boolean 
 
 function rejectAt(s: GameState, c: Citizen, b: Building, mood: number, kind: 'turn' | 'walkout'): void {
   b.turned++;
+  b.lost.queueFull++;
   s.players[b.owner].stats.turnedAway++;
   b.rating = Math.max(0, b.rating - 0.03);
   c.mood = Math.max(0, c.mood - mood);
@@ -993,6 +1168,9 @@ function arrive(s: GameState, c: Citizen): void {
   const b = buildingById(s, c.target);
   if (!b || !isShop(b.kind)) return decide(s, c);
   if (b.dry || b.stock <= 0 || priceOf(b) > c.budget) {
+    // The shelves emptied, or the price rose, while they were walking over.
+    if (b.dry || b.stock <= 0) b.lost.outOfStock++;
+    else b.lost.tooPricey++;
     c.tried.push(b.id);
     return rechoose(s, c);
   }
@@ -1102,10 +1280,14 @@ function completeSale(s: GameState, b: Building, c: Citizen): void {
   const fxY = ty(b.tile) + 0.5;
   s.fx.push({ k: 'coin', x: fxX, y: fxY, amt: price, p: p.id });
   if (sat > 0.7) s.fx.push({ k: 'star', x: c.x, y: c.y });
+  const ev = activeEvent(s);
+  if (ev && eventCounts(ev, b, c)) tally(ev, p.id, price);
   // Civic aura pays its patrons in prestige.
   for (const o of s.buildings) {
-    if (o.kind === 'park' ? chebyshev(o.tile, b.tile) <= 1 : o.kind === 'plaza' ? chebyshev(o.tile, b.tile) <= 2 : false)
+    if (o.kind === 'park' ? chebyshev(o.tile, b.tile) <= PARK_RADIUS : o.kind === 'plaza' ? chebyshev(o.tile, b.tile) <= PLAZA_RADIUS : false) {
       s.players[o.owner].prestige += PRESTIGE_AURA_SALE;
+      o.auraSales++;
+    }
   }
   // Some residents take the air after shopping.
   if (c.wants > 0 && (c.arch === 'local' || c.arch === 'tourist') && rand(s) < 0.15) {
@@ -1141,6 +1323,7 @@ function stepShops(s: GameState): void {
         if (!c) continue;
         c.mood = Math.max(0, c.mood - 0.08);
         c.tried.push(b.id);
+        b.lost.outOfStock++;
         rechoose(s, c);
       }
     }
@@ -1195,6 +1378,10 @@ function payroll(s: GameState): void {
     }
     const interest = Math.round(p.debt * LOAN_RATE * 100) / 100;
     rent = Math.round(rent * 100) / 100;
+    if (hike) {
+      const ev = activeEvent(s);
+      if (ev) tally(ev, p.id, rent - rent / RENT_HIKE, 0);
+    }
     p.cash -= wages + rent + interest;
     book(p, 'wages', wages);
     book(p, 'rent', rent);
@@ -1206,6 +1393,7 @@ function endQuarter(s: GameState): void {
   const lead = standings(s)[0];
   const leader = s.players[lead.player];
   pushGazette(s, `Quarter ${s.quarter} closes. ${HOUSES[leader.house].name} leads the Crown Index at ${lead.crown}.`, 'market');
+  (s.leaders ??= []).push(lead.player);
   for (const p of s.players) {
     p.lastLedger = p.ledger;
     p.ledger = emptyLedger();
@@ -1246,7 +1434,21 @@ export function tick(s: GameState): void {
   stepShops(s);
   if (s.tick % PAYROLL_TICKS === 0) payroll(s);
   for (const p of s.players) p.recentRev *= REV_DECAY;
-  for (const b of s.buildings) b.recent *= REV_DECAY;
+  for (const b of s.buildings) {
+    b.recent *= REV_DECAY;
+    const l = b.lost;
+    if (l.tooPricey || l.queueFull || l.outOfStock) {
+      l.tooPricey = l.tooPricey < 0.05 ? 0 : l.tooPricey * LOST_DECAY;
+      l.queueFull = l.queueFull < 0.05 ? 0 : l.queueFull * LOST_DECAY;
+      l.outOfStock = l.outOfStock < 0.05 ? 0 : l.outOfStock * LOST_DECAY;
+    }
+  }
+  // One market-share sample per daypart feeds the Final Edition's sparkline.
+  if (s.tick % Math.max(1, Math.round(s.quarterTicks / TREND_PER_QUARTER)) === 0) {
+    const trend = (s.trend ??= []);
+    trend.push(marketShares(s).map((v) => Math.round(v * 1000)));
+    if (trend.length > TREND_MAX) trend.splice(0, trend.length - TREND_MAX);
+  }
   if (s.tick % 5 === 0) {
     for (let i = 0; i < N; i++) s.footfall[i] *= 0.99;
     for (let i = 0; i < DESIRES.length; i++) {
@@ -1255,4 +1457,30 @@ export function tick(s: GameState): void {
     }
   }
   if (s.tick % s.quarterTicks === 0) endQuarter(s);
+}
+
+/**
+ * Bring a checkpoint written by an older build up to the current shape, in place.
+ * Rooms survive deploys, so a restored match may predate fields added since.
+ */
+export function upgradeState(s: GameState): GameState {
+  s.trend ??= [];
+  s.leaders ??= [];
+  for (const p of s.players) {
+    for (const l of [p.ledger, p.lastLedger, p.totalLedger]) {
+      l.borrowed ??= 0;
+      l.repaid ??= 0;
+    }
+  }
+  for (const b of s.buildings) {
+    b.lost ??= noLoss();
+    b.riders ??= 0;
+    b.auraSales ??= 0;
+  }
+  if (s.result) {
+    s.result.trend ??= { perQuarter: TREND_PER_QUARTER, samples: [] };
+    s.result.leaders ??= [];
+    s.result.highlight ??= '';
+  }
+  return s;
 }

@@ -6,6 +6,7 @@ import { AI_ORDER, AI_PERSONAS } from '../shared/constants';
 import { CityView, SnapEncoder, type ClientMsg, type LobbyView, type ServerMsg } from '../shared/protocol';
 import { applyCommand, continueEndless, createGame } from '../shared/sim';
 import type { Command, Fx, GameState, MatchMode, PlayerSetup } from '../shared/types';
+import { HEARTBEAT_MS, SeatToken, browserStores } from './seat-token';
 
 export interface Session {
   readonly kind: 'attract' | 'solo' | 'multi';
@@ -25,6 +26,8 @@ export interface Session {
   endless(): void;
   dispose(): void;
   onReject: (err: string) => void;
+  /** A command of ours went through (solo: it was applied; multiplayer: it was sent). */
+  onAccept: () => void;
 }
 
 const STEP_MS = 100;
@@ -36,6 +39,7 @@ export class LocalSession implements Session {
   speed = 1;
   paused = false;
   onReject: (err: string) => void = () => undefined;
+  onAccept: () => void = () => undefined;
   state: GameState;
   private enc = new SnapEncoder();
   private acc = 0;
@@ -103,6 +107,7 @@ export class LocalSession implements Session {
       this.onReject(res.err ?? 'Rejected');
       return;
     }
+    this.onAccept();
     // Show the result at once, even while paused.
     this.push(performance.now());
   }
@@ -178,6 +183,7 @@ export class NetSession implements Session {
   paused = false;
   lobby: LobbyView | null = null;
   onReject: (err: string) => void = () => undefined;
+  onAccept: () => void = () => undefined;
   private ws: WebSocket | null = null;
   private pending: Fx[] = [];
   private snapAt = 0;
@@ -186,35 +192,34 @@ export class NetSession implements Session {
   private retries = 0;
   private retryTimer: number | null = null;
   private pingTimer: number | null = null;
+  private beatTimer: number | null = null;
   private playerId: string | null;
+  private token: SeatToken;
+  private onHide = (): void => {
+    if (this.playerId) this.token.release(this.playerId);
+  };
 
   constructor(
     readonly code: string,
     private name: string,
     private events: NetEvents,
   ) {
-    this.playerId = this.loadId();
+    // The seat's reconnect token lives in localStorage (sessionStorage as a fallback), so
+    // closing the tab, or a phone evicting it, and reopening ?room=CODE reclaims the seat.
+    const stores = browserStores();
+    this.token = new SeatToken(code, stores.local, stores.session, Math.random().toString(36).slice(2) + Date.now().toString(36));
+    this.playerId = this.token.load(Date.now());
+    window.addEventListener('pagehide', this.onHide);
     this.connect();
-  }
-
-  private storeKey(): string {
-    return `mercadia:pid:${this.code}`;
-  }
-
-  private loadId(): string | null {
-    try {
-      return sessionStorage.getItem(this.storeKey());
-    } catch {
-      return null;
-    }
   }
 
   private saveId(id: string): void {
     this.playerId = id;
-    try {
-      sessionStorage.setItem(this.storeKey(), id);
-    } catch {
-      // without sessionStorage a reload simply takes a fresh seat
+    this.token.save(id, Date.now());
+    if (this.beatTimer === null) {
+      this.beatTimer = window.setInterval(() => {
+        if (this.playerId && !this.closed) this.token.beat(this.playerId, Date.now());
+      }, HEARTBEAT_MS);
     }
   }
 
@@ -342,6 +347,7 @@ export class NetSession implements Session {
       this.onReject('Spectators cannot act');
       return;
     }
+    this.onAccept(); // optimistic: a refusal arrives as its own message
     this.send({ t: 'cmd', cmd });
   }
 
@@ -365,6 +371,11 @@ export class NetSession implements Session {
     this.closed = true;
     if (this.retryTimer !== null) window.clearTimeout(this.retryTimer);
     if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
+    if (this.beatTimer !== null) window.clearInterval(this.beatTimer);
+    this.beatTimer = null;
+    window.removeEventListener('pagehide', this.onHide);
+    // The seat stays ours on the server; free the heartbeat so any tab may reclaim it.
+    if (this.playerId) this.token.release(this.playerId);
     if (this.ws) {
       try {
         this.ws.close(1000, 'leaving');

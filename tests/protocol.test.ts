@@ -37,8 +37,12 @@ function expectViewMatches(view: CityView, s: GameState, speed = 1): void {
   for (const b of s.buildings) {
     const v = view.building(b.id);
     if (!v) throw new Error(`view is missing building ${b.id} at tick ${s.tick}`);
-    const { queue, serving, rating, recent, ...plain } = b;
+    const { queue, serving, rating, recent, lost, ...plain } = b;
     expect(v).toMatchObject(plain);
+    // Lost-customer counters travel rounded to a tenth.
+    for (const key of ['tooPricey', 'queueFull', 'outOfStock'] as const) {
+      expect(Math.abs(v.lost[key] - lost[key])).toBeLessThanOrEqual(0.05 + 1e-9);
+    }
     expect(v.q).toBe(queue.length);
     expect(v.sv).toBe(serving.length / 2);
     expect(Math.abs(v.rating - rating)).toBeLessThanOrEqual(0.005 + 1e-9);
