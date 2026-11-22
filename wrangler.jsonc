@@ -1,0 +1,21 @@
+{
+  // MERCADIA — single Worker: static assets + API + SQLite-backed Durable Object rooms.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mercadia",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    // API and WebSocket routes always reach the Worker first; everything else is served as a static asset.
+    "run_worker_first": ["/api/*", "/ws/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "GAME_ROOMS", "class_name": "MercadiaRoom" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MercadiaRoom"] }
+  ],
+  "observability": { "enabled": true }
+}
