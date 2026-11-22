@@ -2,6 +2,8 @@
   // MERCADIA — single Worker: static assets + API + SQLite-backed Durable Object rooms.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "mercadia",
+  "workers_dev": true,
+  "routes": [{ "pattern": "mercadia.mistystep.io", "custom_domain": true }],
   "main": "src/worker.ts",
   "compatibility_date": "2025-05-01",
   "assets": {
