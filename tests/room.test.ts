@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AI_ORDER, AI_PERSONAS, COUNCIL_BEATS, MODES, SHOPS } from '../src/shared/constants';
+import { AI_ORDER, AI_PERSONAS, CIVICS, COUNCIL_BEATS, LOAN_STEP, MILESTONES, MODES, SHOPS, START_CASH } from '../src/shared/constants';
 import { OPENINGS } from '../src/shared/ai';
 import { idx } from '../src/shared/map';
-import { parseClientMsg, type ClientMsg, type ServerMsg, type Snap } from '../src/shared/protocol';
+import { CityView, parseClientMsg, type ClientMsg, type ServerMsg, type Snap } from '../src/shared/protocol';
+import { ledgerCashChange } from '../src/shared/sim';
 import { ROOM_CODE_ALPHABET, RoomCore, SPEEDS, cleanName, isRoomCode, makeRoomCode, type Outbound } from '../src/shared/room';
 import type { GameState } from '../src/shared/types';
 import { clone } from './helpers';
@@ -458,6 +459,64 @@ describe('Stepping the simulation', () => {
     for (let i = 1; i < 10; i += 2) expect(ticks[i] - (i > 1 ? ticks[i - 2] : 30)).toBe(3);
     const steps = ticks.map((k, i) => k - (i ? ticks[i - 1] : 30));
     expect(steps.every((n) => n === 1 || n === 2)).toBe(true);
+  });
+
+  it('keeps every Ledger reconciled with its Treasury on every beat when 2× starts on an odd tick', () => {
+    // The room as two clients see it: a full snapshot at the start, then every broadcast delta.
+    const room = seated(2);
+    const [ada, ben] = room.ids;
+    const { core } = room;
+    const startSnap = pick(core.handle(ada, { t: 'start' }), 'snap', '*')[0];
+    const game = core.game as GameState;
+    const view = new CityView();
+    view.apply(clone(startSnap));
+    const beat = (): Snap => {
+      const snap = pick(core.step(), 'snap', '*')[0];
+      view.apply(clone(snap));
+      game.players.forEach((p, i) => {
+        expect(view.ledgers[i]).toEqual({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger });
+        // Ledger drawer: "Opening §900 + match change = § in hand" against the Treasury chip.
+        expect(Math.round(START_CASH + ledgerCashChange(view.ledgers[i].total)), `tick ${game.tick} player ${i}`).toBe(view.players[i].cash);
+        expect(view.players[i].debt).toBe(p.debt);
+        expect(view.players[i].milestones).toEqual(p.milestones);
+      });
+      return snap;
+    };
+    while (game.tick < 83) beat();
+    expect(pick(core.handle(ada, { t: 'speed', speed: 2 }), 'reject')).toEqual([]);
+    for (let i = 0; i < 5; i++) beat();
+    expect(game.tick).toBe(93);
+    // Adjacent Pocket Parks: Block Baron and Civic Benefactor (+§120) on the next beat
+    // (Milestones are judged every fifth tick: 95 falls inside it).
+    const before = view.players[0].cash;
+    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'park' } })).toEqual([]);
+    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: idx(4, 6), kind: 'park' } })).toEqual([]);
+    const parks = beat();
+    expect(parks.k % 10).not.toBe(0);
+    expect(parks.lg).toBeDefined();
+    expect(view.players[0].milestones[1]).toBeGreaterThanOrEqual(0);
+    expect(view.players[0].milestones[2]).toBeGreaterThanOrEqual(0);
+    expect(view.ledgers[0].total.dividends).toBe(MILESTONES[2].cash);
+    expect(view.players[0].cash).toBe(before - 2 * CIVICS.park.cost + MILESTONES[2].cash);
+    // A §400 loan for Ada, and Ben borrows too: both reconcile on the same beat.
+    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
+    expect(core.handle(ben, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
+    const loans = beat();
+    expect(loans.k % 10).not.toBe(0);
+    expect(loans.lg).toBeDefined();
+    expect(view.ledgers[0].total.borrowed).toBe(LOAN_STEP);
+    expect(view.ledgers[1].total.borrowed).toBe(LOAN_STEP);
+    expect(view.players[0].cash).toBe(before - 2 * CIVICS.park.cost + MILESTONES[2].cash + LOAN_STEP);
+    expect(view.players[0].debt).toBe(LOAN_STEP);
+    // The rest of the Era, AI Houses trading: no broadcast lands on a multiple of ten, none is stale.
+    let ledgers = 0;
+    while (game.phase === 'playing' && game.quarter === 1) {
+      const snap = beat();
+      if (game.phase === 'playing' && game.quarter === 1) expect(snap.k % 2).toBe(1);
+      if (snap.lg) ledgers++;
+    }
+    expect(ledgers).toBeGreaterThan(MODES.standard.quarterTicks / 2 / 10 - 10);
+    expect(game.players[0].totalLedger.interest).toBeGreaterThan(0);
   });
 
   it('lets only the host set the pace, and only to 1×, 1.5× or 2×', () => {

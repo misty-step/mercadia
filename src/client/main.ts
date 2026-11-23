@@ -1,11 +1,12 @@
 // MERCADIA client entry. Owns the frame loop, input, and the hand-offs between the title
 // screen's attract-mode district, solo matches, and multiplayer rooms.
-import { BUILD_KINDS, CHARTERS, ERAS, HOUSES, MILESTONES, buildName, eraDef, isUnlocked } from '../shared/constants';
+import { BUILD_KINDS, CHARTERS, ERAS, HOUSES, MILESTONES, START_CASH, buildName, eraDef, isUnlocked } from '../shared/constants';
 import { CITY } from '../shared/map';
 import type { ClientMsg, LobbyView } from '../shared/protocol';
-import { buildCostFor, starsOf } from '../shared/sim';
+import { buildCostFor, ledgerCashChange, starsOf } from '../shared/sim';
 import type { BuildKind, Fx, MatchMode } from '../shared/types';
 import { Foley } from './audio';
+import { freeCentre, playInsets } from './chronicle';
 import { Hud, LobbyScreen, TitleScreen, storedName } from './hud';
 import { MatchWatch, devHooksAllowed, disarm, normKey, resolveKey } from './input';
 import { Renderer, type UiState } from './renderer';
@@ -62,9 +63,7 @@ const lobby = new LobbyScreen({
 function setInsets(): void {
   const w = window.innerWidth;
   if (phase === 'playing') {
-    // Phones: clock, score strip and Chronicle bar above; guide bar, treasury, tabs and dock below.
-    // Mid-size screens wrap the Chronicle under the clock, so the city sits a little lower.
-    renderer.insets = w <= 720 ? { top: 142, right: 0, bottom: w <= 640 ? 176 : 146, left: 0 } : { top: w < 1280 ? 104 : 64, right: w > 1180 ? 120 : 60, bottom: 84, left: 0 };
+    renderer.insets = playInsets(w);
   } else {
     // Leave room for the title card: it sits left on wide screens, bottom on phones.
     renderer.insets = w <= 720 ? { top: 10, right: 0, bottom: Math.round(window.innerHeight * 0.52), left: 0 } : { top: 20, right: 0, bottom: 20, left: Math.min(460, Math.round(w * 0.3)) };
@@ -729,6 +728,30 @@ function frame(now: number): void {
   /** Screen position of the centre of a tile. */
   tileScreen(tile: number) {
     return renderer.tileToScreen((tile % 12) + 0.5, Math.floor(tile / 12) + 0.5);
+  },
+  /**
+   * My Treasury against my Ledger, as this client holds them right now: cash in hand, and the
+   * Ledger drawer's closing line (opening cash plus the match's ledger). They must agree to the §.
+   */
+  ledger() {
+    const v = session.view;
+    const p = v.players[ui.me];
+    const lg = v.ledgers[ui.me];
+    if (!p || !lg) return null;
+    return {
+      tick: v.tick,
+      cash: p.cash,
+      debt: p.debt,
+      closing: Math.round(START_CASH + ledgerCashChange(lg.total)),
+      dividends: lg.total.dividends,
+      borrowed: lg.total.borrowed,
+      repaid: lg.total.repaid,
+    };
+  },
+  /** The camera, the HUD insets and the centre of the free city area (click-to-focus checks). */
+  get camera() {
+    const { width, height, insets, cam } = renderer;
+    return { x: cam.x, y: cam.y, zoom: cam.zoom, width, height, insets: { ...insets }, centre: freeCentre(renderer), gliding: renderer.gliding };
   },
 };
 

@@ -172,6 +172,13 @@ const toView = (b: Building): BuildingView => {
   };
 };
 
+/**
+ * Everything that makes a Ledger drawer stale when it moves: each House's cash, debt and
+ * Milestones, and its three ledgers (current Era, last Era, whole match).
+ */
+const moneyKeyOf = (s: GameState): string =>
+  JSON.stringify(s.players.map((p) => [p.cash, p.debt, p.milestones, p.ledger, p.lastLedger, p.totalLedger]));
+
 /** Encodes GameState into snapshots, sending only buildings that changed since the last one. */
 export class SnapEncoder {
   private sent = new Map<number, string>();
@@ -180,6 +187,10 @@ export class SnapEncoder {
   private resSent = false;
   private cnOpen = false;
   private dyKey = '';
+  /** The ten-tick bucket whose slow lane (ledgers, footfall, demand) went out last. */
+  private slowBucket = -1;
+  /** Every House's money as last broadcast: cash, debt, milestones and all three ledgers. */
+  private moneyKey = '';
 
   reset(): void {
     this.sent.clear();
@@ -188,6 +199,8 @@ export class SnapEncoder {
     this.resSent = false;
     this.cnOpen = false;
     this.dyKey = '';
+    this.slowBucket = -1;
+    this.moneyKey = '';
   }
 
   /** `full` snapshots carry everything and do not disturb the delta memory. */
@@ -229,9 +242,23 @@ export class SnapEncoder {
       ev: e ? [EVENT_KINDS.indexOf(e.kind), e.announceAt, e.startAt, e.endAt, e.started ? 1 : 0] : null,
     };
     const dynasty: DynastyRow[] = s.players.map((p) => ({ c: p.charters, m: p.milestones, sv: p.stats.served, cb: p.stats.civicBuilt }));
-    const slow = full || s.tick % 10 === 0;
+    // The slow lane (ledgers, footfall, demand) goes out whenever the ten-tick bucket moves on,
+    // not on `tick % 10 === 0`: at 2× a room broadcasts every other tick, and a pace change on
+    // an odd tick would otherwise never land on a multiple of ten again.
+    const bucket = Math.floor(s.tick / 10);
+    const slow = full || bucket !== this.slowBucket;
+    // The ledgers also ride the very beat any House's money moves (a sale, a Milestone
+    // dividend, a loan draw or repayment), so the Ledger drawer always reconciles with the
+    // Treasury to the exact §.
+    let money = false;
+    if (!full) {
+      this.slowBucket = bucket;
+      const moneyKey = moneyKeyOf(s);
+      money = moneyKey !== this.moneyKey;
+      this.moneyKey = moneyKey;
+    }
+    if (slow || money) snap.lg = s.players.map((p) => ({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger }));
     if (slow) {
-      snap.lg = s.players.map((p) => ({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger }));
       snap.ff = s.footfall.map((v) => Math.round(v * 10));
       snap.dm = [...s.met, ...s.unmet].map((v) => Math.round(v * 10));
     }

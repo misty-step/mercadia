@@ -66,6 +66,7 @@ import {
 } from '../shared/sim';
 import { CS, type BuildKind, type CharterKey, type Command, type Dispatch, type Fx, type Ledger, type MatchMode, type MatchResult } from '../shared/types';
 import type { Foley } from './audio';
+import { dispatchLot, feedRows, resolveTap } from './chronicle';
 import { crestSvg, starPips } from './heraldry';
 import { dial, grandCrest, icon } from './icons';
 import { Confirm } from './input';
@@ -390,24 +391,12 @@ export class Hud {
       this.host.setTool(this.host.ui.tool === kind ? null : kind);
     });
 
-    // The Chronicle: the chevron (and, on a phone, the whole bar) opens the recent feed; a
-    // dispatch tied to a lot pans the camera there.
+    // The Chronicle: the chevron (and, on a phone, the headline) opens the recent feed; a
+    // dispatch tied to a lot pans the camera there. The banner's own focus button is wired
+    // where the banner is built (see build()).
     this.chronicle.addEventListener('click', (e) => {
       const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
-      if (!btn) return;
-      const act = btn.dataset.act as string;
-      const tile = Number(btn.dataset.tile ?? -1);
-      this.host.audio.click();
-      const banner = !!btn.closest('.dispatch');
-      if (act === 'focus' && tile >= 0 && !(banner && phone())) {
-        this.host.focus(tile);
-        if (phone()) this.feedOpen = false;
-      } else if (act === 'feed' || (act === 'focus' && banner)) {
-        this.feedOpen = !this.feedOpen;
-        this.feedChosen = true;
-        if (!phone()) store(FEED_KEY, this.feedOpen ? '1' : '0');
-      }
-      this.sync(0, true);
+      if (btn) this.tapChronicle(btn);
     });
 
     this.guide.addEventListener('click', (e) => {
@@ -663,10 +652,18 @@ export class Hud {
           <span class="d-badge" data-f="dbadge"></span>
           <span class="d-body"><span class="d-kicker" data-f="dkicker"></span><span class="d-pill" data-f="dpill"></span><b class="d-head" data-f="dhead"></b></span>
         </button>
+        <button class="d-focus" data-act="focus-lot" data-f="dfocus" title="Show on the map" aria-label="Show on the map" hidden><span class="d-focus-chip">${icon('focus')}</span></button>
         <button class="iconbtn d-toggle" data-act="feed" data-f="dtoggle" aria-expanded="false" aria-controls="cfeed" title="Recent Chronicle" aria-label="Show or hide the recent Chronicle">${icon('chevron')}</button>
         <i class="d-bar" data-f="dbar"></i>
       </div>
       <div class="cfeed" id="cfeed" data-f="cfeed" hidden></div>`;
+    // The banner's focus button is a control of its own: its tap pans to the lot and goes no
+    // further, so it can never be read as a tap on the banner (which, on a phone, opens the feed).
+    const lotBtn = this.chronicle.querySelector<HTMLElement>('[data-f="dfocus"]');
+    lotBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.tapChronicle(lotBtn);
+    });
     this.bannerKey = '';
     this.feedKey = '';
     // Founding Guide.
@@ -779,6 +776,21 @@ export class Hud {
 
 // ───────────────────────────── The Mercadia Chronicle ─────────────────────────────
 
+  /** A tap on a Chronicle control: pan to a lot, or open and close the recent feed. */
+  private tapChronicle(btn: HTMLElement): void {
+    const act = btn.dataset.act;
+    if (act !== 'focus-lot' && act !== 'focus' && act !== 'feed') return;
+    const res = resolveTap({ act, tile: Number(btn.dataset.tile ?? -1), banner: !!btn.closest('.dispatch'), phone: phone(), feedOpen: this.feedOpen });
+    this.host.audio.click();
+    if (res.focus >= 0) this.host.focus(res.focus);
+    this.feedOpen = res.feedOpen;
+    if (res.chose) {
+      this.feedChosen = true;
+      if (!phone()) store(FEED_KEY, this.feedOpen ? '1' : '0');
+    }
+    this.sync(0, true);
+  }
+
   /** Stripe of a dispatch: brass for eras and milestones, canal for city events, else the acting House. */
   private stripe(view: CityView, d: Dispatch): string {
     if (d.cat === 'event') return CANAL;
@@ -873,6 +885,8 @@ export class Hud {
     }
     const box = r('dispatch');
     const main = r('dmain');
+    tile = dispatchLot({ tile });
+    key += `|${tile}`;
     if (key !== this.bannerKey && box && main) {
       this.bannerKey = key;
       setHtml(r('dbadge'), badge);
@@ -890,6 +904,15 @@ export class Hud {
       toggle(main, 'focusable', tile >= 0);
       setAttr(main, 'title', tile >= 0 && !phone() ? `${tip}\nClick to show it on the map` : tip);
       setAttr(main, 'aria-label', `${kicker}: ${head}${pill ? ` — ${pill}` : ''}`);
+      // A dispatch with a lot gets the banner's own focus button, at every width.
+      const lotBtn = r('dfocus');
+      if (lotBtn) {
+        lotBtn.hidden = tile < 0;
+        if (tile >= 0) lotBtn.dataset.tile = String(tile);
+        else delete lotBtn.dataset.tile;
+        setAttr(lotBtn, 'aria-label', `Show on the map: ${head}`);
+      }
+      toggle(box, 'has-lot', tile >= 0);
     }
     // The city event's countdown rides along the bottom edge whenever one is forecast or live.
     let pct = 0;
@@ -899,19 +922,20 @@ export class Hud {
       bar.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
       toggle(bar, 'forecast', !!ev && !ev.started);
     }
-    // Recent feed: the latest dispatches, newest first, minus the one already in the banner.
+    // Recent feed: the latest dispatches, newest first. A desktop leaves out the one already in
+    // the banner; a phone leads with it, so the active dispatch can be focused from the feed too.
     const exclude = mode === 'dispatch' && shown ? shown.n : -1;
-    const recent = list.filter((d) => d.n !== exclude).slice(phone() ? -4 : -3).reverse();
+    const recent = feedRows(list, exclude, phone());
     const feed = r('cfeed');
-    const feedKey = `${exclude}|${recent.map((d) => d.n).join(',')}|${view.seed}|${view.players.map((p) => p.house).join('')}`;
+    const feedKey = `${exclude}|${phone() ? 'p' : 'd'}|${recent.map((row) => row.d.n).join(',')}|${view.seed}|${view.players.map((p) => p.house).join('')}`;
     if (feed && feedKey !== this.feedKey) {
       this.feedKey = feedKey;
       feed.innerHTML = recent
-        .map((d) => {
-          const focusable = d.tile >= 0;
+        .map(({ d, active, lot }) => {
+          const focusable = lot >= 0;
           const tag = focusable ? 'button' : 'div';
-          const attrs = focusable ? ` data-act="focus" data-tile="${d.tile}" title="Show on the map" aria-label="${esc(d.head)}${d.pill ? ` — ${esc(d.pill)}` : ''}. Show on the map"` : '';
-          return `<${tag} class="cline${focusable ? ' focusable' : ''}" data-n="${d.n}" data-cat="${d.cat}"${attrs} style="--stripe:${this.stripe(view, d)}"><span class="c-badge">${this.badge(view, d)}</span><span class="c-head">${esc(d.head)}</span>${d.pill ? `<span class="c-pill">${esc(d.pill)}</span>` : ''}${focusable ? `<span class="c-focus">${icon('focus')}</span>` : ''}</${tag}>`;
+          const attrs = focusable ? ` data-act="focus" data-tile="${lot}" title="Show on the map" aria-label="${esc(d.head)}${d.pill ? ` — ${esc(d.pill)}` : ''}. Show on the map"` : '';
+          return `<${tag} class="cline${focusable ? ' focusable' : ''}${active ? ' active' : ''}" data-n="${d.n}" data-cat="${d.cat}"${active ? ' data-active="1"' : ''}${attrs} style="--stripe:${this.stripe(view, d)}"><span class="c-badge">${this.badge(view, d)}</span><span class="c-head">${esc(d.head)}</span>${d.pill ? `<span class="c-pill">${esc(d.pill)}</span>` : ''}${focusable ? `<span class="c-focus">${icon('focus')}</span>` : ''}</${tag}>`;
         })
         .join('');
     }

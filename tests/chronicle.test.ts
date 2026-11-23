@@ -18,6 +18,20 @@ import {
   SHOPS,
   STANCES,
 } from '../src/shared/constants';
+import {
+  CAMERA_LIMIT,
+  FEED_ROWS,
+  clampCamera,
+  dispatchLot,
+  feedRows,
+  focusCamera,
+  freeCentre,
+  isPhoneWidth,
+  lotOnScreen,
+  playInsets,
+  resolveTap,
+  type CameraFrame,
+} from '../src/client/chronicle';
 import { CITY, N } from '../src/shared/map';
 import { applyCommand, closeCouncil, createGame, crownIndex, dispatch, eventReceipt, forceEvent, standings, tick } from '../src/shared/sim';
 import type { Dispatch, DispatchCat, GameState } from '../src/shared/types';
@@ -355,5 +369,173 @@ describe('Chronicle over a whole match', () => {
     // Every dispatch is a Gazette line too; the only others are the four closing bells.
     expect(s.gazetteN - s.chronicleN).toBe(4);
     expect(s.leaders).toHaveLength(4);
+  });
+});
+
+// ───────────────────────────── The Chronicle's click-to-focus, phone included ─────────────────────────────
+
+/** A 390×844 phone during play, zoomed to the portrait Fit view, with the camera somewhere else. */
+const phoneFrame = (cam = { x: 180, y: 420, zoom: 0.433 }): CameraFrame => ({ width: 390, height: 844, insets: playInsets(390), cam });
+const desktopFrame = (cam = { x: -20, y: 190, zoom: 1.4 }): CameraFrame => ({ width: 1440, height: 900, insets: playInsets(1440), cam });
+
+/** Tap a Chronicle control and follow the camera, as the HUD and renderer do. */
+function tapAndPan(frame: CameraFrame, tap: Parameters<typeof resolveTap>[0]): { frame: CameraFrame; feedOpen: boolean; focus: number; chose: boolean } {
+  const res = resolveTap(tap);
+  const to = res.focus >= 0 ? focusCamera(res.focus, frame) : null;
+  return { frame: to ? { ...frame, cam: { ...frame.cam, ...to } } : frame, feedOpen: res.feedOpen, focus: res.focus, chose: res.chose };
+}
+
+/** Distance in screen px between a lot and the centre of the free city area. */
+const offCentre = (tile: number, frame: CameraFrame): number => {
+  const p = lotOnScreen(tile, frame);
+  const c = freeCentre(frame);
+  return Math.hypot(p.x - c.x, p.y - c.y);
+};
+
+describe('Chronicle: focusing the active dispatch', () => {
+  it('knows a phone from a desktop and which dispatches have a lot', () => {
+    expect([390, 640, 720].map(isPhoneWidth)).toEqual([true, true, true]);
+    expect([721, 1024, 1440].map(isPhoneWidth)).toEqual([false, false, false]);
+    expect(dispatchLot({ tile: 40 })).toBe(40);
+    expect(dispatchLot({ tile: 0 })).toBe(0);
+    expect(dispatchLot({ tile: N - 1 })).toBe(N - 1);
+    for (const none of [{ tile: -1 }, { tile: N }, { tile: 2.5 }, { tile: NaN }, {}, null, undefined]) expect(dispatchLot(none)).toBe(-1);
+    // Phone insets leave a tall strip of city between the Chronicle bar and the dock.
+    expect(playInsets(390)).toEqual({ top: 142, right: 0, bottom: 176, left: 0 });
+    expect(freeCentre(phoneFrame())).toEqual({ x: 195, y: 405 });
+  });
+
+  it('390×844: the active Roastery dispatch is focusable from the banner’s own button — the camera moves onto its lot', () => {
+    const s = freeze(labGame({ cash: 9000 }));
+    const shop = build(s, 0, 3, 6, 'roastery');
+    const active = last(s);
+    expect(active).toMatchObject({ cat: 'build', head: 'Vermilion founds its first shop', icon: 'roastery', tile: shop.tile });
+    const lot = dispatchLot(active);
+    expect(lot).toBe(shop.tile); // the banner shows its focus button, carrying this lot
+    const before = phoneFrame();
+    expect(offCentre(lot, before)).toBeGreaterThan(120); // the Roastery is nowhere near the middle
+    // Feed shut: the tap pans, and the feed stays shut.
+    const shut = tapAndPan(before, { act: 'focus-lot', tile: lot, banner: true, phone: true, feedOpen: false });
+    expect(shut).toMatchObject({ focus: shop.tile, feedOpen: false, chose: false });
+    expect(shut.frame.cam).not.toEqual(before.cam);
+    expect(offCentre(lot, shut.frame)).toBeLessThan(0.5);
+    // The lot now sits in the open strip of city, clear of the Chronicle bar and the dock.
+    const p = lotOnScreen(lot, shut.frame);
+    expect(p.y).toBeGreaterThan(playInsets(390).top + 100);
+    expect(p.y).toBeLessThan(844 - playInsets(390).bottom - 100);
+    expect(p.x).toBeCloseTo(195, 6);
+    // Feed open: the tap pans and folds the feed away so the lot is in view.
+    const open = tapAndPan(before, { act: 'focus-lot', tile: lot, banner: true, phone: true, feedOpen: true });
+    expect(open).toMatchObject({ focus: shop.tile, feedOpen: false, chose: false });
+    expect(offCentre(lot, open.frame)).toBeLessThan(0.5);
+  });
+
+  it('390×844: the active Promo Blitz dispatch is focusable the same way', () => {
+    const s = freeze(labGame({ cash: 9000 }));
+    build(s, 0, 9, 6, 'park');
+    const shop = build(s, 0, 4, 2, 'roastery');
+    expect(applyCommand(s, 0, { c: 'promo', id: shop.id }).ok).toBe(true);
+    const active = last(s);
+    expect(active).toMatchObject({ cat: 'promo', tier: 1, head: 'Promo Blitz! Vermilion papers the lanes', tile: shop.tile });
+    const before = phoneFrame({ x: -300, y: 60, zoom: 0.433 });
+    expect(offCentre(shop.tile, before)).toBeGreaterThan(120);
+    const after = tapAndPan(before, { act: 'focus-lot', tile: dispatchLot(active), banner: true, phone: true, feedOpen: false });
+    expect(after.focus).toBe(shop.tile);
+    expect(after.feedOpen).toBe(false);
+    expect(offCentre(shop.tile, after.frame)).toBeLessThan(0.5);
+  });
+
+  it('on a phone the headline opens the feed, whose first row is the active dispatch with its own click-to-focus', () => {
+    const s = freeze(labGame({ cash: 9000 }));
+    const park = build(s, 0, 9, 6, 'park');
+    const shop = build(s, 0, 3, 6, 'roastery');
+    const active = last(s);
+    const before = phoneFrame();
+    // The headline never pans on a phone: it opens (and closes) the feed, as the chevron does.
+    const opened = tapAndPan(before, { act: 'focus', tile: active.tile, banner: true, phone: true, feedOpen: false });
+    expect(opened).toMatchObject({ focus: -1, feedOpen: true, chose: true });
+    expect(opened.frame.cam).toEqual(before.cam);
+    expect(resolveTap({ act: 'feed', tile: -1, banner: true, phone: true, feedOpen: true })).toEqual({ focus: -1, feedOpen: false, chose: true });
+    // The feed leads with the active dispatch (it used to be left out, with no way to focus it).
+    const rows = feedRows(s.chronicle, active.n, true);
+    expect(rows.map((r) => r.d.n)).toEqual([active.n, active.n - 1, 1]);
+    expect(rows[0]).toMatchObject({ active: true, lot: shop.tile });
+    expect(rows[1]).toMatchObject({ active: false, lot: park.tile });
+    expect(rows[2]).toMatchObject({ active: false, lot: -1 }); // Era I: Founding Charter has no lot
+    expect(rows.filter((r) => r.active)).toHaveLength(1);
+    // Tapping that row pans to the Roastery and folds the feed away.
+    const focused = tapAndPan(opened.frame, { act: 'focus', tile: rows[0].lot, banner: false, phone: true, feedOpen: true });
+    expect(focused).toMatchObject({ focus: shop.tile, feedOpen: false, chose: false });
+    expect(offCentre(shop.tile, focused.frame)).toBeLessThan(0.5);
+    // A row without a lot is not a control at all.
+    expect(resolveTap({ act: 'focus', tile: -1, banner: false, phone: true, feedOpen: true })).toEqual({ focus: -1, feedOpen: true, chose: false });
+  });
+
+  it('on a desktop the headline and the focus button both pan, the feed keeps the banner’s dispatch out and stays as it was', () => {
+    const s = freeze(labGame({ cash: 9000 }));
+    const shop = build(s, 0, 3, 6, 'roastery');
+    const active = last(s);
+    const before = desktopFrame({ x: 300, y: 380, zoom: 1.4 });
+    for (const act of ['focus', 'focus-lot'] as const) {
+      for (const feedOpen of [false, true]) {
+        const after = tapAndPan(before, { act, tile: active.tile, banner: true, phone: false, feedOpen });
+        expect(after).toMatchObject({ focus: shop.tile, feedOpen, chose: false });
+        expect(offCentre(shop.tile, after.frame)).toBeLessThan(0.5);
+      }
+    }
+    // A headline with no lot toggles the feed instead.
+    expect(resolveTap({ act: 'focus', tile: -1, banner: true, phone: false, feedOpen: false })).toEqual({ focus: -1, feedOpen: true, chose: true });
+    // The banner's focus button is hidden without a lot; a stray tap does nothing.
+    expect(resolveTap({ act: 'focus-lot', tile: -1, banner: true, phone: false, feedOpen: true })).toEqual({ focus: -1, feedOpen: true, chose: false });
+    const rows = feedRows(s.chronicle, active.n, false);
+    expect(rows.map((r) => r.d.n)).toEqual([1]);
+    expect(rows.every((r) => !r.active)).toBe(true);
+  });
+
+  it('keeps the feed short and newest-first at both widths, whatever holds the banner', () => {
+    const s = freeze(labGame({ cash: 9000 }));
+    for (let i = 0; i < 9; i++) dispatch(s, { cat: 'market', tier: 2, head: `News ${i}`, pill: '', tile: i % 2 ? CITY.lots[i] : -1 });
+    const newest = last(s).n;
+    for (const phone of [true, false]) {
+      const cap = phone ? FEED_ROWS.phone : FEED_ROWS.desktop;
+      // The banner holds the newest dispatch, an older headline, or a city event (-1).
+      for (const bannerN of [newest, newest - 4, -1]) {
+        const rows = feedRows(s.chronicle, bannerN, phone);
+        expect(rows).toHaveLength(cap);
+        expect(new Set(rows.map((r) => r.d.n)).size).toBe(cap);
+        const others = rows.filter((r) => !r.active).map((r) => r.d.n);
+        expect(others).toEqual([...others].sort((a, b) => b - a));
+        expect(others).not.toContain(bannerN);
+        expect(rows.filter((r) => r.active).map((r) => r.d.n)).toEqual(phone && bannerN >= 0 ? [bannerN] : []);
+        if (phone && bannerN >= 0) expect(rows[0].d.n).toBe(bannerN);
+        for (const r of rows) expect(r.lot).toBe(dispatchLot(r.d));
+      }
+    }
+    expect(feedRows([], -1, true)).toEqual([]);
+    expect(feedRows([], -1, false)).toEqual([]);
+  });
+
+  it('lands every lot of the district on the centre of the free city area, at phone and desktop sizes', () => {
+    const frames: CameraFrame[] = [
+      phoneFrame(),
+      phoneFrame({ x: -480, y: -100, zoom: 0.433 }),
+      phoneFrame({ x: 60, y: 200, zoom: 1.1 }),
+      { width: 1024, height: 768, insets: playInsets(1024), cam: { x: 200, y: 100, zoom: 0.9 } },
+      desktopFrame(),
+      desktopFrame({ x: 440, y: 480, zoom: 2.2 }),
+    ];
+    for (const f of frames) {
+      for (const lot of CITY.lots) {
+        const to = focusCamera(lot, f);
+        if (!to) throw new Error(`lot ${lot} has no camera target`);
+        expect(to).toEqual(clampCamera(to.x, to.y)); // inside the camera's travel
+        expect(offCentre(lot, { ...f, cam: { ...f.cam, ...to } }), `lot ${lot} at ${f.width}×${f.height} zoom ${f.cam.zoom}`).toBeLessThan(0.5);
+      }
+    }
+    // Off the map: no target. And the camera never leaves its travel.
+    expect(focusCamera(-1, phoneFrame())).toBeNull();
+    expect(focusCamera(N, phoneFrame())).toBeNull();
+    expect(clampCamera(-9999, 9999)).toEqual({ x: CAMERA_LIMIT.x0, y: CAMERA_LIMIT.y1 });
+    expect(clampCamera(9999, -9999)).toEqual({ x: CAMERA_LIMIT.x1, y: CAMERA_LIMIT.y0 });
   });
 });

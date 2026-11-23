@@ -25,6 +25,7 @@ import {
   spriteBox,
   type SceneKind,
 } from './art';
+import { clampCamera, focusCamera } from './chronicle';
 import { BRASS, BRASS_DEEP, drawCrest } from './heraldry';
 
 export interface UiState {
@@ -317,8 +318,9 @@ export class Renderer {
   pan(dxScreen: number, dyScreen: number): void {
     // Any pan of the player's own (drag, keys, the Inspector's reveal) ends a camera glide.
     if (dxScreen || dyScreen) this.glide = null;
-    this.cam.x = clamp(this.cam.x - dxScreen / this.cam.zoom, WORLD.cx - 470, WORLD.cx + 470);
-    this.cam.y = clamp(this.cam.y - dyScreen / this.cam.zoom, WORLD.cy - 300, WORLD.cy + 300);
+    const to = clampCamera(this.cam.x - dxScreen / this.cam.zoom, this.cam.y - dyScreen / this.cam.zoom);
+    this.cam.x = to.x;
+    this.cam.y = to.y;
   }
 
   /**
@@ -326,12 +328,10 @@ export class Renderer {
    * click-to-focus): an eased pan of about 450 ms. A drag, a zoom or Fit cancels it.
    */
   panTo(tile: number): void {
-    if (tile < 0 || tile >= W * H) return;
-    const p = this.tileToScreen((tile % W) + 0.5, Math.floor(tile / W) + 0.5);
-    const cx = this.insets.left + (this.width - this.insets.left - this.insets.right) / 2;
-    const cy = this.insets.top + (this.height - this.insets.top - this.insets.bottom) / 2;
-    const x1 = clamp(this.cam.x - (cx - p.x) / this.cam.zoom, WORLD.cx - 470, WORLD.cx + 470);
-    const y1 = clamp(this.cam.y - (cy - p.y) / this.cam.zoom, WORLD.cy - 300, WORLD.cy + 300);
+    // The target is worked out by the pure Chronicle policy (src/client/chronicle.ts).
+    const to = focusCamera(tile, this);
+    if (!to) return;
+    const { x: x1, y: y1 } = to;
     if (Math.hypot(x1 - this.cam.x, y1 - this.cam.y) * this.cam.zoom < 1.5) return;
     this.glide = { x0: this.cam.x, y0: this.cam.y, x1, y1, t0: performance.now(), dur: 450, lx: this.cam.x, ly: this.cam.y };
   }

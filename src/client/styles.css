@@ -720,7 +720,8 @@ input:focus-visible {
   text-align: left;
 }
 .ledger td {
-  padding: 2px 0;
+  /* Tight rows: with a loan standing, the closing line wraps to two and must still fit unscrolled. */
+  padding: 1px 0;
   text-align: right;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -1586,12 +1587,29 @@ body:has(#victory:not([hidden])) .hud {
   display: flex;
 }
 
-/* Treasury: the rate rides on the Borrow button. */
+/* Treasury: the rate rides on the Borrow button. Borrow takes the slack, Repay and Ledger keep
+   their own width, and nothing may push past the panel's edge. */
+.treasury .acts {
+  min-width: 0;
+}
+.treasury .acts .btn {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .treasury .acts [data-act='borrow'] {
-  flex: 2.5;
+  flex: 1 1 0;
+  gap: 4px;
+  padding: 0 3px;
+}
+.treasury .acts [data-act='repay'] {
+  flex: 0 0 auto;
+  padding: 0 5px;
 }
 .treasury .acts [data-act='ledger'] {
-  flex: 0 0 32px;
+  flex: 0 0 28px;
+  padding: 0;
 }
 .treasury .acts .btn small {
   font-family: var(--mono);
@@ -2135,6 +2153,29 @@ body:has(#victory:not([hidden])) .hud {
   .clock .when > span {
     min-width: 0;
   }
+  /* The narrower Treasury: tighter padding and type so Borrow, Repay and Ledger all sit inside. */
+  .treasury {
+    padding: 8px 8px 9px;
+  }
+  .treasury .acts {
+    gap: 4px;
+  }
+  .treasury .acts .btn {
+    font-size: 11px;
+  }
+  .treasury .acts [data-act='borrow'] {
+    padding: 0 1px;
+  }
+  .treasury .acts [data-act='repay'] {
+    padding: 0 4px;
+  }
+  .treasury .acts [data-act='ledger'] {
+    flex-basis: 26px;
+  }
+  .treasury .acts .btn small {
+    font-size: 9.5px;
+    margin-left: -3px;
+  }
 }
 
 @media (max-width: 1060px) {
@@ -2337,6 +2378,25 @@ body:has(#victory:not([hidden])) .hud {
     margin-top: 0;
     flex: 1;
     min-width: 0;
+    gap: 5px;
+  }
+  /* Room to spare on the one-row phone Treasury: thumb-sized Repay and Ledger. */
+  .treasury .acts .btn {
+    font-size: 11.5px;
+  }
+  .treasury .acts [data-act='borrow'] {
+    flex: 2.5 1 0;
+    padding: 0 6px;
+  }
+  .treasury .acts [data-act='repay'] {
+    flex: 1 1 0;
+    padding: 0 6px;
+  }
+  .treasury .acts [data-act='ledger'] {
+    flex: 0 0 34px;
+  }
+  .treasury .acts .btn small {
+    font-size: 10px;
   }
   .ledger {
     width: auto;
@@ -2752,6 +2812,44 @@ svg.hcrest {
 .chronicle .dispatch[data-cat='event'] .d-pill {
   background: var(--canal-ink);
 }
+/* The banner's own focus button: ink on linen reversed, so a dispatch's lot is one tap away. */
+.chronicle .d-focus {
+  flex: none;
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  min-width: 34px;
+  padding: 0 2px 0 4px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.chronicle .d-focus[hidden] {
+  display: none;
+}
+.chronicle .d-focus-chip {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r);
+  background: var(--ink);
+  color: var(--linen-solid);
+  box-shadow: 0 0 0 1px var(--brass);
+}
+.chronicle .d-focus-chip .ic {
+  width: 17px;
+  height: 17px;
+  stroke-width: 2;
+}
+.chronicle .d-focus:hover .d-focus-chip,
+.chronicle .d-focus:focus-visible .d-focus-chip {
+  background: #3a322a;
+  box-shadow: 0 0 0 2px var(--brass);
+}
+.chronicle .d-focus:active .d-focus-chip {
+  transform: scale(0.94);
+}
 .chronicle .d-toggle {
   align-self: center;
   margin: 0 4px 0 2px;
@@ -2854,6 +2952,15 @@ svg.hcrest {
   width: 13px;
   height: 13px;
   color: var(--ink-3);
+}
+.cline.active {
+  background: rgba(212, 163, 74, 0.16);
+}
+.cline.active .c-head {
+  font-weight: 700;
+}
+.cline.active .c-focus .ic {
+  color: var(--ink);
 }
 .cline.focusable {
   cursor: pointer;
@@ -3735,9 +3842,28 @@ svg.hcrest {
     font-size: 10px;
     line-height: 1.5;
   }
+  /* A full 44 px tap target for the lot, clear of the feed chevron. */
+  .chronicle .d-focus {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0 2px;
+  }
+  .chronicle .d-focus-chip {
+    width: 32px;
+    height: 32px;
+  }
+  .chronicle .d-focus-chip .ic {
+    width: 19px;
+    height: 19px;
+  }
   .cline {
     min-height: 38px;
     font-size: 12px;
+  }
+  .cline .c-focus .ic {
+    width: 16px;
+    height: 16px;
+    color: var(--ink-2);
   }
   /* The guide is a slim one-line bar above the treasury and the dock. */
   .guide {

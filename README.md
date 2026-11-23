@@ -43,18 +43,20 @@ and `/ws` to the Worker on 8787, so run `npm run dev` beside it.
 ## Test it
 
 ```bash
-npm test          # Vitest: 296 tests — map, citizens, cashflow, events, AI, match, room, protocol,
+npm test          # Vitest: 307 tests — map, citizens, cashflow, events, AI, match, room, protocol,
                   #   eras, Era Council, charters & milestones, Chronicle, Founding Guide
 npm run smoke     # Playwright: API, solo, a 390×844 phone, and browsers sharing one room (needs npm run dev)
-npm run evidence  # Playwright: re-captures the nine reference screenshots and a walkthrough film
+npm run evidence  # Playwright: re-captures the reference screenshots as compact JPEGs (VIDEO=1 adds a walkthrough film)
 npm run balance   # headless seeded matches; `npm run balance -- 12 all` adds Blitz and the 2-human Blitz probe
 ```
 
 `npm run smoke` covers the whole v2 surface: era locks and unlock notices, the Founding Guide,
 the Era Council in solo and across two browsers (charter sync, countdown auto-select), Dynasty
 Milestones and the ledger reconciliation, heraldry (DOM crests and canvas pixels), Chronicle
-dispatches and click-to-focus, reconnect, closed-tab seat reclaim, host migration, the
-spectator notice, and phone parity. `ONLY=solo,multi` (any of `api,solo,guide,dev,mobile,multi`)
+dispatches and click-to-focus (the banner's focus button and the feed, on a phone too), a 2×
+room started on an odd tick whose Ledger must equal its Treasury on every beat, the Treasury
+panel's fit at 1024×768, reconnect, closed-tab seat reclaim, host migration, the spectator
+notice, and phone parity. `ONLY=solo,multi` (any of `api,solo,guide,dev,mobile,ledger,multi`)
 runs sections selectively.
 
 `npm run smoke` drives a local Chrome through `playwright-core`. Set `CHROME=/path/to/chrome`
@@ -110,12 +112,15 @@ The room steps the simulation only while a match is running (or an Era Council i
 down) and a human is connected. In the lobby, and whenever everyone has left, there is no timer
 and the object can hibernate. In a match a client picks its charter with
 `{ "t": "cmd", "cmd": { "c": "charter", "key": "artisanry" } }`; snapshots carry the Council,
-the Chronicle and each House's charters and milestones.
+the Chronicle and each House's charters and milestones. Footfall and demand ride along once
+per ten-tick bucket at any pace; the ledgers ride the very beat any House's money moves, so the
+Ledger drawer always reconciles with the Treasury.
 
 ### Dev hook
 
 `window.__mercadia` is a read-only window for smoke checks: `state()`, `era`, `unlocks`,
-`locked`, `milestones`, `charters`, `chronicle()`, `council()`, `guide()`. Its mutating
+`locked`, `milestones`, `charters`, `chronicle()`, `council()`, `guide()`, `ledger()`,
+`camera`. Its mutating
 methods work on `localhost` / `127.0.0.1` and elsewhere only with `?dev=1`: `warp(n)` runs a
 solo match forward n ticks deterministically, closing any Era Council on the way with whatever
 is chosen (the steward's pick otherwise); `warp(n, true)` stops as a Council opens.

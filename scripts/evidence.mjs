@@ -1,14 +1,19 @@
 // MERCADIA visual evidence. Needs the Worker running (npm run dev) and a Chrome/Chromium binary.
 //   node scripts/evidence.mjs      BASE=http://127.0.0.1:8787  CHROME=/usr/bin/google-chrome
-//                                  OUT=~/chief-evidence/media  VIDEO=0 to skip the walkthrough
+//                                  OUT=~/chief-evidence/media  QUALITY=90
+//                                  VIDEO=1 VIDEO_OUT=smoke-artifacts for the optional walkthrough
 // Plays real matches through the real UI (dock, canvas, Inspector, Era Council cards) and saves
-// nine PNGs: Era I onboarding, heraldry and ownership, the Era Council, the mid-game Chronicle,
-// the Final Edition, a two-browser multiplayer room (host and guest at the same instant), and
-// two phone-sized captures. The dev hooks are used only to move solo time (warp) and to frame
-// the camera (look); multiplayer runs on the room's own clock. Any console error, page error or
-// failed request fails the run.
+// compact, flat JPEGs (quality 90) into OUT: Era I onboarding, heraldry and ownership, the Era
+// Council, the mid-game Chronicle, the Final Edition, a two-browser multiplayer room (host and
+// guest at the same instant), three phone-sized captures, and three proofs of fixed defects (a
+// 2× room on odd ticks with Ledger = Treasury, the phone's banner focus button, the Treasury at
+// 1024×768). OUT must end up holding nothing but those .jpg files, under 3 MiB in all: the
+// walkthrough video is off by default and is never written into OUT.
+// The dev hooks are used only to move solo time (warp) and to frame the camera (look);
+// multiplayer runs on the room's own clock. Any console error, page error or failed request
+// fails the run.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
@@ -16,8 +21,14 @@ import { chromium } from 'playwright-core';
 const BASE = process.env.BASE ?? 'http://127.0.0.1:8787';
 const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
 const OUT = process.env.OUT ?? join(homedir(), 'chief-evidence', 'media');
-const VIDEO = process.env.VIDEO !== '0';
+const QUALITY = Number(process.env.QUALITY ?? 90);
+const VIDEO = process.env.VIDEO === '1';
+const VIDEO_OUT = process.env.VIDEO_OUT ?? 'smoke-artifacts';
+/** Everything in OUT together must stay under this (the evidence collector's budget is tight). */
+const BUDGET = 3 * 1048576;
 mkdirSync(OUT, { recursive: true });
+// Earlier runs of this script left PNGs and a WebM here: clear this script's own files (only).
+for (const f of readdirSync(OUT)) if (/^\d\d[a-z]?-[a-z0-9-]+\.(png|jpg|webm)$/.test(f)) rmSync(join(OUT, f), { force: true });
 
 const errors = [];
 const saved = [];
@@ -73,17 +84,72 @@ const settle = async (page, extra = 250) => {
   await sleep(extra);
 };
 
-/** Save a viewport screenshot and check its size from the PNG header. */
+/** Width and height of a JPEG, read from its frame header (SOF0–SOF15, less the non-frame markers). */
+const jpegSize = (buf) => {
+  if (buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 9 < buf.length) {
+    if (buf[i] !== 0xff) return null;
+    const marker = buf[i + 1];
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
+    i += 2 + buf.readUInt16BE(i + 2);
+  }
+  return null;
+};
+
+/** Save a viewport screenshot as a flat JPEG and check its pixel size from the file itself. */
 const shot = async (page, name, w, h) => {
   const path = join(OUT, name);
-  await page.screenshot({ path });
+  await page.screenshot({ path, type: 'jpeg', quality: QUALITY });
   const buf = readFileSync(path);
-  const pw = buf.readUInt32BE(16);
-  const ph = buf.readUInt32BE(20);
-  const good = pw === w && ph === h;
-  saved.push({ name, w: pw, h: ph, bytes: buf.length, good });
-  log(`  ${good ? 'ok  ' : 'FAIL'} ${name} — ${pw}×${ph}, ${(buf.length / 1024).toFixed(0)} KiB`);
-  if (!good) errors.push(`${name} is ${pw}×${ph}, expected ${w}×${h}`);
+  const size = jpegSize(buf) ?? { w: 0, h: 0 };
+  const good = size.w === w && size.h === h && buf.length > 20000;
+  saved.push({ name, w: size.w, h: size.h, bytes: buf.length, good });
+  log(`  ${good ? 'ok  ' : 'FAIL'} ${name} — ${size.w}×${size.h}, ${(buf.length / 1024).toFixed(0)} KiB`);
+  if (!good) errors.push(`${name} is ${size.w}×${size.h} (${buf.length} bytes), expected ${w}×${h}`);
+};
+
+/**
+ * Build two Pocket Parks of my own on adjacent lots, through the dock and the canvas. A rival
+ * may claim a lot between the pick and the click (the AI Houses open around tick 100), so each
+ * park is picked fresh and placed with a check; a lost lot just means another pick.
+ * Returns the two adjacent park tiles, or null.
+ */
+const adjacentParks = async (page) => {
+  const myParks = () => page.evaluate(() => { const m = window.__mercadia; return m.state().buildings.filter((b) => b.owner === m.me && b.kind === 'park').map((b) => b.tile); });
+  const pairOf = (tiles) => {
+    for (const t of tiles) for (const u of tiles) if (t < u && Math.abs((t % 12) - (u % 12)) + Math.abs(Math.floor(t / 12) - Math.floor(u / 12)) === 1) return [t, u];
+    return null;
+  };
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const have = await myParks();
+    const done = pairOf(have);
+    if (done) return done;
+    const target = await page.evaluate((have) => {
+      const m = window.__mercadia;
+      const free = new Set(m.freeLots());
+      const okAt = (t) => { const p = m.tileScreen(t); return p.y > 190 && p.y < innerHeight - 130 && p.x > 340 && p.x < innerWidth - 290; };
+      const adj = (t) => [t - 1, t + 1, t - 12, t + 12].filter((u) => u >= 0 && u < 144 && Math.abs((u % 12) - (t % 12)) + Math.abs(Math.floor(u / 12) - Math.floor(t / 12)) === 1);
+      for (const h of have) for (const u of adj(h)) if (free.has(u) && okAt(u)) return u;
+      for (const t of free) if (okAt(t) && adj(t).some((u) => free.has(u) && okAt(u))) return t;
+      return -1;
+    }, have);
+    if (target < 0) return null;
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    if ((await page.evaluate(() => window.__mercadia.tool)) !== 'park') await page.click('#dock [data-kind="park"]');
+    const at = await page.evaluate((t) => window.__mercadia.tileScreen(t), target);
+    await page.mouse.move(at.x, at.y);
+    await page.waitForTimeout(120);
+    await page.mouse.click(at.x, at.y);
+    const stood = await page.waitForFunction((t) => { const m = window.__mercadia; return m.state().buildings.some((b) => b.tile === t && b.kind === 'park' && b.owner === m.me); }, target, { timeout: 2500 }).then(() => true, () => false);
+    if (!stood) {
+      // Say why, so a refused build is never silently retried away.
+      const why = await page.evaluate((t) => { const m = window.__mercadia; const b = m.state().buildings.find((x) => x.tile === t); return `${b ? `lot taken by player ${b.owner} (${b.kind})` : 'lot still free'} · tool=${m.tool} · toast="${document.querySelector('#toasts .toast.bad')?.textContent ?? ''}"`; }, target);
+      console.log(`  note  park on lot ${target} was not built (attempt ${attempt + 1}): ${why}`);
+    }
+  }
+  return pairOf(await myParks());
 };
 
 const tileXY = (page, tile) => M(page, (t) => window.__mercadia.tileScreen(t), tile);
@@ -256,7 +322,7 @@ await solo.mouse.move(720, 560);
 await solo.waitForFunction(() => window.__mercadia.guide().step === 1 && window.__mercadia.guide().lots.length > 0);
 await sleep(1500);
 // 01 — the first seconds: objective banner, Founding Guide step 1, ringed starter corners, lock badges.
-await shot(solo, '01-desktop-era1-onboarding.png', 1440, 900);
+await shot(solo, '01-desktop-era1-onboarding.jpg', 1440, 900);
 
 // Found a three-lot block: Roastery, Bistro, Pocket Park, edge to edge.
 const block = await pickBlock(solo);
@@ -283,7 +349,7 @@ await clearSel(solo);
   await settle(solo, 500);
 }
 // 02 — heraldry and ownership: kerbs, enclave wash, crest banners, Inspector with its diagnosis.
-await shot(solo, '02-desktop-heraldry-ownership.png', 1440, 900);
+await shot(solo, '02-desktop-heraldry-ownership.jpg', 1440, 900);
 await clearSel(solo);
 await solo.click('#clock [data-act="fit"]');
 
@@ -294,7 +360,7 @@ await solo.mouse.move(1380, 520);
 await solo.waitForFunction(() => getComputedStyle(document.querySelector('#council [data-act="advance"]')).backgroundColor === 'rgb(30, 26, 22)', null, { timeout: 8000 }).catch(() => undefined);
 await settle(solo, 400);
 // 03 — Era Council: Era II unlocks, standings with deltas, three Dynasty Charters, one sealed.
-await shot(solo, '03-desktop-era-council-unlocks.png', 1440, 900);
+await shot(solo, '03-desktop-era-council-unlocks.jpg', 1440, 900);
 await advance(solo);
 
 // Era II: a Nightmarket beside the block, second storeys on the first two shops.
@@ -327,7 +393,7 @@ await settle(solo, 600);
 await clearSel(solo);
 log(`  Era ${await M(solo, () => window.__mercadia.era)} · mine ${(await mine(solo)).map((b) => `${b.kind}:L${b.level}`).join(' ')} · stars ${JSON.stringify((await M(solo, () => window.__mercadia.milestones)).map((m) => m.stars))}`);
 // 04 — mid-game: Chronicle banner and feed, Milestone stars, charter badges, Level 3 on the boulevard.
-await shot(solo, '04-desktop-chronicle-midgame.png', 1440, 900);
+await shot(solo, '04-desktop-chronicle-midgame.jpg', 1440, 900);
 
 // Era III closes, Era IV plays out, the Final Edition goes to press.
 await toCouncil(solo);
@@ -338,7 +404,7 @@ await solo.waitForSelector('#victory:not([hidden]) .victory', { timeout: 10000 }
 await solo.mouse.move(1400, 880);
 await settle(solo, 900);
 // 05 — the Final Edition: winning crest, Crown equation, era chart, honours.
-await shot(solo, '05-desktop-final-edition.png', 1440, 900);
+await shot(solo, '05-desktop-final-edition.jpg', 1440, 900);
 await solo.context().close();
 
 // ───────────────────────────── Multiplayer: two browsers, one room ─────────────────────────────
@@ -397,7 +463,7 @@ await Promise.all([settle(host, 300), settle(guest, 300)]);
   log(`  charters ${JSON.stringify(sa.players.map((p) => p.charters))}`);
 }
 // 06 + 07 — the same instant of the same room, from the host's seat and the guest's.
-await Promise.all([shot(host, '06-desktop-mp-host.png', 1440, 900), shot(guest, '07-desktop-mp-guest.png', 1440, 900)]);
+await Promise.all([shot(host, '06-desktop-mp-host.jpg', 1440, 900), shot(guest, '07-desktop-mp-guest.jpg', 1440, 900)]);
 await host.context().close();
 await guest.context().close();
 
@@ -420,13 +486,39 @@ const tapBuild = async (kind, tile) => {
   await phone.waitForFunction((t) => window.__mercadia.state().buildings.some((b) => b.tile === t), tile, { timeout: 4000 }).catch(() => undefined);
 };
 const phoneBlock = await pickBlock(phone);
+// Hold the clock while the founding Roastery becomes the active Chronicle dispatch (the first
+// city event is forecast at tick 75 and would take the banner).
+await phone.tap('#clock [data-act="pause"]');
 await tapBuild('roastery', phoneBlock[0]);
+await phone
+  .waitForFunction((t) => { const box = document.querySelector('#chronicle .dispatch'); const f = box.querySelector('.d-focus'); return box.dataset.cat === 'build' && !f.hidden && Number(f.dataset.tile) === t; }, phoneBlock[0], { timeout: 12000 })
+  .catch(() => errors.push('phone: the founding Roastery never became the active dispatch with a focus button'));
+{
+  // Slide the city away, then tap the banner's focus button: the camera glides the lot back to
+  // the middle of the free city area.
+  const offOf = (t) => M(phone, (t) => { const m = window.__mercadia; const p = m.tileScreen(t); const c = m.camera.centre; return Math.round(Math.hypot(p.x - c.x, p.y - c.y)); }, t);
+  await M(phone, (t) => { const m = window.__mercadia; const d = 170 / m.zoom / 32; m.look((t % 12) + 0.5 + d, Math.floor(t / 12) + 0.5 + d, m.zoom); }, phoneBlock[0]);
+  await sleep(150);
+  const away = await offOf(phoneBlock[0]);
+  await phone.tap('#chronicle .d-focus');
+  await phone.waitForFunction(() => !window.__mercadia.camera.gliding, null, { timeout: 4000 }).catch(() => undefined);
+  await sleep(700);
+  const back = await offOf(phoneBlock[0]);
+  const open = await M(phone, () => document.getElementById('chronicle').classList.contains('open'));
+  log(`  banner focus button → lot ${phoneBlock[0]}: ${away} px off-centre before the tap, ${back} px after; feed open: ${open}`);
+  if (!(away > 120 && back < 6 && !open)) errors.push(`phone: the banner focus button left lot ${phoneBlock[0]} ${back} px from the centre (was ${away} px), feed open=${open}`);
+  await settle(phone, 300);
+  // 11 — fix proof: the active dispatch's own focus button on a phone, just tapped; its Roastery sits mid-screen.
+  await shot(phone, '11-fix-mobile-chronicle-focus.jpg', 390, 844);
+  await phone.tap('#clock [data-act="fit"]');
+  await phone.tap('#clock [data-act="pause"]'); // resume
+}
 await M(phone, () => window.__mercadia.warp(420));
 await calm(phone);
 await phone.tap('#docktabs [data-tab="shops"]');
 await settle(phone, 500);
 // 08 — Era I on a phone: crest score strip, compact Chronicle, guide bar, tabbed dock with lock badges.
-await shot(phone, '08-mobile-era1-play.png', 390, 844);
+await shot(phone, '08-mobile-era1-play.jpg', 390, 844);
 
 // Grow the block, then open the bottom-sheet Inspector on the first shop.
 await tapBuild('bistro', phoneBlock[1]);
@@ -439,14 +531,112 @@ await calm(phone);
 }
 await settle(phone, 700);
 // 09 — the bottom-sheet Inspector: diagnosis first, crest, price stance, the block kept in view.
-await shot(phone, '09-mobile-chronicle-inspector.png', 390, 844);
+await shot(phone, '09-mobile-chronicle-inspector.jpg', 390, 844);
 // 09b — the Era Council on a phone: one scrollable column, large tap targets.
 await M(phone, () => window.__mercadia.warp(2000, true));
 await phone.waitForSelector('#council:not([hidden]) .charter[data-key]', { timeout: 8000 });
 await phone.locator('#council .charter[data-key]').first().tap();
 await settle(phone, 500);
-await shot(phone, '09b-mobile-era-council.png', 390, 844);
+await shot(phone, '09b-mobile-era-council.jpg', 390, 844);
 await phone.context().close();
+
+// ───────────────────────────── Fix proof: a 2× room on odd ticks, Ledger = Treasury ─────────────────────────────
+
+log('Multiplayer at 2× from an odd tick 1440×900');
+{
+  const room = await open('ledger-host');
+  await room.fill('#t-name', 'Ada');
+  await room.click('#title [data-act="create"]');
+  await room.waitForFunction(() => window.__mercadia.phase === 'lobby' && window.__mercadia.seat === 0 && !!window.__mercadia.lobby, null, { timeout: 15000 });
+  await room.click('#lobby [data-act="start"]');
+  await room.waitForFunction(() => window.__mercadia.phase === 'playing' && window.__mercadia.me >= 0 && window.__mercadia.state().ready, null, { timeout: 15000 });
+  // Ask for 2× the moment an odd tick arrives (inside the page); retry from 1× if the room had stepped on.
+  let odd = null;
+  for (let attempt = 0; attempt < 12 && !odd; attempt++) {
+    const seen = await M(room, () =>
+      new Promise((resolve) => {
+        const m = window.__mercadia;
+        const ticks = [];
+        let asked = false;
+        const iv = setInterval(() => {
+          const t = m.state().tick;
+          if (!asked) {
+            if (m.speed === 1 && t % 2 === 1) {
+              asked = true;
+              document.querySelector('#clock [data-act="speed"][data-v="2"]').click();
+            }
+            return;
+          }
+          if (m.speed !== 2) return;
+          if (ticks[ticks.length - 1] !== t) ticks.push(t);
+          if (ticks.length >= 6) {
+            clearInterval(iv);
+            resolve(ticks);
+          }
+        }, 4);
+      }),
+    );
+    if (seen.slice(1).every((t) => t % 2 === 1)) odd = seen;
+    else {
+      await room.click('#clock [data-act="speed"][data-v="1"]');
+      await room.waitForFunction(() => window.__mercadia.speed === 1, null, { timeout: 5000 });
+    }
+  }
+  if (!odd) errors.push('2× room: could not land on odd tick parity');
+  // Watch every snapshot from here on: Ledger closing cash against Treasury cash.
+  await M(room, () => {
+    const S = (window.__ledgerWatch = { n: 0, last: -1, tens: 0, bad: [] });
+    S.iv = setInterval(() => {
+      const l = window.__mercadia.ledger();
+      if (!l || l.tick === S.last) return;
+      S.last = l.tick;
+      S.n++;
+      if (l.tick % 10 === 0) S.tens++;
+      if (l.closing !== l.cash) S.bad.push(`tick ${l.tick}: Ledger §${l.closing} vs Treasury §${l.cash}`);
+    }, 5);
+  });
+  // Two adjacent Pocket Parks (Block Baron, Civic Benefactor +§120), then a §400 loan.
+  const parks = await adjacentParks(room);
+  if (!parks) errors.push('2× room: could not build two adjacent Pocket Parks');
+  await room.keyboard.press('Escape');
+  await room.keyboard.press('Escape');
+  await room.waitForFunction(() => window.__mercadia.milestones[0].earned.includes('baron') && window.__mercadia.milestones[0].earned.includes('benefactor'), null, { timeout: 8000 }).catch(() => errors.push('2× room: the adjacent parks did not earn Block Baron + Civic Benefactor'));
+  await room.click('#treasury [data-act="borrow"]');
+  await room.waitForFunction(() => window.__mercadia.ledger().debt === 400, null, { timeout: 5000 });
+  await room.click('#treasury [data-act="ledger"]');
+  await room.waitForFunction(() => !document.getElementById('ledger').hidden && !!document.querySelector('#ledger .recon b'), null, { timeout: 3000 });
+  await room.mouse.move(820, 330);
+  await sleep(2500);
+  await settle(room, 200);
+  const seen = await M(room, () => { const S = window.__ledgerWatch; clearInterval(S.iv); const l = window.__mercadia.ledger(); return { n: S.n, tens: S.tens, bad: S.bad, ...l, speed: window.__mercadia.speed, drawer: document.querySelector('#ledger .recon b').textContent, chip: document.querySelector('#treasury [data-f="cash"]').textContent }; });
+  log(`  ${seen.n} snapshots at ${seen.speed}×, ${seen.tens} on a multiple of ten · tick ${seen.tick}: Ledger drawer ${seen.drawer} · Treasury ${seen.chip} · dividends §${seen.dividends} · borrowed §${seen.borrowed} · ${seen.bad.length} mismatches`);
+  if (seen.bad.length || seen.tens || seen.dividends !== 120 || seen.borrowed !== 400 || seen.tick % 2 !== 1) errors.push(`2× room: the Ledger fell out of step — ${seen.bad.slice(0, 2).join(' | ') || `dividends §${seen.dividends}, borrowed §${seen.borrowed}, tick ${seen.tick}, ${seen.tens} tens`}`);
+  // 10 — fix proof: a live room at 2× on odd ticks; the Ledger drawer's closing line equals the Treasury.
+  await shot(room, '10-fix-mp-2x-ledger-reconciled.jpg', 1440, 900);
+  await room.context().close();
+}
+
+// ───────────────────────────── Fix proof: the Treasury at 1024×768 ─────────────────────────────
+
+log('Solo 1024×768');
+{
+  const mid = await open('1024', { viewport: { width: 1024, height: 768 }, deviceScaleFactor: 1 });
+  await mid.click('#title [data-act="solo"]');
+  await mid.waitForFunction(() => window.__mercadia.phase === 'playing' && window.__mercadia.kind === 'solo');
+  await mid.waitForFunction(() => window.__mercadia.guide().step === 1 && window.__mercadia.guide().lots.length > 0);
+  const block = await pickBlock(mid);
+  await build(mid, 'roastery', block[0]);
+  await mid.keyboard.press('Escape');
+  await mid.click('#treasury [data-act="borrow"]');
+  await mid.mouse.move(600, 300);
+  await settle(mid, 400);
+  const fit = await M(mid, () => { const el = document.getElementById('treasury'); const r = el.getBoundingClientRect(); const lg = el.querySelector('[data-act="ledger"]').getBoundingClientRect(); return { sw: el.scrollWidth, cw: el.clientWidth, right: r.right, ledgerRight: lg.right }; });
+  log(`  #treasury scrollWidth ${fit.sw} ≤ clientWidth ${fit.cw}; Ledger button ends at x=${fit.ledgerRight.toFixed(1)}, the panel at x=${fit.right.toFixed(1)}`);
+  if (fit.sw > fit.cw || fit.ledgerRight > fit.right + 0.5) errors.push(`1024×768: the Treasury overflows (scrollWidth ${fit.sw} > clientWidth ${fit.cw})`);
+  // 12 — fix proof: Borrow, Repay and Ledger all inside the Treasury panel at 1024×768.
+  await shot(mid, '12-fix-desktop-1024-treasury.jpg', 1024, 768);
+  await mid.context().close();
+}
 
 // ───────────────────────────── Walkthrough video (optional) ─────────────────────────────
 
@@ -533,7 +723,8 @@ if (VIDEO) {
     if (frames.length) list += `file '${frames[frames.length - 1].file}'\n`;
     const listFile = join(dir, 'frames.txt');
     writeFileSync(listFile, list);
-    const dst = join(OUT, '10-solo-walkthrough.webm');
+    mkdirSync(VIDEO_OUT, { recursive: true });
+    const dst = join(VIDEO_OUT, 'solo-walkthrough.webm'); // never into OUT: the evidence folder is JPEG-only
     const enc = spawnSync(
       'ffmpeg',
       ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile, '-vf', 'fps=20,scale=1440:900:flags=lanczos,format=yuv420p', '-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', '37', '-deadline', 'good', '-cpu-used', '3', '-row-mt', '1', '-an', dst],
@@ -543,16 +734,20 @@ if (VIDEO) {
     else {
       const bytes = statSync(dst).size;
       const secs = frames.length ? frames[frames.length - 1].t - frames[0].t : 0;
-      saved.push({ name: '10-solo-walkthrough.webm', w: 1440, h: 900, bytes, good: bytes > 100000 });
-      log(`  ok   10-solo-walkthrough.webm — 1440×900 VP9, ${secs.toFixed(0)} s, ${frames.length} frames, ${(bytes / 1048576).toFixed(1)} MiB`);
+      log(`  ok   ${dst} — 1440×900 VP9, ${secs.toFixed(0)} s, ${frames.length} frames, ${(bytes / 1048576).toFixed(1)} MiB`);
     }
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
 await browser.close();
-const total = saved.reduce((a, s) => a + s.bytes, 0);
-log(`\n${saved.length} files in ${OUT} · ${(total / 1048576).toFixed(1)} MiB`);
+// OUT holds nothing but flat .jpg files, and stays inside the budget.
+const listing = readdirSync(OUT, { withFileTypes: true });
+const strays = listing.filter((e) => !e.isFile() || !/\.jpg$/.test(e.name)).map((e) => e.name);
+if (strays.length) errors.push(`${OUT} holds something other than flat .jpg files: ${strays.join(', ')}`);
+const total = listing.filter((e) => e.isFile()).reduce((a, e) => a + statSync(join(OUT, e.name)).size, 0);
+log(`\n${saved.length} JPEGs saved · ${listing.length} entries in ${OUT} · ${(total / 1048576).toFixed(2)} MiB of ${(BUDGET / 1048576).toFixed(0)} MiB`);
+if (total >= BUDGET) errors.push(`${OUT} is ${(total / 1048576).toFixed(2)} MiB: over the ${(BUDGET / 1048576).toFixed(0)} MiB budget (lower QUALITY)`);
 if (errors.length) {
   log(`\n${errors.length} problem(s):`);
   for (const e of errors.slice(0, 30)) log('  ' + e);

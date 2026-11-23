@@ -74,8 +74,8 @@ export class LocalSession implements Session {
     this.state.fx = [];
     const fx = this.view.apply(snap);
     for (const f of fx) this.pending.push(f);
-    // Snapshots carry the ledgers once a second. The simulation is right here, so the solo
-    // Ledger drawer reads them fresh on every push and always reconciles with cash in hand.
+    // Snapshots carry the ledgers whenever money moves. The simulation is right here, so the
+    // solo Ledger drawer also reads them fresh on every push: it always reconciles with cash in hand.
     this.view.ledgers = this.state.players.map((p) => ({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger }));
     this.interval = Math.min(260, Math.max(30, now - this.snapAt));
     this.snapAt = now;

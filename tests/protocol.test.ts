@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { advance } from '../src/shared/ai';
-import { DESIRES, MODES, eraOf } from '../src/shared/constants';
+import { CIVICS, DESIRES, LOAN_STEP, MILESTONES, MODES, START_CASH, eraOf } from '../src/shared/constants';
 import { CITIZEN_STRIDE, CityView, SnapEncoder, type Snap } from '../src/shared/protocol';
-import { applyCommand, closeCouncil, continueEndless, createGame, dayPhase, forceEvent, headlineEvent, marketShares, netWorth, crownIndex, quarterTick } from '../src/shared/sim';
+import { applyCommand, closeCouncil, continueEndless, createGame, dayPhase, forceEvent, headlineEvent, ledgerCashChange, marketShares, netWorth, crownIndex, quarterTick } from '../src/shared/sim';
 import type { GameState } from '../src/shared/types';
 import { ais, build, clone, freeze, labGame } from './helpers';
 
@@ -196,7 +196,7 @@ describe('Snapshot encoding', () => {
     expect(quiet.gz).toBeUndefined();
     expect(quiet.ch).toBeUndefined();
     expect(quiet.fx).toBeUndefined();
-    // The slow data rides along every tenth tick only.
+    // The slow data rides along once per ten-tick bucket (nobody's money moves in this quiet lab).
     for (let i = 0; i < 20; i++) {
       advance(s);
       const snap = enc.encode(s, false);
@@ -220,6 +220,145 @@ describe('Snapshot encoding', () => {
     expect(on.res).toBeNull();
     expect(on.q).toEqual([5, 0, 1]);
     expect(enc.encode(s, false).res).toBeUndefined();
+  });
+});
+
+describe('The slow lane and the ledgers', () => {
+  /** Encode a delta after `step` ticks, the way a room does at that pace. */
+  const beatOf = (s: GameState, enc: SnapEncoder, step: number): Snap => {
+    for (let i = 0; i < step; i++) advance(s);
+    const snap = enc.encode(s, false, step);
+    s.fx = [];
+    return snap;
+  };
+
+  it('refreshes footfall, demand and ledgers once per ten-tick bucket at every pace and tick parity', () => {
+    // Ticks per broadcast: 1× and 2× and 3× step whole ticks; 1.5× alternates 1 and 2.
+    const paces: [string, number[]][] = [['1×', [1]], ['1.5×', [1, 2]], ['2×', [2]], ['3×', [3]]];
+    for (const [name, steps] of paces) {
+      for (const startTick of [80, 81, 83, 85, 87, 89]) {
+        const s = freeze(labGame({ seed: 5, cash: 5000 }));
+        const enc = new SnapEncoder();
+        while (s.tick < startTick) beatOf(s, enc, 1);
+        let lastBucket = Math.floor(s.tick / 10);
+        let refreshed = 0;
+        let buckets = 0;
+        for (let i = 0; i < 120; i++) {
+          const snap = beatOf(s, enc, steps[i % steps.length]);
+          const bucket = Math.floor(s.tick / 10);
+          const moved = bucket !== lastBucket;
+          lastBucket = bucket;
+          if (moved) buckets++;
+          if (snap.ff) refreshed++;
+          // Exactly the first broadcast of each bucket carries the slow lane, all three parts.
+          expect(snap.ff !== undefined, `${name} from ${startTick} at tick ${s.tick}`).toBe(moved);
+          expect(snap.dm !== undefined, `${name} from ${startTick} at tick ${s.tick}`).toBe(moved);
+          if (moved) expect(snap.lg, `${name} from ${startTick} at tick ${s.tick}`).toBeDefined();
+        }
+        expect(buckets).toBeGreaterThanOrEqual(12);
+        expect(refreshed).toBe(buckets);
+      }
+    }
+    // The case that used to go dark: 2× from tick 83 never lands on a multiple of ten.
+    const s = freeze(labGame({ seed: 5, cash: 5000 }));
+    const enc = new SnapEncoder();
+    while (s.tick < 83) beatOf(s, enc, 1);
+    let slow = 0;
+    for (let i = 0; i < 200; i++) {
+      const snap = beatOf(s, enc, 2);
+      expect(s.tick % 10).not.toBe(0);
+      if (snap.ff && snap.dm && snap.lg) slow++;
+    }
+    expect(slow).toBe(40); // 400 ticks, 40 buckets, 40 refreshes
+  });
+
+  it('sends the ledgers on the very beat money moves: dividends, loans and repayments at odd-parity 2×', () => {
+    // Milestones are live here: two adjacent Pocket Parks earn Block Baron and Civic Benefactor (+§120).
+    const s = freeze(labGame({ seed: 5, milestones: true }));
+    const enc = new SnapEncoder();
+    const view = new CityView();
+    view.apply(wire(enc.encode(s, true, 1)));
+    while (s.tick < 83) view.apply(wire(beatOf(s, enc, 1)));
+    const reconciled = (): void => {
+      s.players.forEach((p, i) => {
+        const lg = view.ledgers[i];
+        expect(lg).toEqual({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger });
+        // The Ledger drawer's closing line against the Treasury chip, to the exact §.
+        expect(Math.round(START_CASH + ledgerCashChange(lg.total)), `tick ${s.tick} player ${i}`).toBe(view.players[i].cash);
+        expect(view.players[i].cash).toBe(Math.round(p.cash));
+        expect(view.players[i].debt).toBe(p.debt);
+      });
+    };
+    const beat = (): Snap => {
+      const snap = beatOf(s, enc, 2);
+      view.apply(wire(snap));
+      expect(s.tick % 2).toBe(1); // odd parity for the rest of the match: never a multiple of ten
+      reconciled();
+      return snap;
+    };
+    for (let i = 0; i < 4; i++) beat();
+    // A quiet beat inside a bucket carries no ledgers at all.
+    expect(s.tick).toBe(91);
+    expect(beat().lg).toBeUndefined();
+    // Two adjacent parks: construction is booked, and on the next tick the Milestones pay out.
+    build(s, 0, 3, 6, 'park');
+    build(s, 0, 4, 6, 'park');
+    const parks = beat();
+    expect(s.tick).toBe(95);
+    expect(parks.lg).toBeDefined();
+    expect(parks.dy).toBeDefined();
+    expect(view.players[0].milestones[1]).toBeGreaterThanOrEqual(0); // Block Baron
+    expect(view.players[0].milestones[2]).toBeGreaterThanOrEqual(0); // Civic Benefactor
+    expect(view.ledgers[0].total.dividends).toBe(MILESTONES[2].cash);
+    expect(view.ledgers[0].cur.civic).toBe(2 * CIVICS.park.cost);
+    expect(view.players[0].cash).toBe(START_CASH - 2 * CIVICS.park.cost + MILESTONES[2].cash);
+    expect(beat().lg).toBeUndefined();
+    // A §400 loan draw shows in Financing on the same beat the Treasury gains it.
+    expect(applyCommand(s, 0, { c: 'borrow' }).ok).toBe(true);
+    const loan = beat();
+    expect(s.tick).toBe(99);
+    expect(loan.lg).toBeDefined();
+    expect(view.ledgers[0].total.borrowed).toBe(LOAN_STEP);
+    expect(view.players[0].debt).toBe(LOAN_STEP);
+    expect(view.players[0].cash).toBe(START_CASH - 2 * CIVICS.park.cost + MILESTONES[2].cash + LOAN_STEP);
+    // Payroll (interest on the loan, tick 100) lands mid-beat and is reconciled too.
+    const payroll = beat();
+    expect(s.tick).toBe(101);
+    expect(payroll.lg).toBeDefined();
+    expect(view.ledgers[0].total.interest).toBeGreaterThan(0);
+    // And a repayment.
+    expect(applyCommand(s, 0, { c: 'repay' }).ok).toBe(true);
+    const repaid = beat();
+    expect(repaid.lg).toBeDefined();
+    expect(view.ledgers[0].total.repaid).toBe(LOAN_STEP);
+    expect(view.players[0].debt).toBe(0);
+    for (let i = 0; i < 300; i++) beat();
+    // A full snapshot for a late joiner does not disturb the delta memory.
+    const late = new CityView();
+    late.apply(wire(enc.encode(s, true, 2)));
+    expect(late.ledgers).toEqual(view.ledgers);
+    expect(enc.encode(s, false, 2).lg).toBeUndefined();
+  });
+
+  it('reconciles every House on every beat of a busy AI match at 2× from an odd tick', () => {
+    const s = createGame({ seed: 17, mode: 'standard', players: ais(['vesper', 'aurelia', 'orson', 'vesper']) });
+    const enc = new SnapEncoder();
+    const view = new CityView();
+    view.apply(wire(enc.encode(s, true, 1)));
+    while (s.tick < 87) view.apply(wire(beatOf(s, enc, 1)));
+    let withLedgers = 0;
+    for (let i = 0; i < 700 && s.phase === 'playing'; i++) {
+      const snap = beatOf(s, enc, 2);
+      view.apply(wire(snap));
+      if (snap.lg) withLedgers++;
+      expect(s.tick % 10).not.toBe(0);
+      s.players.forEach((p, k) => {
+        expect(view.ledgers[k]).toEqual({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger });
+        expect(Math.round(START_CASH + ledgerCashChange(view.ledgers[k].total)), `tick ${s.tick} player ${k}`).toBe(view.players[k].cash);
+      });
+    }
+    expect(withLedgers).toBeGreaterThan(70);
+    expect(s.players.some((p) => p.totalLedger.revenue > 0)).toBe(true);
   });
 });
 
