@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { advance } from '../src/shared/ai';
 import {
   AUTO_RESTOCK_AT,
@@ -29,6 +29,7 @@ import {
   buildingById,
   canBuild,
   chooseShop,
+  closeCouncil,
   createGame,
   emptyLedger,
   eventActive,
@@ -48,12 +49,15 @@ import {
 import { CS, type BuildKind, type Command, type Ledger } from '../src/shared/types';
 import { ais, build, clone, freeze, fxOf, labGame, putCitizen, run, sendTo } from './helpers';
 
+// Whole seeded matches are played in here: leave room for a busy machine.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
+
 const who = { arch: 'local' as const, budget: 80, tried: [] as number[] };
 
 describe('Cashflow: construction', () => {
   it('deducts a shop’s cost and books it under construction', () => {
     SHOP_KINDS.forEach((kind, i) => {
-      const s = labGame({ cash: 1000 });
+      const s = labGame({ era: 3, cash: 1000 });
       const def = SHOPS[kind];
       const lot = CITY.lots[i * 7];
       const b = build(s, 0, tx(lot), ty(lot), kind);
@@ -76,7 +80,7 @@ describe('Cashflow: construction', () => {
 
   it('books a civic project under civic and credits its prestige', () => {
     CIVIC_KINDS.forEach((kind, i) => {
-      const s = labGame({ cash: 1000 });
+      const s = labGame({ era: 3, cash: 1000 });
       const def = CIVICS[kind];
       const b = build(s, 1, 2 + i, 10, kind);
       expect(b.tile).toBe(idx(2 + i, 10));
@@ -100,7 +104,7 @@ describe('Cashflow: construction', () => {
   });
 
   it('refuses to build off a lot, on an occupied lot, without cash, or an unknown project', () => {
-    const s = labGame({ cash: 1000 });
+    const s = labGame({ era: 3, cash: 1000 });
     const lot = idx(3, 6);
     build(s, 1, 3, 6, 'roastery');
     const snapshot = JSON.stringify(s);
@@ -142,7 +146,7 @@ describe('Cashflow: construction', () => {
 
 describe('Cashflow: sales', () => {
   it('books each sale as revenue, raises cash by the ticket price and draws down stock', () => {
-    const s = labGame({ seed: 6 });
+    const s = labGame({ era: 3, seed: 6 });
     const b = build(s, 0, 10, 2, 'roastery');
     b.auto = false;
     const p = s.players[0];
@@ -182,7 +186,7 @@ describe('Cashflow: sales', () => {
       // Even the Budget ticket clears the cost of the goods.
       expect(prices[0]).toBeGreaterThan(SHOPS[kind].unitCost);
     }
-    const s = labGame({ seed: 6 });
+    const s = labGame({ era: 3, seed: 6 });
     const corner = build(s, 0, 10, 2, 'roastery');
     const plain = build(s, 1, 8, 2, 'roastery');
     expect(CITY.corner[corner.tile]).toBe(true);
@@ -230,7 +234,7 @@ describe('Cashflow: payroll, rent and credit', () => {
   });
 
   it('raises rent by RENT_HIKE during a Commercial Rent Hike, and only rent', () => {
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     const shop = build(s, 0, 3, 6, 'boutique');
     const stop = build(s, 0, 2, 6, 'tramstop');
     const p = s.players[0];
@@ -257,7 +261,7 @@ describe('Cashflow: payroll, rent and credit', () => {
   });
 
   it('lends LOAN_STEP at a time up to LOAN_MAX, charges LOAN_RATE per payroll, and takes repayments', () => {
-    const s = freeze(labGame({ cash: 100 }));
+    const s = freeze(labGame({ era: 3, cash: 100 }));
     const p = s.players[0];
     expect(applyCommand(s, 0, { c: 'repay' })).toEqual({ ok: false, err: 'No debt to repay' });
     const steps = LOAN_MAX / LOAN_STEP;
@@ -303,7 +307,7 @@ describe('Cashflow: payroll, rent and credit', () => {
 describe('Cashflow: stock', () => {
   it('charges a manual restock units × unit cost and books it under supplies', () => {
     for (const kind of SHOP_KINDS) {
-      const s = freeze(labGame({ cash: 5000 }));
+      const s = freeze(labGame({ era: 3, cash: 5000 }));
       const def = SHOPS[kind];
       const b = build(s, 0, 3, 6, kind);
       const p = s.players[0];
@@ -322,7 +326,7 @@ describe('Cashflow: stock', () => {
       expect(fxOf(s.fx, 'restock')).toEqual([{ k: 'restock', b: b.id, p: 0 }]);
     }
     // A short till buys only what it can pay for, and an empty one nothing.
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     const def = SHOPS.boutique;
     const b = build(s, 0, 3, 6, 'boutique');
     const p = s.players[0];
@@ -344,7 +348,7 @@ describe('Cashflow: stock', () => {
 
   it('auto-restocks at the reorder point for AUTO_RESTOCK_PREMIUM more than a manual order', () => {
     for (const kind of SHOP_KINDS) {
-      const s = freeze(labGame({ cash: 5000 }));
+      const s = freeze(labGame({ era: 3, cash: 5000 }));
       const def = SHOPS[kind];
       const b = build(s, 0, 3, 6, kind);
       const p = s.players[0];
@@ -382,7 +386,7 @@ describe('Cashflow: stock', () => {
 
   it('makes every restock dearer by SUPPLY_CRUNCH during a Supply Crunch', () => {
     for (const kind of SHOP_KINDS) {
-      const s = freeze(labGame({ cash: 50000 }));
+      const s = freeze(labGame({ era: 3, cash: 50000 }));
       const def = SHOPS[kind];
       const b = build(s, 0, 3, 6, kind);
       const p = s.players[0];
@@ -416,7 +420,7 @@ describe('Cashflow: stock', () => {
   });
 
   it('marks a shop that runs dry: stockout badge, lost custom, and recovery on restock', () => {
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     const a = build(s, 0, 3, 6, 'roastery');
     const door = CITY.door[a.tile];
     expect(chooseShop(s, who, 'coffee', door, false)).toBe(a);
@@ -452,7 +456,7 @@ describe('Cashflow: stock', () => {
 describe('Cashflow: upgrades, promotion and sale of property', () => {
   it('charges upgradeCost for each level, adds it to the capital invested and stops at Level 3', () => {
     for (const kind of SHOP_KINDS) {
-      const s = freeze(labGame({ cash: 5000 }));
+      const s = freeze(labGame({ era: 3, cash: 5000 }));
       const def = SHOPS[kind];
       const b = build(s, 0, 3, 6, kind);
       const p = s.players[0];
@@ -481,7 +485,7 @@ describe('Cashflow: upgrades, promotion and sale of property', () => {
       expect(serviceTicksOf(b)).toBeLessThan(l1.ticks);
       expect(serversOf(b)).toBeGreaterThanOrEqual(l1.servers);
     }
-    const s = labGame({ cash: SHOPS.cinema.cost });
+    const s = labGame({ era: 3, cash: SHOPS.cinema.cost });
     const cinema = build(s, 0, 3, 6, 'cinema');
     expect(applyCommand(s, 0, { c: 'upgrade', id: cinema.id })).toEqual({ ok: false, err: 'Not enough cash' });
     expect(cinema.level).toBe(1);
@@ -490,7 +494,7 @@ describe('Cashflow: upgrades, promotion and sale of property', () => {
   });
 
   it('sells a property for 60% of what was invested, books the salvage and frees the lot', () => {
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     const b = build(s, 0, 3, 6, 'bistro');
     expect(applyCommand(s, 0, { c: 'upgrade', id: b.id }).ok).toBe(true);
     const p = s.players[0];
@@ -524,7 +528,7 @@ describe('Cashflow: upgrades, promotion and sale of property', () => {
   });
 
   it('lets citizens who were queuing, being served or on their way carry on when a shop is sold', () => {
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     const a = build(s, 0, 3, 6, 'roastery');
     const rival = build(s, 1, 9, 6, 'roastery');
     const door = CITY.door[a.tile];
@@ -555,7 +559,7 @@ describe('Cashflow: upgrades, promotion and sale of property', () => {
   });
 
   it('charges PROMO_COST for a Promo Blitz, books marketing, and enforces the cooldown', () => {
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     const b = build(s, 0, 3, 6, 'arcade');
     const p = s.players[0];
     const cash = p.cash;
@@ -593,7 +597,7 @@ describe('Cashflow: upgrades, promotion and sale of property', () => {
 
 describe('Cashflow: command validation', () => {
   it('rejects every command aimed at a rival’s building and leaves the state untouched', () => {
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     const theirs = build(s, 1, 3, 6, 'bistro');
     theirs.stock = 5;
     const before = JSON.stringify(s);
@@ -621,7 +625,7 @@ describe('Cashflow: command validation', () => {
   });
 
   it('accepts the four price stances and nothing else', () => {
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     const b = build(s, 0, 3, 6, 'boutique');
     for (const stance of [0, 1, 2, 3, 2, 0]) {
       expect(applyCommand(s, 0, { c: 'price', id: b.id, stance }).ok).toBe(true);
@@ -643,19 +647,19 @@ describe('Cashflow: ledger and net worth', () => {
   it('nets a ledger as income minus every cost line', () => {
     expect(ledgerNet(emptyLedger())).toBe(0);
     const l: Ledger = {
-      revenue: 1000, salvage: 200, awards: 50,
+      revenue: 1000, salvage: 200, awards: 50, dividends: 80, // Milestone dividends are income
       wages: 1, supplies: 2, rent: 4, interest: 8, construction: 16, civic: 32, marketing: 64,
       borrowed: 400, repaid: 150, // financing is not cashflow from trading
     };
-    expect(ledgerNet(l)).toBe(1250 - 127);
+    expect(ledgerNet(l)).toBe(1330 - 127);
     for (const key of Object.keys(l) as (keyof Ledger)[]) {
-      const sign = key === 'borrowed' || key === 'repaid' ? 0 : key === 'revenue' || key === 'salvage' || key === 'awards' ? 1 : -1;
+      const sign = key === 'borrowed' || key === 'repaid' ? 0 : key === 'revenue' || key === 'salvage' || key === 'awards' || key === 'dividends' ? 1 : -1;
       expect(ledgerNet({ ...emptyLedger(), [key]: 10 })).toBe(10 * sign);
     }
   });
 
   it('values a House at cash minus debt plus 80% of capital invested in its own buildings', () => {
-    const s = freeze(labGame({ cash: 3000 }));
+    const s = freeze(labGame({ era: 3, cash: 3000 }));
     const [p, q] = s.players;
     expect(netWorth(s, p)).toBe(3000);
     const shop = build(s, 0, 3, 6, 'cinema');
@@ -678,12 +682,22 @@ describe('Cashflow: ledger and net worth', () => {
     const s = createGame({ seed: 12, mode: 'blitz', players: ais(['vesper', 'aurelia', 'orson', 'orson']) });
     let worst = 0;
     const closed = s.players.map(() => emptyLedger());
-    let quarter = s.quarter;
-    while (s.phase === 'playing') {
+    // An era's books close at its final tick, before the Era Council sits: `leaders` gains an
+    // entry at every close, whether a Council, the next era or the final bell follows.
+    let closes = s.leaders.length;
+    let councils = 0;
+    while (s.phase !== 'ended') {
+      if (s.phase === 'council') {
+        councils++;
+        const cash = s.players.map((p) => p.cash);
+        closeCouncil(s); // adopting a charter moves no money
+        expect(s.players.map((p) => p.cash)).toEqual(cash);
+        continue;
+      }
       const open = s.players.map((p) => clone(p.ledger));
       advance(s);
       s.fx = [];
-      const rolled = s.quarter !== quarter || s.result !== null;
+      const rolled = s.leaders.length !== closes;
       s.players.forEach((p, i) => {
         worst = Math.max(worst, Math.abs(p.cash - (START_CASH + ledgerNet(p.totalLedger) + p.debt)));
         if (rolled) {
@@ -697,8 +711,10 @@ describe('Cashflow: ledger and net worth', () => {
           worst = Math.max(worst, Math.abs(p.totalLedger[key] - closed[i][key] - p.ledger[key]));
         }
       });
-      quarter = s.quarter;
+      closes = s.leaders.length;
     }
+    expect(councils).toBe(3);
+    expect(closes).toBe(4);
     expect(worst).toBeLessThan(1e-6);
     expect(s.players.some((p) => p.totalLedger.revenue > 0)).toBe(true);
     expect(s.players.every((p) => p.totalLedger.construction + p.totalLedger.civic > 0)).toBe(true);

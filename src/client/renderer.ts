@@ -1,27 +1,32 @@
 // The city renderer: Canvas 2D, isometric 2:1, device-pixel aware.
-// Frame order: ground → water shimmer → shadows → depth-sorted actors → colour grade →
-// light pass → weather → overlays → paper grain.
+// Frame order: ground → water shimmer → shadows → depth-sorted actors (each owned lot brings
+// its House kerb, enclave wash and banner) → colour grade → light pass → weather → ownership
+// relight (kerbs and banners restored to full House colour after the grade) → overlays →
+// paper grain.
 import { HOUSES, PROMO_TICKS, TRANSIT_RADIUS, auraRadius, buildCost, isShop } from '../shared/constants';
 import { civicReach, eventHighlights } from '../shared/insight';
 import { CITY, H, W, idx, tx, ty } from '../shared/map';
 import type { BuildingView, CitizenView, CityView } from '../shared/protocol';
-import { hash32, lotBonuses, loopPoint, queueCap, stopTiles, trafficPips } from '../shared/sim';
+import { hash32, lotBonuses, loopPoint, queueCap, starsOf, stopTiles, trafficPips } from '../shared/sim';
 import { CS, type BuildKind, type Fx, type TileKind } from '../shared/types';
 import {
   C,
   HH,
   HW,
   Pen,
+  bannerAnchor,
   buildingHeight,
   drawScene,
-  flagAnchor,
   houseTone,
   mat,
   shade,
   shadowFootprint,
+  solidBoxes,
   spriteBox,
   type SceneKind,
 } from './art';
+import { clampCamera, focusCamera } from './chronicle';
+import { BRASS, BRASS_DEEP, drawCrest } from './heraldry';
 
 export interface UiState {
   me: number; // player index, -1 when spectating or in attract mode
@@ -31,6 +36,11 @@ export interface UiState {
   selectedCitizen: number;
   /** The last pointer was a finger: build previews take a first tap, building a second. */
   touch?: boolean;
+  /**
+   * Founding Guide, step 1: vacant starter lots to mark with a gently pulsing warm brass ring
+   * (drawn after the colour grade so they read at any hour). Empty or absent: no rings.
+   */
+  guideLots?: number[];
 }
 
 export type Pick = { kind: 'citizen'; id: number } | { kind: 'tile'; tile: number } | null;
@@ -63,10 +73,40 @@ interface CitVis {
 
 interface Actor {
   d: number;
-  t: number; // 0 building, 1 static scenery, 2 citizen, 3 tram, 4 lamp, 5 tree, 6 parapet, 7 boat, 8 ship, 9 stop sign
+  // 0 building, 1 static scenery, 2 citizen, 3 tram, 4 lamp, 5 tree, 6 parapet, 7 boat, 8 ship,
+  // 9 stop sign, 10 canal pennant line (Era II), 11 boulevard lamp (Era III), 12 harbor ferry (Era III)
+  t: number;
   a: number; // payload index / id
   b?: BuildingView;
   c?: CitizenView;
+}
+
+/** One owned lot, as the ownership passes see it. Rebuilt only when the district's layout changes. */
+interface OwnTile {
+  b: BuildingView;
+  x: number;
+  y: number;
+  house: number;
+  civic: boolean;
+  /** Same-owner neighbour to the north, east, south, west: no kerb on that edge. */
+  open: [boolean, boolean, boolean, boolean];
+  /** Concave enclave corners (NE, SE, SW, NW) that need a turning piece of kerb. */
+  inner: [boolean, boolean, boolean, boolean];
+  /** Part of an enclave of two or more joined lots. */
+  joined: boolean;
+  /** Everything outside this building's own silhouette (clips for ground-level relighting). */
+  self: Path2D[];
+  /** Everything outside each nearer building's silhouette (clips for relighting kerb and banner). */
+  front: Path2D[];
+}
+
+/** A canal-side pennant line between two quay posts (tile space), with its sort depth. */
+interface PennantLine {
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  d: number;
 }
 
 const wxOf = (x: number, y: number): number => (x - y) * HW;
@@ -96,6 +136,20 @@ const TIP_LEFT = (LAND_X0 - HARBOR_Y1) * 32;
 const TIP_RIGHT = (LAND_X1 - LAND_Y0) * 32;
 const INK = '#1E1A16';
 const CREAM = '#FAF7F0';
+/** Festive but House-neutral: canal pennants and garlands never borrow a House colour. */
+const PENNANT_TONES = ['#F7EFDF', '#C86443', '#D4A34A', '#84A98C', '#7FBCC6'];
+/** Enclave wash strength over the paving, and the extra depth along a shared boundary. */
+const WASH = 0.3;
+const WASH_SEAM = 0.2;
+/**
+ * How much of what the colour grade removed is given back to the ground-level ownership marks
+ * at dusk. Kerbs are paint, not lamps: they come back strong enough to read at a glance and
+ * stop short of glowing. (Banners are redrawn at full colour.)
+ */
+const KERB_RELIGHT = 0.62;
+const WASH_RELIGHT = 0.4;
+/** Perpendicular world px across an isometric edge per tile unit of inset. */
+const EDGE_PX = (2 * HW * HH) / Math.hypot(HW, HH);
 
 const GRADE: { p: number; c: [number, number, number]; n: number }[] = [
   { p: 0.0, c: [255, 224, 192], n: 0.3 }, // dawn
@@ -155,6 +209,29 @@ export class Renderer {
   private lastNow = 0;
   private night = 0;
   private frameNo = 0;
+  // ── Ownership (kerbs, enclaves, banners) ──
+  private own: OwnTile[] = [];
+  private ownAt = new Map<number, OwnTile>();
+  private ownRev = -1;
+  private layoutKey = '';
+  private layoutRev = 0;
+  private flagship = new Map<number, number>(); // owner → building id of its flagship shop
+  private stars: number[] = []; // Dynasty Milestones per player
+  /** Multiply tint of the colour grade this frame, per channel 0..1. */
+  private tint: [number, number, number] = [1, 1, 1];
+  /** How far the grade has pulled colours from true (0 at noon, 1 at dusk): relight strength. */
+  private relit = 0;
+  // ── Era maturation ──
+  private era = 1;
+  private pennants: PennantLine[] = [];
+  private grandLamps: [number, number, number][] = []; // x, y, garland-to index or -1
+  private shimmer = { t0: -1e9, era: 0 };
+  // ── Camera glide (Chronicle click-to-focus) and pause detection ──
+  private glide: { x0: number; y0: number; x1: number; y1: number; t0: number; dur: number; lx: number; ly: number } | null = null;
+  private seenTick = -1;
+  private seenTickAt = 0;
+  /** True when the simulation has stood still for a moment (Era Council, solo pause). */
+  private frozen = false;
   /** Rolling stage timings in ms, for the smoke check and tuning. */
   perf: Record<string, number> = {};
   /** Stages to skip, for diagnosing slow frames (e.g. skip.add('grain')). */
@@ -225,6 +302,7 @@ export class Renderer {
   fit(): void {
     // Fit means the whole island, tip to tip. In portrait the width is the limit, so the view
     // is centred on the slab itself and neither the harbor corner nor the station corner crops.
+    this.glide = null;
     this.cam.zoom = this.fitZoom();
     const portrait = this.height > this.width;
     const cx = portrait ? (TIP_LEFT + TIP_RIGHT) / 2 : WORLD.cx;
@@ -238,11 +316,50 @@ export class Renderer {
   }
 
   pan(dxScreen: number, dyScreen: number): void {
-    this.cam.x = clamp(this.cam.x - dxScreen / this.cam.zoom, WORLD.cx - 470, WORLD.cx + 470);
-    this.cam.y = clamp(this.cam.y - dyScreen / this.cam.zoom, WORLD.cy - 300, WORLD.cy + 300);
+    // Any pan of the player's own (drag, keys, the Inspector's reveal) ends a camera glide.
+    if (dxScreen || dyScreen) this.glide = null;
+    const to = clampCamera(this.cam.x - dxScreen / this.cam.zoom, this.cam.y - dyScreen / this.cam.zoom);
+    this.cam.x = to.x;
+    this.cam.y = to.y;
+  }
+
+  /**
+   * Glide the camera so a tile sits at the centre of the free city area (the Chronicle's
+   * click-to-focus): an eased pan of about 450 ms. A drag, a zoom or Fit cancels it.
+   */
+  panTo(tile: number): void {
+    // The target is worked out by the pure Chronicle policy (src/client/chronicle.ts).
+    const to = focusCamera(tile, this);
+    if (!to) return;
+    const { x: x1, y: y1 } = to;
+    if (Math.hypot(x1 - this.cam.x, y1 - this.cam.y) * this.cam.zoom < 1.5) return;
+    this.glide = { x0: this.cam.x, y0: this.cam.y, x1, y1, t0: performance.now(), dur: 450, lx: this.cam.x, ly: this.cam.y };
+  }
+
+  /** True while a click-to-focus glide is under way. */
+  get gliding(): boolean {
+    return this.glide !== null;
+  }
+
+  private stepGlide(): void {
+    const gl = this.glide;
+    if (!gl) return;
+    // Something else moved the camera (a screenshot hook, a resize): the glide yields.
+    if (Math.abs(this.cam.x - gl.lx) > 0.01 || Math.abs(this.cam.y - gl.ly) > 0.01) {
+      this.glide = null;
+      return;
+    }
+    const k = clamp((performance.now() - gl.t0) / gl.dur, 0, 1);
+    const e = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2; // ease in-out cubic
+    this.cam.x = lerp(gl.x0, gl.x1, e);
+    this.cam.y = lerp(gl.y0, gl.y1, e);
+    gl.lx = this.cam.x;
+    gl.ly = this.cam.y;
+    if (k >= 1) this.glide = null;
   }
 
   zoomAt(factor: number, sx: number, sy: number): void {
+    this.glide = null;
     const before = this.screenToWorld(sx, sy);
     this.cam.zoom = clamp(this.cam.zoom * factor, Math.min(0.5, this.fitZoom() * 0.8), 3.4);
     const after = this.screenToWorld(sx, sy);
@@ -304,6 +421,25 @@ export class Renderer {
     // Moored boats.
     this.scenery.push({ d: 9.2 + 13.2, t: 7, a: 0 }, { d: 10.6 + 12.9, t: 7, a: 1 }, { d: 1.4 + 13.1, t: 7, a: 2 });
     this.scenery.push({ d: 30, t: 8, a: 0 });
+    // ── Era maturation (laid out once, shown from the era that brings them) ──
+    // Era II: pennant lines strung along every quay of the Grand Canal.
+    for (const t of CITY.canal) {
+      if (CITY.tiles[t] !== 'canal') continue;
+      const x = tx(t);
+      const y = ty(t);
+      if (!isWater(kindAt(x - 1, y))) this.pennants.push({ ax: x + 0.03, ay: y, bx: x + 0.03, by: y + 1, d: x + y + 0.52 });
+      if (!isWater(kindAt(x + 1, y))) this.pennants.push({ ax: x + 0.97, ay: y, bx: x + 0.97, by: y + 1, d: x + y + 1.46 });
+      if (!isWater(kindAt(x, y - 1)) && y > 0) this.pennants.push({ ax: x, ay: y + 0.03, bx: x + 1, by: y + 0.03, d: x + y + 0.52 });
+      if (!isWater(kindAt(x, y + 1))) this.pennants.push({ ax: x, ay: y + 0.97, bx: x + 1, by: y + 0.97, d: x + y + 1.46 });
+    }
+    // Era III: grand brass lamps along the boulevard (Era IV strings gilded garlands between them).
+    const row = (pts: [number, number][]): void => {
+      pts.forEach((q, i) => this.grandLamps.push([q[0], q[1], i + 1 < pts.length ? this.grandLamps.length + 1 : -1]));
+    };
+    row([[1.5, 11.93], [5.5, 11.93], [9.5, 11.93], [11.5, 11.93]]);
+    row([[11.93, 3.5], [11.93, 5.5], [11.93, 7.5], [11.93, 9.5]]);
+    row([[2.5, 1.07], [4.5, 1.07], [7.5, 1.07], [10.5, 1.07]]);
+    row([[1.07, 4.5], [1.07, 7.5], [1.07, 10.5]]);
   }
 
   // ───────────────────────────── Sprites ─────────────────────────────
@@ -476,9 +612,10 @@ export class Renderer {
       case 'lot': {
         const b = view.buildingAt(t);
         if (b) {
-          const h = houseTone(view.players[b.owner]?.house ?? -1);
-          this.rect(g, h.color, x + 0.015, y + 0.015, x + 0.985, y + 0.985);
-          this.rect(g, C.paving, x + 0.05, y + 0.05, x + 0.95, y + 0.95);
+          // An owned lot is a clean paved pad; its House kerb and enclave wash are drawn with
+          // the building (ownership passes), so they sort correctly and stay bright at dusk.
+          this.rect(g, '#F1E9D8', x + 0.005, y + 0.005, x + 0.995, y + 0.995);
+          this.rect(g, C.paving, x + 0.03, y + 0.03, x + 0.97, y + 0.97);
         } else {
           // A vacant plot: sage turf inside a cream kerb.
           this.rect(g, '#F1E9D8', x + 0.03, y + 0.03, x + 0.97, y + 0.97);
@@ -734,6 +871,10 @@ export class Renderer {
         for (let i = 0; i < 16; i++) this.floaters.push({ kind: 'spark', x: p.x + (Math.random() - 0.5) * 1.1, y: p.y + (Math.random() - 0.5) * 1.1, z: 6 + Math.random() * (p.z + 8), t0: now + Math.random() * 900, life: 900 });
         break;
       }
+      case 'quarter':
+        // A new era unlocks new tools: a brass shimmer crosses the district.
+        if (f.q >= 2 && f.q <= 4) this.shimmer = { t0: now, era: f.q };
+        break;
       default:
         break;
     }
@@ -748,13 +889,23 @@ export class Renderer {
     this.lastNow = now;
     this.frameNo++;
     this.resize();
+    this.stepGlide();
+    // The city stands still during an Era Council or a solo pause: walkers hold their stride.
+    if (view.tick !== this.seenTick) {
+      this.seenTick = view.tick;
+      this.seenTickAt = now;
+    }
+    this.frozen = view.inCouncil || now - this.seenTickAt > 320;
+    this.era = view.era;
     const res = this.pickRes();
     if (res !== this.res) {
       this.res = res;
       this.sprites.clear();
       this.groundKey = '';
     }
-    const gkey = `${this.res}|${view.buildingsRev}|${view.seed}`;
+    this.syncOwnership(view);
+    // The ground is redrawn only when a lot changes hands, not on every sale.
+    const gkey = `${this.res}|${this.layoutRev}|${view.seed}`;
     if (gkey !== this.groundKey) {
       this.groundKey = gkey;
       this.renderGround(view);
@@ -771,6 +922,13 @@ export class Renderer {
     const night = clamp(gr.n + this.rainA * 0.22 + this.lanternA * 0.1, 0, 1);
     this.night = night;
     const t = now / 1000;
+    const tR = Math.round(gr.c[0] * (1 - this.rainA * 0.14));
+    const tG = Math.round(gr.c[1] * (1 - this.rainA * 0.08));
+    const tB = Math.round(gr.c[2] * (1 - this.rainA * 0.02));
+    const graded = !this.skip.has('grade') && !(tR === 255 && tG === 255 && tB === 255);
+    this.tint = graded ? [tR / 255, tG / 255, tB / 255] : [1, 1, 1];
+    // Relight strength: nothing at crisp noon, full once the grade has taken a quarter of any channel.
+    this.relit = clamp((1 - Math.min(this.tint[0], this.tint[1], this.tint[2])) / 0.22, 0, 1);
 
     let tm = performance.now();
     // ── Page ──
@@ -826,6 +984,17 @@ export class Renderer {
       const p = loopPoint(lerpLoop(tr.ppos, tr.pos, alpha));
       actors.push({ d: p.x + p.y + 0.05, t: 3, a: i });
     });
+    // The district matures era by era: canal pennants, boulevard lamps and garlands, ferries.
+    const eraOn = !this.skip.has('era');
+    if (eraOn && this.era >= 2) this.pennants.forEach((l, i) => actors.push({ d: l.d, t: 10, a: i }));
+    if (eraOn && this.era >= 3) {
+      this.grandLamps.forEach((l, i) => actors.push({ d: l[0] + l[1], t: 11, a: i }));
+      const ferries = this.era >= 4 ? 3 : 2;
+      for (let i = 0; i < ferries; i++) {
+        const f = this.ferryAt(i, now);
+        actors.push({ d: f.x + f.y, t: 12, a: i });
+      }
+    }
     actors.sort((p, q) => p.d - q.d);
     if (!this.skip.has('actors')) for (const a of actors) this.drawActor(a, view, alpha, ui, now, dt, false);
     tm = this.mark('actors', tm);
@@ -834,8 +1003,8 @@ export class Renderer {
     // One multiply wash, full strength over the diorama and feathered out to nothing at the
     // edges of the page: the model is lit, the table it stands on stays travertine.
     this.setScreen();
-    const tint = `${Math.round(gr.c[0] * (1 - this.rainA * 0.14))},${Math.round(gr.c[1] * (1 - this.rainA * 0.08))},${Math.round(gr.c[2] * (1 - this.rainA * 0.02))}`;
-    if (!this.skip.has('grade') && tint !== '255,255,255') {
+    const tint = `${tR},${tG},${tB}`;
+    if (graded) {
       const mid = this.worldToScreen(WORLD.cx, WORLD.cy + 20);
       const r0 = 470 * this.cam.zoom;
       g.save();
@@ -866,8 +1035,15 @@ export class Renderer {
     if (this.rainA > 0.01) this.rain(t);
     tm = this.mark('lights', tm);
 
-    // ── Overlays ──
+    // ── Ownership relight ──
+    // Kerbs, enclave washes and banners were drawn with their buildings (so they sort and
+    // occlude correctly); here, after the colour grade, they are brought back to full House
+    // colour, which keeps ownership bright and unmistakable at dusk.
     this.setWorld();
+    if (!this.skip.has('relight')) this.relight(view, now);
+    tm = this.mark('relight', tm);
+
+    // ── Overlays ──
     this.overlays(view, ui, now);
     this.drawFloaters(now);
     tm = this.mark('overlays', tm);
@@ -1004,6 +1180,635 @@ export class Renderer {
     g.fill('nonzero');
   }
 
+  // ───────────────────────────── Ownership ─────────────────────────────
+
+  /** Everything outside one extruded box (a building's silhouette), as an even-odd clip path. */
+  private outside(x: number, y: number, box: [number, number, number, number, number], flip: boolean): Path2D {
+    const [a0, b0, a1, b1, h] = box;
+    // A flipped sprite mirrors u and v.
+    const u0 = flip ? b0 : a0;
+    const v0 = flip ? a0 : b0;
+    const u1 = flip ? b1 : a1;
+    const v1 = flip ? a1 : b1;
+    const p = new Path2D();
+    p.rect(-4000, -4000, 8000, 8000);
+    p.moveTo(wxOf(x + u0, y + v1), wyOf(x + u0, y + v1, 0));
+    p.lineTo(wxOf(x + u1, y + v1), wyOf(x + u1, y + v1, 0));
+    p.lineTo(wxOf(x + u1, y + v0), wyOf(x + u1, y + v0, 0));
+    p.lineTo(wxOf(x + u1, y + v0), wyOf(x + u1, y + v0, h));
+    p.lineTo(wxOf(x + u0, y + v0), wyOf(x + u0, y + v0, h));
+    p.lineTo(wxOf(x + u0, y + v1), wyOf(x + u0, y + v1, h));
+    p.closePath();
+    return p;
+  }
+
+  /**
+   * Keep the ownership cache in step with the district. Flagships follow revenue; the kerb and
+   * enclave geometry (and the ground canvas) are rebuilt only when a lot changes hands or level.
+   */
+  private syncOwnership(view: CityView): void {
+    this.stars = view.players.map((p) => starsOf(p));
+    if (view.buildingsRev === this.ownRev) return;
+    this.ownRev = view.buildingsRev;
+    // Each House's flagship: its best-earning shop (its first civic project if it has no shop).
+    const best = new Map<number, BuildingView>();
+    for (const b of view.buildings) {
+      const cur = best.get(b.owner);
+      const shop = isShop(b.kind);
+      if (!cur) best.set(b.owner, b);
+      else if (shop && (!isShop(cur.kind) || b.revenue > cur.revenue || (b.revenue === cur.revenue && (b.level > cur.level || (b.level === cur.level && b.id < cur.id))))) best.set(b.owner, b);
+    }
+    this.flagship.clear();
+    for (const [owner, b] of best) this.flagship.set(owner, b.id);
+    let key = String(view.seed);
+    for (const b of view.buildings) key += `|${b.tile}:${b.owner}:${b.kind}:${b.level}`;
+    if (key === this.layoutKey) return;
+    this.layoutKey = key;
+    this.layoutRev++;
+    this.own = [];
+    this.ownAt.clear();
+    for (const b of view.buildings) {
+      const x = tx(b.tile);
+      const y = ty(b.tile);
+      const same = (dx: number, dy: number): boolean => {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) return false;
+        const o = view.buildingAt(idx(nx, ny));
+        return !!o && o.owner === b.owner;
+      };
+      const n = same(0, -1);
+      const e = same(1, 0);
+      const s = same(0, 1);
+      const w = same(-1, 0);
+      const flip = CITY.doorDir[b.tile] === 1;
+      const o: OwnTile = {
+        b,
+        x,
+        y,
+        house: view.players[b.owner]?.house ?? -1,
+        civic: !isShop(b.kind),
+        open: [n, e, s, w],
+        inner: [n && e && !same(1, -1), e && s && !same(1, 1), s && w && !same(-1, 1), w && n && !same(-1, -1)],
+        joined: n || e || s || w,
+        self: solidBoxes(b.kind, b.level).map((box) => this.outside(x, y, box, flip)),
+        front: [],
+      };
+      this.own.push(o);
+      this.ownAt.set(b.tile, o);
+    }
+    // What stands nearer the camera and may hide a lot's kerb or banner.
+    const FRONT: [number, number][] = [[1, 0], [0, 1], [1, 1], [2, 1], [1, 2]];
+    for (const o of this.own) {
+      for (const [dx, dy] of FRONT) {
+        const nx = o.x + dx;
+        const ny = o.y + dy;
+        if (nx >= W || ny >= H) continue;
+        const t = idx(nx, ny);
+        const nb = view.buildingAt(t);
+        const flip = CITY.doorDir[t] === 1;
+        if (nb) for (const box of solidBoxes(nb.kind, nb.level)) o.front.push(this.outside(nx, ny, box, flip));
+        else if (CITY.tiles[t] === 'home') for (const box of solidBoxes('home', 1)) o.front.push(this.outside(nx, ny, box, flip));
+      }
+    }
+    this.own.sort((p, q) => p.x + p.y - (q.x + q.y));
+  }
+
+  /** How much of a colour the grade took away: adding this back restores the true colour. */
+  private lost(hex: string, alpha = 1): string {
+    const n = parseInt(hex.slice(1), 16);
+    const t = this.tint;
+    return `rgb(${Math.round(((n >> 16) & 255) * (1 - t[0]) * alpha)},${Math.round(((n >> 8) & 255) * (1 - t[1]) * alpha)},${Math.round((n & 255) * (1 - t[2]) * alpha)})`;
+  }
+
+  /** Add one tile-space rectangle (ground level) to the current path. */
+  private quad(x0: number, y0: number, x1: number, y1: number): void {
+    const g = this.ctx;
+    g.moveTo(wxOf(x0, y0), wyOf(x0, y0));
+    g.lineTo(wxOf(x1, y0), wyOf(x1, y0));
+    g.lineTo(wxOf(x1, y1), wyOf(x1, y1));
+    g.lineTo(wxOf(x0, y1), wyOf(x0, y1));
+    g.closePath();
+  }
+
+  /**
+   * The ground of an owned lot: a bold double-stroked House kerb (deep trim outside, House
+   * primary inside) on every edge that is not shared with the same House, and, where two or
+   * more lots join, a translucent House wash with no kerb on the shared boundary, so an
+   * enclave reads as one block inside one continuous trim.
+   * `relight` adds back exactly what the colour grade removed instead of painting.
+   */
+  private ownGround(o: OwnTile, relight: boolean): void {
+    const g = this.ctx;
+    const tone = houseTone(o.house);
+    const { x, y } = o;
+    // Kerb width: about 3 world px, and never thinner than ~2.5 px on screen however far out
+    // the camera is. Past the lot's own rim it grows outward over the pavement, never over a
+    // neighbouring lot.
+    const total = clamp(Math.max(3, 3.6 / this.cam.zoom), 3, 5.8) / EDGE_PX;
+    const inner = Math.min(total, 0.1);
+    const ext = clamp(total - inner, 0, 0.1);
+    const dk = (inner + ext) * 0.36;
+    const outer = (dx: number, dy: number): number => (kindAt(x + dx, y + dy) === 'lot' ? -0.004 : ext);
+    const [oN, oE, oS, oW] = o.open;
+    // Outer limit of the kerb on each side (how far past the lot line it starts).
+    const eN = oN ? 0 : outer(0, -1);
+    const eE = oE ? 0 : outer(1, 0);
+    const eS = oS ? 0 : outer(0, 1);
+    const eW = oW ? 0 : outer(-1, 0);
+    const x0 = x - eW;
+    const x1 = x + 1 + eE;
+    const y0 = y - eN;
+    const y1 = y + 1 + eS;
+
+    if (o.joined) {
+      // Enclave wash: the whole lot, a little deeper along each shared boundary.
+      g.beginPath();
+      this.quad(x - (oW ? 0.006 : 0), y - (oN ? 0.006 : 0), x + 1 + (oE ? 0.006 : 0), y + 1 + (oS ? 0.006 : 0));
+      g.fillStyle = relight ? this.lost(tone.color, WASH * WASH_RELIGHT) : tone.color;
+      if (!relight) g.globalAlpha = WASH;
+      g.fill();
+      g.beginPath();
+      const band = 0.17;
+      if (oN) this.quad(x, y, x + 1, y + band);
+      if (oS) this.quad(x, y + 1 - band, x + 1, y + 1);
+      if (oW) this.quad(x, y, x + band, y + 1);
+      if (oE) this.quad(x + 1 - band, y, x + 1, y + 1);
+      g.fillStyle = relight ? this.lost(tone.color, WASH_SEAM * WASH_RELIGHT) : tone.color;
+      if (!relight) g.globalAlpha = WASH_SEAM;
+      g.fill();
+      g.globalAlpha = 1;
+    }
+
+    // House primary: the inner band of the kerb.
+    g.beginPath();
+    if (!oN) this.quad(x0, y0, x1, y + inner);
+    if (!oS) this.quad(x0, y + 1 - inner, x1, y1);
+    if (!oW) this.quad(x0, y0, x + inner, y1);
+    if (!oE) this.quad(x + 1 - inner, y0, x1, y1);
+    if (o.inner[0]) this.quad(x + 1 - inner, y, x + 1, y + inner);
+    if (o.inner[1]) this.quad(x + 1 - inner, y + 1 - inner, x + 1, y + 1);
+    if (o.inner[2]) this.quad(x, y + 1 - inner, x + inner, y + 1);
+    if (o.inner[3]) this.quad(x, y, x + inner, y + inner);
+    g.fillStyle = relight ? this.lost(tone.color, KERB_RELIGHT) : tone.color;
+    g.fill();
+    // Deep trim: the outer edge.
+    g.beginPath();
+    if (!oN) this.quad(x0, y0, x1, y0 + dk);
+    if (!oS) this.quad(x0, y1 - dk, x1, y1);
+    if (!oW) this.quad(x0, y0, x0 + dk, y1);
+    if (!oE) this.quad(x1 - dk, y0, x1, y1);
+    if (o.inner[0]) this.quad(x + 1 - dk, y, x + 1, y + dk);
+    if (o.inner[1]) this.quad(x + 1 - dk, y + 1 - dk, x + 1, y + 1);
+    if (o.inner[2]) this.quad(x, y + 1 - dk, x + dk, y + 1);
+    if (o.inner[3]) this.quad(x, y, x + dk, y + dk);
+    g.fillStyle = relight ? this.lost(tone.dark, KERB_RELIGHT) : tone.dark;
+    g.fill();
+  }
+
+  /** Banner scale: world units, but never so small that the crest medallion is lost on screen. */
+  private bannerScale(): number {
+    return clamp(10 / (10 * this.cam.zoom), 1, 1.8);
+  }
+
+  /** 0 plain, 1 brass finial (a House with Milestone stars), 2 fully gilded (its flagship). */
+  private bannerTrim(b: BuildingView): 0 | 1 | 2 {
+    const stars = this.stars[b.owner] ?? 0;
+    if (stars <= 0) return 0;
+    return this.flagship.get(b.owner) === b.id ? 2 : 1;
+  }
+
+  /** Height the building is still dropping from (a new building lands and settles). */
+  private dropZ(tile: number, now: number): number {
+    const landed = this.built.get(tile);
+    if (landed === undefined) return 0;
+    const k = (now - landed) / 420;
+    if (k >= 1) return 0;
+    return k >= 0 ? Math.pow(1 - k, 2) * 22 * Math.abs(Math.cos(k * Math.PI * 1.5)) : 22;
+  }
+
+  /** World position of the foot of a building's banner pole. */
+  private bannerFoot(b: BuildingView, now: number): { x: number; y: number } {
+    const flip = CITY.doorDir[b.tile] === 1;
+    const [u, v, z] = bannerAnchor(b.kind, b.level);
+    return {
+      x: wxOf(tx(b.tile), ty(b.tile)) + (flip ? v - u : u - v) * HW,
+      y: wyOf(tx(b.tile), ty(b.tile)) + (u + v) * HH - z - this.dropZ(b.tile, now),
+    };
+  }
+
+  /**
+   * The tall House standard: a pole above the roofline, a crossbar, a gently swaying
+   * swallow-tailed banner in the House colour and, inset on it, the white-and-brass crest
+   * medallion. Flagships of Houses with Milestone stars fly it gilded.
+   */
+  private banner(ax: number, ay: number, house: number, id: number, now: number, trim: 0 | 1 | 2): void {
+    const g = this.ctx;
+    const k = this.bannerScale();
+    const tone = houseTone(house);
+    const sway = Math.sin(now / 760 + id * 1.7);
+    const ripple = Math.sin(now / 340 + id * 0.9);
+    const dx = sway * 1.35 * k;
+    const pole = 30 * k;
+    const top = ay - pole;
+    const yb = ay - 27.4 * k; // top of the cloth
+    const len = 18.4 * k;
+    const hw = 5.6 * k;
+    const metal = trim === 2 ? BRASS : '#3B3A40';
+    // Pole.
+    g.fillStyle = trim ? BRASS_DEEP : '#3B3A40';
+    g.fillRect(ax - 0.5 * k, top, k, pole);
+    if (trim) {
+      g.fillStyle = BRASS;
+      g.fillRect(ax - 0.5 * k, top, 0.45 * k, pole);
+    }
+    // Cloth: hangs from the crossbar, the tails swaying.
+    const cloth = (): void => {
+      g.beginPath();
+      g.moveTo(ax - hw, yb);
+      g.lineTo(ax + hw, yb);
+      g.quadraticCurveTo(ax + hw + dx * 0.25, yb + len * 0.55, ax + hw + dx, yb + len);
+      g.lineTo(ax + dx * 0.8 + ripple * 0.35 * k, yb + len - 4 * k);
+      g.lineTo(ax - hw + dx, yb + len);
+      g.quadraticCurveTo(ax - hw + dx * 0.25, yb + len * 0.55, ax - hw, yb);
+      g.closePath();
+    };
+    cloth();
+    g.fillStyle = tone.color;
+    g.fill();
+    // The shaded fold on the right, in the deep trim.
+    g.save();
+    cloth();
+    g.clip();
+    g.fillStyle = tone.dark;
+    g.fillRect(ax + hw * 0.42 + dx * 0.5, yb - 1, hw, len + 2);
+    // Deep trim (or a brass fringe) along the tails.
+    g.beginPath();
+    g.moveTo(ax + hw + dx, yb + len);
+    g.lineTo(ax + dx * 0.8 + ripple * 0.35 * k, yb + len - 4 * k);
+    g.lineTo(ax - hw + dx, yb + len);
+    g.strokeStyle = trim === 2 ? BRASS : tone.dark;
+    g.lineWidth = (trim === 2 ? 2.2 : 1.8) * k;
+    g.lineJoin = 'miter';
+    g.stroke();
+    g.restore();
+    // Crossbar and finial.
+    g.fillStyle = metal;
+    g.fillRect(ax - hw - 0.9 * k, yb - 0.9 * k, 2 * hw + 1.8 * k, 1.1 * k);
+    g.beginPath();
+    g.arc(ax, top - 0.6 * k, (trim ? 1.45 : 1.05) * k, 0, Math.PI * 2);
+    g.fillStyle = trim ? BRASS : '#3B3A40';
+    g.fill();
+    if (trim === 2) {
+      // The gilded flagship: a spear point above the ball and brass caps on the bar.
+      g.beginPath();
+      g.moveTo(ax, top - 4.6 * k);
+      g.lineTo(ax + 1.05 * k, top - 1.6 * k);
+      g.lineTo(ax - 1.05 * k, top - 1.6 * k);
+      g.closePath();
+      g.fillStyle = BRASS;
+      g.fill();
+      g.fillStyle = BRASS_DEEP;
+      g.fillRect(ax - hw - 1.5 * k, yb - 1.25 * k, 1.1 * k, 1.8 * k);
+      g.fillRect(ax + hw + 0.4 * k, yb - 1.25 * k, 1.1 * k, 1.8 * k);
+    }
+    // The crest medallion, white and brass, inset on the cloth.
+    if (house >= 0) drawCrest(g, house, ax + dx * 0.22, yb + 6.9 * k, 7 * k, { medallion: true, gilded: trim === 2 });
+  }
+
+  /**
+   * After the colour grade: bring every owned lot's kerb, wash and banner back to full House
+   * colour. The kerb is re-lit additively with exactly what the grade removed; the banner is
+   * redrawn at relight strength. Each is clipped against the silhouettes of whatever stands
+   * nearer the camera, so depth still reads true.
+   */
+  private relight(view: CityView, now: number): void {
+    const s = this.relit;
+    if (s < 0.04 || !this.own.length) return;
+    const g = this.ctx;
+    for (const o of this.own) {
+      const b = view.buildingAt(o.b.tile);
+      if (!b) continue;
+      // Ground: additive, hidden where this lot's own building or a nearer one covers it.
+      g.save();
+      for (const c of o.self) g.clip(c, 'evenodd');
+      for (const c of o.front) g.clip(c, 'evenodd');
+      g.globalCompositeOperation = 'lighter';
+      this.ownGround(o, true);
+      g.restore();
+      // Banner: redrawn over the grade.
+      g.save();
+      for (const c of o.front) g.clip(c, 'evenodd');
+      g.globalAlpha = s;
+      const foot = this.bannerFoot(b, now);
+      this.banner(foot.x, foot.y, o.house, b.id, now, this.bannerTrim(b));
+      g.restore();
+    }
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+  }
+
+  // ───────────────────────────── Era maturation ─────────────────────────────
+
+  /** Era II: a line of small pennants strung between two posts on the canal quay. */
+  private drawPennantLine(l: PennantLine, i: number, now: number): void {
+    const g = this.ctx;
+    const ax = wxOf(l.ax, l.ay);
+    const ay = wyOf(l.ax, l.ay);
+    const bx = wxOf(l.bx, l.by);
+    const by = wyOf(l.bx, l.by);
+    const h = 8.4;
+    g.fillStyle = '#5A4A3A';
+    g.fillRect(ax - 0.35, ay - h, 0.7, h);
+    g.fillRect(bx - 0.35, by - h, 0.7, h);
+    const sag = 2.1;
+    g.beginPath();
+    g.moveTo(ax, ay - h + 0.4);
+    g.quadraticCurveTo((ax + bx) / 2, (ay + by) / 2 - h + 0.4 + sag * 2, bx, by - h + 0.4);
+    g.strokeStyle = 'rgba(60,48,40,0.6)';
+    g.lineWidth = 0.35;
+    g.stroke();
+    const n = 5;
+    const run = Math.hypot(bx - ax, by - ay);
+    const ux = (bx - ax) / run;
+    const uy = (by - ay) / run;
+    for (let j = 0; j < n; j++) {
+      const t = (j + 0.5) / n;
+      const px = lerp(ax, bx, t);
+      const py = lerp(ay, by, t) - h + 0.4 + sag * 4 * t * (1 - t);
+      const flutter = Math.sin(now / 420 + i * 1.3 + j * 0.9) * 0.45;
+      const hw = 1.25;
+      // Each pennant hangs along the line's own direction.
+      g.beginPath();
+      g.moveTo(px - ux * hw, py - uy * hw);
+      g.lineTo(px + ux * hw, py + uy * hw);
+      g.lineTo(px + flutter, py + 3.1);
+      g.closePath();
+      g.fillStyle = PENNANT_TONES[(hash32(i, 3) + j) % PENNANT_TONES.length];
+      g.fill();
+    }
+  }
+
+  /** Era III: a grand twin-globe brass lamp on the boulevard. Era IV hangs a gilded garland to the next. */
+  private drawGrandLamp(i: number, now: number, light: boolean): void {
+    const g = this.ctx;
+    const l = this.grandLamps[i];
+    const x = wxOf(l[0], l[1]);
+    const y = wyOf(l[0], l[1]);
+    const h = 19;
+    if (light) {
+      g.globalAlpha = this.night;
+      this.glow(x - 3.1, y - h + 1.2, 13, 0.8);
+      this.glow(x + 3.1, y - h + 1.2, 13, 0.8);
+      this.glow(x, y + 1, 30, 0.3, 0.5);
+      if (this.era >= 4 && l[2] >= 0) this.garland(i, now, true);
+      return;
+    }
+    if (this.era >= 4 && l[2] >= 0) this.garland(i, now, false);
+    // Stepped plinth, brass post, collars.
+    g.fillStyle = '#6A5A44';
+    g.fillRect(x - 1.7, y - 1.2, 3.4, 1.2);
+    g.fillStyle = BRASS_DEEP;
+    g.fillRect(x - 0.75, y - h, 1.5, h - 1.2);
+    g.fillStyle = BRASS;
+    g.fillRect(x - 0.75, y - h, 0.6, h - 1.2);
+    g.fillRect(x - 1.25, y - 5.2, 2.5, 0.8);
+    g.fillRect(x - 1.25, y - h + 3.4, 2.5, 0.8);
+    // Twin arms and globes.
+    g.strokeStyle = BRASS_DEEP;
+    g.lineWidth = 0.75;
+    g.lineCap = 'round';
+    g.beginPath();
+    g.moveTo(x - 3.1, y - h + 2.7);
+    g.quadraticCurveTo(x - 3.1, y - h + 5.2, x, y - h + 4.4);
+    g.quadraticCurveTo(x + 3.1, y - h + 5.2, x + 3.1, y - h + 2.7);
+    g.stroke();
+    for (const s of [-1, 1]) {
+      g.beginPath();
+      g.arc(x + s * 3.1, y - h + 1.2, 1.55, 0, Math.PI * 2);
+      g.fillStyle = '#F7EDD2';
+      g.fill();
+      g.fillStyle = BRASS;
+      g.fillRect(x + s * 3.1 - 1.1, y - h - 0.75, 2.2, 0.65);
+    }
+    // Finial.
+    g.beginPath();
+    g.moveTo(x, y - h - 3);
+    g.lineTo(x + 0.9, y - h);
+    g.lineTo(x - 0.9, y - h);
+    g.closePath();
+    g.fillStyle = BRASS;
+    g.fill();
+  }
+
+  /** Era IV: a gilded swag from one boulevard lamp to the next, with rosettes along it. */
+  private garland(i: number, now: number, light: boolean): void {
+    const g = this.ctx;
+    const a = this.grandLamps[i];
+    const b = this.grandLamps[a[2]];
+    if (!b) return;
+    const ax = wxOf(a[0], a[1]);
+    const ay = wyOf(a[0], a[1]) - 15.6;
+    const bx = wxOf(b[0], b[1]);
+    const by = wyOf(b[0], b[1]) - 15.6;
+    const sag = 6.2 + Math.sin(now / 1900 + i) * 0.25;
+    const at = (t: number): [number, number] => [lerp(ax, bx, t), lerp(ay, by, t) + sag * 4 * t * (1 - t)];
+    if (light) {
+      // The rosettes catch the lamplight.
+      g.fillStyle = 'rgba(255,217,138,0.85)';
+      g.beginPath();
+      for (let j = 1; j < 8; j++) {
+        const q = at(j / 8);
+        g.moveTo(q[0] + 1.5, q[1] + 0.5);
+        g.arc(q[0], q[1] + 0.5, 1.5, 0, Math.PI * 2);
+      }
+      g.fill();
+      return;
+    }
+    g.beginPath();
+    g.moveTo(ax, ay);
+    for (let j = 1; j <= 16; j++) {
+      const q = at(j / 16);
+      g.lineTo(q[0], q[1]);
+    }
+    g.strokeStyle = '#5F8A6C';
+    g.lineWidth = 2.3;
+    g.lineCap = 'round';
+    g.stroke();
+    g.strokeStyle = BRASS;
+    g.lineWidth = 0.8;
+    g.stroke();
+    for (let j = 1; j < 8; j++) {
+      const q = at(j / 8);
+      g.beginPath();
+      g.arc(q[0], q[1] + 0.5, j % 2 ? 1.3 : 1.75, 0, Math.PI * 2);
+      g.fillStyle = j % 2 ? '#F7EFDF' : BRASS;
+      g.fill();
+    }
+    // A gilded ribbon falls from each end.
+    g.fillStyle = BRASS;
+    for (const [rx, ry] of [[ax, ay], [bx, by]]) {
+      g.beginPath();
+      g.moveTo(rx - 1.1, ry);
+      g.lineTo(rx + 1.1, ry);
+      g.lineTo(rx + 0.7, ry + 5.2);
+      g.lineTo(rx, ry + 4);
+      g.lineTo(rx - 0.7, ry + 5.2);
+      g.closePath();
+      g.fill();
+    }
+  }
+
+  /** Where the i-th harbor ferry is: shuttling east and west along the outer harbor. */
+  private ferryAt(i: number, now: number): { x: number; y: number; dir: number } {
+    const period = 52000 + i * 9000;
+    const ph = (((now / period + i * 0.37) % 1) + 1) % 1;
+    const tri = ph < 0.5 ? ph * 2 : 2 - ph * 2;
+    // Ease into each turn so the ferry slows at the ends of its run.
+    const e = tri * tri * (3 - 2 * tri);
+    return { x: lerp(0.5, 11.9, e), y: [13.84, 13.66, 13.96][i % 3], dir: ph < 0.5 ? 1 : -1 };
+  }
+
+  /** Era III: a small canopied tourist ferry crossing the harbor. */
+  private drawFerry(i: number, now: number, light: boolean): void {
+    const g = this.ctx;
+    const f = this.ferryAt(i, now);
+    const bob = Math.sin(now / 800 + i * 2.4) * 0.5;
+    const half = 0.42;
+    const wid = 0.11;
+    const P = (a: number, b: number, z: number): [number, number] => [wxOf(f.x + a * f.dir, f.y + b), wyOf(f.x + a * f.dir, f.y + b, WATER_Z + z) - bob];
+    const face = (fill: string, pts: [number, number][]): void => {
+      g.beginPath();
+      g.moveTo(pts[0][0], pts[0][1]);
+      for (let j = 1; j < pts.length; j++) g.lineTo(pts[j][0], pts[j][1]);
+      g.closePath();
+      g.fillStyle = fill;
+      g.fill();
+    };
+    if (light) {
+      g.globalAlpha = this.night;
+      const q = P(0, 0, 6.4);
+      this.glow(q[0], q[1], 9, 0.7);
+      return;
+    }
+    // Wake and water shadow.
+    face('rgba(25,60,72,0.22)', [P(-half - 0.05, wid + 0.06, 0), P(half + 0.2, wid + 0.06, 0), P(half + 0.25, -wid, 0), P(-half - 0.05, -wid, 0)]);
+    g.strokeStyle = 'rgba(220,240,244,0.55)';
+    g.lineWidth = 0.5;
+    for (const k of [0.16, 0.34]) {
+      const a = P(-half - k, -wid - 0.03, 0.2);
+      const b = P(-half - k - 0.12, wid + 0.05, 0.2);
+      g.beginPath();
+      g.moveTo(a[0], a[1]);
+      g.lineTo(b[0], b[1]);
+      g.stroke();
+    }
+    // Hull with a pointed bow, cream above a teal waterline.
+    face('#2F7483', [P(-half, wid, 0), P(half, wid, 0), P(half + 0.2, 0, 0), P(half + 0.2, 0, 1.2), P(half, wid, 1.2), P(-half, wid, 1.2)]);
+    face('#F5EEDD', [P(-half, wid, 1.2), P(half, wid, 1.2), P(half + 0.2, 0, 1.2), P(half + 0.22, 0, 3.2), P(half, wid, 3.2), P(-half, wid, 3.2)]);
+    face('#E9DFCB', [P(-half, -wid, 3.2), P(half, -wid, 3.2), P(half + 0.22, 0, 3.2), P(half, wid, 3.2), P(-half, wid, 3.2)]);
+    // Canopy on four posts.
+    g.fillStyle = '#62412B';
+    for (const [a, b] of [[-0.3, wid * 0.8], [0.26, wid * 0.8], [-0.3, -wid * 0.8], [0.26, -wid * 0.8]] as const) {
+      const q = P(a, b, 7.4);
+      g.fillRect(q[0] - 0.3, q[1], 0.6, 4.2);
+    }
+    face('#B5553A', [P(-0.36, wid, 7.2), P(0.32, wid, 7.2), P(0.32, wid, 8.3), P(-0.36, wid, 8.3)]);
+    face('#C86443', [P(-0.36, -wid, 8.3), P(0.32, -wid, 8.3), P(0.32, wid, 8.3), P(-0.36, wid, 8.3)]);
+    // A few passengers and a stern pennant.
+    for (let j = 0; j < 3; j++) {
+      const q = P(-0.2 + j * 0.2, 0, 4.4);
+      g.beginPath();
+      g.arc(q[0], q[1], 0.9, 0, Math.PI * 2);
+      g.fillStyle = ['#F0E2C8', '#9DBDE6', '#E9C46A'][(i + j) % 3];
+      g.fill();
+    }
+    const st = P(-half + 0.03, 0, 3.2);
+    g.fillStyle = '#62412B';
+    g.fillRect(st[0] - 0.25, st[1] - 6, 0.5, 6);
+    g.beginPath();
+    g.moveTo(st[0], st[1] - 6);
+    g.lineTo(st[0] - f.dir * 3.4, st[1] - 5.1 + Math.sin(now / 300 + i) * 0.4);
+    g.lineTo(st[0], st[1] - 4.1);
+    g.closePath();
+    g.fillStyle = C.brass;
+    g.fill();
+  }
+
+  /** Founding Guide: a warm brass ring pulsing gently on each prime starter lot. */
+  private guideRings(view: CityView, lots: number[], now: number): void {
+    const g = this.ctx;
+    const lw = Math.max(1.5, 2 / this.cam.zoom);
+    lots.forEach((tile, i) => {
+      if (tile < 0 || CITY.tiles[tile] !== 'lot' || view.buildingAt(tile)) return;
+      const cx = wxOf(tx(tile) + 0.5, ty(tile) + 0.5);
+      const cy = wyOf(tx(tile) + 0.5, ty(tile) + 0.5);
+      const cycle = now / 2200 + i * 0.23;
+      const ph = ((cycle % 1) + 1) % 1;
+      const breathe = 0.5 + 0.5 * Math.sin(cycle * Math.PI * 2);
+      const ring = (r: number): void => {
+        g.beginPath();
+        g.ellipse(cx, cy, r * 45.25, r * 22.6, 0, 0, Math.PI * 2);
+      };
+      // A soft brass wash, the steady ring (deep brass under bright brass), and one slow ripple.
+      ring(0.4);
+      g.fillStyle = `rgba(212,163,74,${0.13 + 0.07 * breathe})`;
+      g.fill();
+      g.strokeStyle = BRASS_DEEP;
+      g.lineWidth = lw * 1.9;
+      g.globalAlpha = 0.85;
+      g.stroke();
+      g.strokeStyle = '#F0C96C';
+      g.lineWidth = lw;
+      g.globalAlpha = 1;
+      g.stroke();
+      ring(0.4 + ph * 0.3);
+      g.strokeStyle = BRASS;
+      g.lineWidth = lw * 0.8;
+      g.globalAlpha = (1 - ph) * 0.7;
+      g.stroke();
+      g.globalAlpha = 1;
+    });
+  }
+
+  /** A new era's unlocks: a brass shimmer sweeps the district from the station to the harbor. */
+  private unlockShimmer(view: CityView, now: number): void {
+    const el = now - this.shimmer.t0;
+    const dur = 2700;
+    if (el < 0 || el > dur) return;
+    const g = this.ctx;
+    const span = 6.5;
+    const front = (el / dur) * (22 + span) - 0.5;
+    const lw = Math.max(1.2, 1.5 / this.cam.zoom);
+    for (const lot of CITY.lots) {
+      const x = tx(lot);
+      const y = ty(lot);
+      const ph = front - (x + y);
+      if (ph <= 0 || ph >= span) continue;
+      const a = Math.sin((Math.PI * ph) / span);
+      const vacant = !view.buildingAt(lot);
+      this.diamond(x, y, 0.05);
+      if (vacant) {
+        g.fillStyle = `rgba(240,201,108,${0.22 * a})`;
+        g.fill();
+      }
+      g.strokeStyle = `rgba(212,163,74,${(vacant ? 0.95 : 0.6) * a})`;
+      g.lineWidth = lw;
+      g.stroke();
+      if (vacant) {
+        // A rising brass ring and a glint.
+        const cx = wxOf(x + 0.5, y + 0.5);
+        const cy = wyOf(x + 0.5, y + 0.5);
+        g.beginPath();
+        g.ellipse(cx, cy - ph * 1.6, 9 + ph * 1.5, 4.5 + ph * 0.75, 0, 0, Math.PI * 2);
+        g.strokeStyle = `rgba(240,201,108,${0.7 * a})`;
+        g.lineWidth = lw * 0.7;
+        g.stroke();
+        star(g, cx, cy - 7 - ph * 1.4, 2.4 * a, `rgba(250,236,190,${a})`);
+      }
+    }
+  }
+
   // ───────────────────────────── Actors ─────────────────────────────
 
   private drawActor(a: Actor, view: CityView, alpha: number, ui: UiState, now: number, dt: number, light: boolean): void {
@@ -1065,6 +1870,15 @@ export class Renderer {
       case 9:
         this.drawStopSign(a.a, light);
         break;
+      case 10:
+        if (!light) this.drawPennantLine(this.pennants[a.a], a.a, now);
+        break;
+      case 11:
+        this.drawGrandLamp(a.a, now, light);
+        break;
+      case 12:
+        this.drawFerry(a.a, now, light);
+        break;
       default:
         break;
     }
@@ -1092,6 +1906,9 @@ export class Renderer {
       this.blit(sp, x, y, dz);
       return;
     }
+    // The lot's House kerb and enclave wash lie on the ground under the building.
+    const own = this.ownAt.get(b.tile);
+    if (own) this.ownGround(own, false);
     this.blit(sp, x, y, dz);
     const pen = this.pen;
     pen.begin(flip, false, b.id);
@@ -1102,20 +1919,6 @@ export class Renderer {
     const tone = houseTone(house);
     const promo = view.tick < b.promoUntil;
     if (isShop(b.kind)) {
-      // House pennant, always flying.
-      const [fu, fv, fz] = flagAnchor(b.kind, b.level);
-      const fx = pen.X(fu, fv);
-      const fy = pen.Y(fu, fv, fz);
-      g.fillStyle = C.woodDark;
-      g.fillRect(fx - 0.35, fy - 9, 0.7, 9);
-      const wave = Math.sin(now / 260 + b.id * 1.3);
-      g.beginPath();
-      g.moveTo(fx + 0.3, fy - 9);
-      g.quadraticCurveTo(fx + 4, fy - 9.6 + wave * 0.9, fx + 7.5, fy - 7.2 + wave * 1.3);
-      g.quadraticCurveTo(fx + 4, fy - 6 + wave * 0.9, fx + 0.3, fy - 5.2);
-      g.closePath();
-      g.fillStyle = tone.color;
-      g.fill();
       if (b.kind === 'roastery') {
         // Roaster steam.
         const top = b.level === 1 ? 31 : b.level === 2 ? 46 : 45;
@@ -1155,6 +1958,9 @@ export class Renderer {
       }
     }
     g.restore();
+    // The tall House standard with its crest medallion, on every shop and civic project.
+    const foot = this.bannerFoot(b, now);
+    this.banner(foot.x, foot.y, house, b.id, now, this.bannerTrim(b));
     // Upgrade shimmer.
     const pulsed = this.pulse.get(b.id);
     if (pulsed !== undefined) {
@@ -1222,7 +2028,7 @@ export class Renderer {
     const mx = c.x - c.px;
     const my = c.y - c.py;
     const speed = Math.hypot(mx, my);
-    const moving = speed > 0.004;
+    const moving = speed > 0.004 && !this.frozen;
     // Keep to the right-hand pavement while walking; stand true in a queue.
     let txo = 0;
     let tyo = 0;
@@ -1734,6 +2540,8 @@ export class Renderer {
     const g = this.ctx;
     this.viewTick = view.tick;
     const me = view.players[ui.me];
+    this.unlockShimmer(view, now);
+    if (ui.guideLots && ui.guideLots.length) this.guideRings(view, ui.guideLots, now);
     if (ui.tool && me) {
       const cost = buildCost(ui.tool);
       const afford = me.cash >= cost;

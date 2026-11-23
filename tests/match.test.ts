@@ -1,17 +1,19 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { advance, aiDecide } from '../src/shared/ai';
-import { BOOK_VALUE, CIVICS, CROWN, LOAN_MAX, MODES, PAYROLL_TICKS, SHOPS, START_CASH, UPGRADE_COST, isShop } from '../src/shared/constants';
+import { BOOK_VALUE, CIVICS, CROWN, LOAN_MAX, MODES, PAYROLL_TICKS, SHOPS, START_CASH, UPGRADE_COST, eraLabel, isShop } from '../src/shared/constants';
 import { CITY } from '../src/shared/map';
 import {
   REV_DECAY,
   applyCommand,
   buildResult,
+  closeCouncil,
   continueEndless,
   createGame,
   crownIndex,
   daypart,
   dayPhase,
   emptyLedger,
+  eraNow,
   marketShares,
   netWorth,
   quarterTick,
@@ -22,6 +24,9 @@ import {
 } from '../src/shared/sim';
 import type { Command, Fx, GameState, MatchMode } from '../src/shared/types';
 import { ais, build, freeze, fxOf, humans, labGame, run } from './helpers';
+
+// Whole seeded matches are played in here: leave room for a busy machine.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
 
 describe('Quarter progression', () => {
   it('derives quarter tick, day phase and daypart from the clock', () => {
@@ -38,8 +43,9 @@ describe('Quarter progression', () => {
     for (const [t, part] of parts) {
       expect(daypart(at(t)), `tick ${t}`).toBe(part);
       expect(daypart(at(t + 3000, 3)), `tick ${t} of Q3`).toBe(part);
-      const blitz = Math.floor((t * 2) / 5); // the same instant of a 600-tick Blitz day
-      expect(daypart(at(blitz, 1, 600)), `blitz tick ${blitz}`).toBe(part);
+      const day = MODES.blitz.quarterTicks; // the same instant of a 660-tick Blitz era
+      const blitz = Math.floor((t * day) / 1500);
+      expect(daypart(at(blitz, 1, day)), `blitz tick ${blitz}`).toBe(part);
     }
     // The closing instant of the final quarter still reads as twilight, never as a fifth daypart.
     expect(dayPhase(at(1500))).toBeLessThan(1);
@@ -65,6 +71,13 @@ describe('Quarter progression', () => {
       expect(prev).toBe(3);
       expect(length.map((n) => Math.round(n / (s.quarterTicks / 4)))).toEqual([1, 1, 1, 1]);
       tick(s);
+      // The era closes into the Era Council: the clock holds at the last instant of twilight…
+      expect(s.phase).toBe('council');
+      expect(s.quarter).toBe(1);
+      expect(dayPhase(s)).toBeLessThan(1);
+      expect(daypart(s)).toBe(3);
+      // …and the next era starts at morning when the Council rises.
+      closeCouncil(s);
       expect(s.quarter).toBe(2);
       expect(quarterTick(s)).toBe(0);
       expect(dayPhase(s)).toBe(0);
@@ -75,18 +88,32 @@ describe('Quarter progression', () => {
   it('closes a quarter exactly every quarterTicks, with a quarter fx and a Gazette line', () => {
     const s = createGame({ seed: 2, mode: 'endless', players: humans(2) });
     expect(s.quarter).toBe(1);
-    for (let q = 1; q <= 3; q++) {
+    for (let q = 1; q <= 5; q++) {
       run(s, s.quarterTicks - 1);
       expect(s.quarter).toBe(q);
       expect(s.tick).toBe(q * s.quarterTicks - 1);
       s.fx = [];
       tick(s);
       expect(s.tick).toBe(q * s.quarterTicks);
-      expect(s.quarter).toBe(q + 1);
-      expect(fxOf(s.fx, 'quarter')).toEqual([{ k: 'quarter', q: q + 1 }]);
-      const line = s.gazette.find((g) => g.text.startsWith(`Quarter ${q} closes`));
+      const line = s.gazette.find((g) => g.text.startsWith(`${eraLabel(q)} closes`) && g.tick === s.tick);
       expect(line).toMatchObject({ tick: s.tick, tone: 'market' });
       expect(line?.text).toContain('Crown Index');
+      if (q <= 3) {
+        // Eras I, II and III close into the Era Council; the next era waits for it.
+        expect(s.phase).toBe('council');
+        expect(s.quarter).toBe(q);
+        expect(fxOf(s.fx, 'quarter')).toEqual([]);
+        expect(fxOf(s.fx, 'council')).toEqual([{ k: 'council', era: q }]);
+        // The city is paused: no tick passes while the Council sits.
+        run(s, 25);
+        expect(s.tick).toBe(q * s.quarterTicks);
+        closeCouncil(s);
+      } else {
+        expect(s.phase).toBe('playing');
+        expect(fxOf(s.fx, 'council')).toEqual([]);
+      }
+      expect(s.quarter).toBe(q + 1);
+      expect(fxOf(s.fx, 'quarter')).toEqual([{ k: 'quarter', q: q + 1 }]);
     }
   });
 
@@ -94,7 +121,11 @@ describe('Quarter progression', () => {
     const s = freeze(labGame({ mode: 'blitz', cash: 5000 }));
     const p = s.players[0];
     const shop = build(s, 0, 3, 6, 'bistro');
-    const payrolls = s.quarterTicks / PAYROLL_TICKS;
+    // A Blitz era is 660 ticks, so the payrolls an era sees depend on where it falls.
+    const payrollsIn = (era: number): number =>
+      Math.floor((era * s.quarterTicks) / PAYROLL_TICKS) - Math.floor(((era - 1) * s.quarterTicks) / PAYROLL_TICKS);
+    const payrolls = payrollsIn(1);
+    expect([1, 2, 3, 4].map(payrollsIn)).toEqual([6, 7, 6, 7]);
     run(s, s.quarterTicks - 1);
     expect(p.lastLedger).toEqual(emptyLedger());
     expect(p.ledger.construction).toBe(SHOPS.bistro.cost);
@@ -108,7 +139,12 @@ describe('Quarter progression', () => {
     expect(p.lastLedger).toEqual(q1);
     expect(p.ledger).toEqual(emptyLedger());
     expect(p.totalLedger).toEqual(q1);
-    // Second quarter: an upgrade and a park.
+    // The books are closed before the Era Council sits; adopting a charter moves no money.
+    expect(s.phase).toBe('council');
+    closeCouncil(s);
+    expect(p.lastLedger).toEqual(q1);
+    expect(p.ledger).toEqual(emptyLedger());
+    // Second era: an upgrade and a park.
     expect(applyCommand(s, 0, { c: 'upgrade', id: shop.id }).ok).toBe(true);
     const park = build(s, 0, 4, 6, 'park');
     const upgrade = Math.round(SHOPS.bistro.cost * UPGRADE_COST[0]);
@@ -116,15 +152,23 @@ describe('Quarter progression', () => {
     expect(p.lastLedger).toEqual(q1);
     expect(p.totalLedger.construction).toBe(SHOPS.bistro.cost + upgrade);
     run(s, s.quarterTicks);
-    expect(s.phase).toBe('ended');
-    // The final quarter is closed into lastLedger too, so the victory screen can show it.
+    expect(s.phase).toBe('council');
     expect(p.lastLedger.construction).toBe(upgrade);
     expect(p.lastLedger.civic).toBe(CIVICS.park.cost);
-    expect(p.lastLedger.wages).toBe(payrolls * wageOf(shop));
-    expect(p.lastLedger.rent).toBeCloseTo(payrolls * (rentOf(shop) + rentOf(park)), 9);
+    expect(p.lastLedger.wages).toBeCloseTo(payrollsIn(2) * wageOf(shop, p), 9);
+    expect(p.lastLedger.rent).toBeCloseTo(payrollsIn(2) * (rentOf(shop) + rentOf(park)), 9);
     expect(p.ledger).toEqual(emptyLedger());
-    expect(p.totalLedger.wages).toBe(q1.wages + p.lastLedger.wages);
+    expect(p.totalLedger.wages).toBeCloseTo(q1.wages + p.lastLedger.wages, 9);
     expect(p.totalLedger.rent).toBeCloseTo(q1.rent + p.lastLedger.rent, 9);
+    // The final era is closed into lastLedger too, so the Final Edition can show it.
+    closeCouncil(s);
+    run(s, s.quarterTicks);
+    closeCouncil(s);
+    run(s, s.quarterTicks);
+    expect(s.phase).toBe('ended');
+    expect(p.ledger).toEqual(emptyLedger());
+    expect(p.lastLedger.wages).toBeCloseTo(payrollsIn(4) * wageOf(shop, p), 9);
+    expect(p.lastLedger.construction).toBe(0);
     // The rival's pages stayed blank throughout.
     expect(s.players[1].totalLedger).toEqual(emptyLedger());
   });
@@ -132,7 +176,7 @@ describe('Quarter progression', () => {
 
 describe('Win condition', () => {
   it('starts every mode with the right length, opening cash and an empty district', () => {
-    const lengths: Record<MatchMode, number> = { blitz: 2, standard: 4, endless: 0 };
+    const lengths: Record<MatchMode, number> = { blitz: 4, standard: 4, endless: 0 }; // every mode plays Era I → IV
     for (const mode of ['blitz', 'standard', 'endless'] as MatchMode[]) {
       const s = createGame({ seed: 77, mode, players: humans(3) });
       expect(s.totalQuarters).toBe(lengths[mode]);
@@ -150,22 +194,34 @@ describe('Win condition', () => {
     expect(createGame({ seed: 1, mode: 'blitz', players: ais(['orson']) }).players[0].persona).toBe('orson');
   });
 
-  it('ends a Blitz after two quarters: phase ended, result set, an end fx, and the clock stops', () => {
+  it('ends a Blitz after four brisk eras: phase ended, result set, an end fx, and the clock stops', () => {
     const s = createGame({ seed: 8, mode: 'blitz', players: ais(['vesper', 'orson']) });
     const seen: Fx[] = [];
-    for (let i = 0; i < 2 * s.quarterTicks - 1; i++) {
-      advance(s);
-      seen.push(...s.fx.filter((f) => f.k === 'quarter' || f.k === 'end'));
+    const collect = (): void => {
+      seen.push(...s.fx.filter((f) => f.k === 'quarter' || f.k === 'end' || f.k === 'council'));
       s.fx = [];
+    };
+    while (s.tick < 4 * s.quarterTicks - 1) {
+      if (s.phase === 'council') closeCouncil(s);
+      else advance(s);
+      collect();
     }
     expect(s.phase).toBe('playing');
     expect(s.result).toBeNull();
-    expect(s.quarter).toBe(2);
-    expect(seen).toEqual([{ k: 'quarter', q: 2 }]);
+    expect(s.quarter).toBe(4);
+    expect(seen).toEqual([
+      { k: 'council', era: 1 },
+      { k: 'quarter', q: 2 },
+      { k: 'council', era: 2 },
+      { k: 'quarter', q: 3 },
+      { k: 'council', era: 3 },
+      { k: 'quarter', q: 4 },
+    ]);
     advance(s);
-    expect(s.tick).toBe(2 * MODES.blitz.quarterTicks);
+    expect(s.tick).toBe(4 * MODES.blitz.quarterTicks);
     expect(s.phase).toBe('ended');
-    expect(s.quarter).toBe(2);
+    expect(s.council).toBeNull();
+    expect(s.quarter).toBe(4);
     expect(s.result).not.toBeNull();
     expect(s.fx.filter((f) => f.k === 'quarter' || f.k === 'end')).toEqual([{ k: 'end' }]);
     expect(daypart(s)).toBe(3);
@@ -184,14 +240,15 @@ describe('Win condition', () => {
     beforeAll(() => {
       s = createGame({ seed: 31, mode: 'standard', players: ais(['vesper', 'aurelia', 'orson', 'aurelia']) });
       let guard = 0;
-      while (s.phase === 'playing' && guard++ < 10000) {
-        advance(s);
+      while (s.phase !== 'ended' && guard++ < 10000) {
+        if (s.phase === 'council') closeCouncil(s);
+        else advance(s);
         for (const f of s.fx) if (f.k === 'quarter' || f.k === 'end') marks.push({ tick: s.tick, fx: f });
         s.fx = [];
       }
-    });
+    }, 60000);
 
-    it('ends after four quarters and not a tick sooner', () => {
+    it('ends after four eras and not a tick sooner', () => {
       expect(s.phase).toBe('ended');
       expect(s.tick).toBe(4 * MODES.standard.quarterTicks);
       expect(s.quarter).toBe(4);
@@ -255,6 +312,7 @@ describe('Win condition', () => {
         { c: 'sell', id },
         { c: 'borrow' },
         { c: 'repay' },
+        { c: 'charter', key: 'artisanry' },
       ];
       for (const cmd of cmds) expect(applyCommand(s, 0, cmd), cmd.c).toEqual({ ok: false, err: 'The match is not running' });
       expect(JSON.stringify(s)).toBe(before);
@@ -264,7 +322,7 @@ describe('Win condition', () => {
 
 describe('Crown Index', () => {
   it('is net worth × weight + market share % × weight + prestige × weight, rounded', () => {
-    const s = freeze(labGame({ players: 3, cash: 5000 }));
+    const s = freeze(labGame({ era: 3, players: 3, cash: 5000 }));
     const [a, b, c] = s.players;
     build(s, 0, 3, 6, 'cinema');
     build(s, 0, 4, 6, 'park');
@@ -310,7 +368,7 @@ describe('Crown Index', () => {
     expect(shares.reduce((x, y) => x + y, 0)).toBeCloseTo(1, 12);
     shares.forEach((v, i) => expect(v).toBeCloseTo((i + 1) / 10, 12));
     // Recent revenue fades tick by tick, so share follows current trade, not history.
-    const s = freeze(labGame());
+    const s = freeze(labGame({ era: 3 }));
     s.players[0].recentRev = 100;
     tick(s);
     expect(s.players[0].recentRev).toBeCloseTo(100 * REV_DECAY, 12);
@@ -322,7 +380,7 @@ describe('Crown Index', () => {
   });
 
   it('orders the standings by Crown Index and breaks ties by seat', () => {
-    const s = labGame({ players: 4, cash: 1000 });
+    const s = labGame({ era: 3, players: 4, cash: 1000 });
     expect(standings(s).map((r) => r.player)).toEqual([0, 1, 2, 3]);
     expect(buildResult(s).winner).toBe(0);
     s.players[2].prestige = 5;
@@ -337,7 +395,7 @@ describe('Crown Index', () => {
 
 describe('Awards', () => {
   it('gives Corner King, Price Shark and Civic Patron to the leaders of each tally', () => {
-    const s = labGame({ players: 4 });
+    const s = labGame({ era: 3, players: 4 });
     const corner = [10, 512.4, 20, 0];
     const budget = [0, 3, 40, 1];
     const prestige = [5, 0, 2, 30.4];
@@ -361,7 +419,7 @@ describe('Awards', () => {
   });
 
   it('withholds an award nobody earned and settles ties for the earlier seat', () => {
-    const s = labGame({ players: 3 });
+    const s = labGame({ era: 3, players: 3 });
     expect(buildResult(s).awards).toEqual([]);
     s.players[1].stats.budgetSales = 7;
     s.players[2].stats.budgetSales = 7;
@@ -383,8 +441,12 @@ describe('Endless', () => {
   it('continues an ended match in Endless: playing again, next quarter, and no second ending', () => {
     const s = createGame({ seed: 8, mode: 'blitz', players: ais(['vesper', 'aurelia', 'orson']) });
     expect(continueEndless(s)).toBe(false); // still running
-    while (s.phase === 'playing') advance(s);
+    while (s.phase !== 'ended') {
+      if (s.phase === 'council') closeCouncil(s);
+      else advance(s);
+    }
     const limit = s.tick;
+    expect(limit).toBe(4 * s.quarterTicks);
     const buildings = s.buildings.length;
     const cash = s.players.map((p) => p.cash);
     s.fx = [];
@@ -392,11 +454,12 @@ describe('Endless', () => {
     expect(s.phase).toBe('playing');
     expect(s.endless).toBe(true);
     expect(s.result).toBeNull();
-    expect(s.quarter).toBe(3);
+    expect(s.quarter).toBe(5);
+    expect(eraNow(s)).toBe(4); // past the Golden Dynasty the district simply plays on
     expect(s.tick).toBe(limit);
     expect(quarterTick(s)).toBe(0);
     expect(daypart(s)).toBe(0);
-    expect(s.fx).toEqual([{ k: 'quarter', q: 3 }]);
+    expect(s.fx).toEqual([{ k: 'quarter', q: 5 }]);
     expect(s.buildings).toHaveLength(buildings);
     expect(s.players.map((p) => p.cash)).toEqual(cash);
     // A new day's events are on the calendar.
@@ -414,8 +477,9 @@ describe('Endless', () => {
     for (let i = 0; i < 2 * s.quarterTicks + 10; i++) advance(s);
     expect(s.tick).toBe(limit + 2 * s.quarterTicks + 10);
     expect(s.phase).toBe('playing');
+    expect(s.council).toBeNull(); // no Council sits after Era IV
     expect(s.result).toBeNull();
-    expect(s.quarter).toBe(5);
+    expect(s.quarter).toBe(7);
     expect(s.players.reduce((a, p) => a + p.stats.served, 0)).toBeGreaterThan(served);
   });
 
@@ -423,16 +487,22 @@ describe('Endless', () => {
     const s = createGame({ seed: 14, mode: 'endless', players: ais(['orson', 'vesper']) });
     expect(s.totalQuarters).toBe(0);
     const ends: Fx[] = [];
-    for (let i = 0; i < 2 * s.quarterTicks + 200; i++) {
-      advance(s);
+    let councils = 0;
+    while (s.tick < 5 * s.quarterTicks + 200) {
+      if (s.phase === 'council') {
+        councils++;
+        closeCouncil(s);
+      } else advance(s);
       ends.push(...fxOf(s.fx, 'end'));
       s.fx = [];
     }
     expect(s.phase).toBe('playing');
     expect(s.result).toBeNull();
     expect(ends).toEqual([]);
-    expect(s.quarter).toBe(3);
-    expect(s.tick).toBe(2 * s.quarterTicks + 200);
+    expect(councils).toBe(3);
+    expect(s.quarter).toBe(6);
+    expect(eraNow(s)).toBe(4);
+    expect(s.tick).toBe(5 * s.quarterTicks + 200);
     expect(continueEndless(s)).toBe(false);
     // The tycoons keep investing: there is no final stretch to hold back for.
     expect(s.buildings.length).toBeGreaterThan(6);

@@ -1,7 +1,7 @@
 // Pure input policy: which key does what, given where the player is. No DOM in here, so the
 // rules (overlays swallow build and speed hotkeys; a finished match disarms the build tool)
 // are unit-tested directly.
-import { BUILD_KINDS } from '../shared/constants';
+import { BUILD_KINDS, isUnlocked } from '../shared/constants';
 import type { BuildKind } from '../shared/types';
 
 export interface KeyContext {
@@ -14,6 +14,10 @@ export interface KeyContext {
   me: number;
   kind: 'attract' | 'solo' | 'multi';
   tool: BuildKind | null;
+  /** The Era Council modal is on screen (the city is paused). */
+  councilOpen?: boolean;
+  /** The era clock (the match's quarter counter): decides which build tools are unlocked. */
+  quarter?: number;
 }
 
 export type KeyAction =
@@ -24,7 +28,9 @@ export type KeyAction =
   | { a: 'escape' }
   | { a: 'fit' }
   | { a: 'pause' }
-  | { a: 'tool'; kind: BuildKind | null };
+  | { a: 'tool'; kind: BuildKind | null }
+  /** A hotkey for a tool whose era has not come: the caller shows the unlock notice. */
+  | { a: 'locked'; kind: BuildKind };
 
 const PAN_KEYS = ['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
 
@@ -32,11 +38,12 @@ const PAN_KEYS = ['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'Arro
 export const normKey = (key: string): string => (key.length === 1 ? key.toLowerCase() : key);
 
 /**
- * True while an overlay owns the screen: the Title card, the Lobby, or the Victory modal.
- * Gameplay hotkeys (build tools 1–9, Space to pause) must not leak through any of them.
+ * True while an overlay owns the screen: the Title card, the Lobby, the Era Council, or the
+ * Final Edition. Gameplay hotkeys (build tools 1–9, Space to pause) must not leak through any
+ * of them.
  */
-export const overlayActive = (c: Pick<KeyContext, 'phase' | 'victoryOpen' | 'ended'>): boolean =>
-  c.phase !== 'playing' || c.victoryOpen || c.ended;
+export const overlayActive = (c: Pick<KeyContext, 'phase' | 'victoryOpen' | 'ended' | 'councilOpen'>): boolean =>
+  c.phase !== 'playing' || c.victoryOpen || c.ended || !!c.councilOpen;
 
 export function resolveKey(rawKey: string, c: KeyContext): KeyAction {
   const k = normKey(rawKey);
@@ -51,7 +58,10 @@ export function resolveKey(rawKey: string, c: KeyContext): KeyAction {
   if (k === ' ') return c.kind === 'solo' ? { a: 'pause' } : { a: 'none' };
   if (k >= '1' && k <= '9' && c.me >= 0) {
     const kind = BUILD_KINDS[Number(k) - 1];
-    return kind ? { a: 'tool', kind: c.tool === kind ? null : kind } : { a: 'none' };
+    if (!kind) return { a: 'none' };
+    // A future-era tool is never armed: the key answers with its unlock notice instead.
+    if (c.quarter !== undefined && !isUnlocked(kind, c.quarter)) return { a: 'locked', kind };
+    return { a: 'tool', kind: c.tool === kind ? null : kind };
   }
   return { a: 'none' };
 }
@@ -74,16 +84,17 @@ export function disarm<T extends ArmedUi>(ui: T): T {
 
 /**
  * Identity of the match on screen. When it changes — the final bell, a Rematch (new seed),
- * Continue in Endless (ended → running) — any armed build tool must be dropped.
+ * Continue in Endless (ended → running), an Era Council opening or closing — any armed build
+ * tool must be dropped.
  */
-export const matchStamp = (v: { seed: number; ended: boolean; endless: boolean }): string =>
-  `${v.seed}|${v.ended ? 1 : 0}|${v.endless ? 1 : 0}`;
+export const matchStamp = (v: { seed: number; ended: boolean; endless: boolean; inCouncil?: boolean }): string =>
+  `${v.seed}|${v.ended ? 1 : 0}|${v.endless ? 1 : 0}|${v.inCouncil ? 1 : 0}`;
 
 /** Notices when the match on screen changes, so the caller can disarm exactly once per change. */
 export class MatchWatch {
   private last = '';
   /** True when `view` is a different match (or match state) than the one seen last time. */
-  changed(view: { ready: boolean; seed: number; ended: boolean; endless: boolean }): boolean {
+  changed(view: { ready: boolean; seed: number; ended: boolean; endless: boolean; inCouncil?: boolean }): boolean {
     const stamp = view.ready ? matchStamp(view) : '';
     if (stamp === this.last) return false;
     const first = this.last === '';

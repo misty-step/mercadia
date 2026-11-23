@@ -1,9 +1,9 @@
 // RoomCore: the multiplayer room as a pure state machine. The Durable Object owns sockets,
 // timers and storage; everything that can be decided without them is decided here.
 import { advance } from './ai';
-import { AI_ORDER, AI_PERSONAS, HOUSES } from './constants';
+import { AI_ORDER, AI_PERSONAS, HOST_SPEEDS, HOUSES } from './constants';
 import { SnapEncoder, type ClientMsg, type LobbyView, type ServerMsg } from './protocol';
-import { applyCommand, continueEndless, createGame, upgradeState } from './sim';
+import { applyCommand, continueEndless, councilBeat, createGame, upgradeState } from './sim';
 import type { AiPersona, GameState, MatchMode, PlayerSetup } from './types';
 
 export interface Seat {
@@ -42,7 +42,7 @@ export interface JoinResult {
 }
 
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-export const SPEEDS = [1, 1.5, 2];
+export const SPEEDS = HOST_SPEEDS;
 
 export function makeRoomCode(random: () => number): string {
   let code = '';
@@ -121,6 +121,8 @@ export class RoomCore {
       ai: r.seats.filter((s) => s.kind === 'ai').length,
       open: r.seats.filter((s) => s.kind === 'open').length,
       quarter: this.game ? this.game.quarter : 0,
+      era: this.game ? Math.min(4, this.game.quarter) : 0,
+      council: !!this.game && this.game.phase === 'council',
       tick: this.game ? this.game.tick : 0,
       seats: this.lobby().seats,
     };
@@ -130,12 +132,15 @@ export class RoomCore {
     return { room: this.room, game: this.game };
   }
 
-  /** True while the simulation should be stepping: a live match with a human watching. */
+  /**
+   * True while the room needs its 100 ms beat: a live match (or an Era Council counting down)
+   * with a human watching.
+   */
   get running(): boolean {
     return (
       this.room.status === 'playing' &&
       !!this.game &&
-      this.game.phase === 'playing' &&
+      this.game.phase !== 'ended' &&
       (this.room.seats.some((s) => s.kind === 'human' && s.connected) || this.spectators.size > 0)
     );
   }
@@ -334,6 +339,16 @@ export class RoomCore {
     }
   }
 
+  /** Player indices of the connected humans: the Houses an Era Council waits for. */
+  councilVoters(): number[] {
+    const r = this.room;
+    const out: number[] = [];
+    r.seats.forEach((s, i) => {
+      if (s.kind === 'human' && s.connected && r.playerOf[i] >= 0) out.push(r.playerOf[i]);
+    });
+    return out;
+  }
+
   private afterStart(): Outbound[] {
     const r = this.room;
     const out: Outbound[] = [this.lobbyAll()];
@@ -350,10 +365,16 @@ export class RoomCore {
   step(): Outbound[] {
     const g = this.game;
     if (!g || !this.running) return [];
-    this.room.acc += this.room.speed;
-    let n = Math.floor(this.room.acc);
-    this.room.acc -= n;
-    while (n-- > 0) advance(g);
+    if (g.phase === 'council') {
+      // The Era Council runs on real time, whatever the pace: it closes when the countdown
+      // ends (undecided Houses take their steward's pick) or once every connected human chose.
+      councilBeat(g, this.councilVoters());
+    } else {
+      this.room.acc += this.room.speed;
+      let n = Math.floor(this.room.acc);
+      this.room.acc -= n;
+      while (n-- > 0 && g.phase === 'playing') advance(g);
+    }
     const out: Outbound[] = [{ to: '*', msg: this.encoder.encode(g, false, this.room.speed) }];
     g.fx = [];
     if (g.phase === 'ended' && this.room.status === 'playing') {

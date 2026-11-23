@@ -1,10 +1,15 @@
-import { describe, expect, it } from 'vitest';
-import { AI_ORDER, AI_PERSONAS, MODES, SHOPS } from '../src/shared/constants';
+import { describe, expect, it, vi } from 'vitest';
+import { AI_ORDER, AI_PERSONAS, CIVICS, COUNCIL_BEATS, LOAN_STEP, MILESTONES, MODES, SHOPS, START_CASH } from '../src/shared/constants';
+import { OPENINGS } from '../src/shared/ai';
 import { idx } from '../src/shared/map';
-import { parseClientMsg, type ClientMsg, type ServerMsg, type Snap } from '../src/shared/protocol';
+import { CityView, parseClientMsg, type ClientMsg, type ServerMsg, type Snap } from '../src/shared/protocol';
+import { ledgerCashChange } from '../src/shared/sim';
 import { ROOM_CODE_ALPHABET, RoomCore, SPEEDS, cleanName, isRoomCode, makeRoomCode, type Outbound } from '../src/shared/room';
 import type { GameState } from '../src/shared/types';
 import { clone } from './helpers';
+
+// Whole seeded matches are played in here: leave room for a busy machine.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
 
 type Msg<T extends ServerMsg['t']> = Extract<ServerMsg, { t: T }>;
 
@@ -300,8 +305,16 @@ describe('Starting a match', () => {
     const personas = duo.game().players.filter((p) => p.kind === 'ai').map((p) => p.persona);
     expect(personas).toEqual(['vesper', 'aurelia']);
     expect(new Set(personas).size).toBe(personas.length);
-    for (let i = 0; i < 120; i++) duo.core.step();
-    expect(duo.game().tick).toBe(120);
+    // Deliberate pacing: nobody has built before the first AI seat's opening delay…
+    const o = OPENINGS.standard;
+    for (let i = 0; i < o.firstMove - 1; i++) duo.core.step();
+    expect(duo.game().buildings).toEqual([]);
+    // …and the seats stagger: the second AI House is still reading the street.
+    for (let i = 0; i < o.stagger; i++) duo.core.step();
+    expect(duo.game().buildings.some((b) => b.owner === 2)).toBe(true);
+    expect(duo.game().buildings.some((b) => b.owner === 3)).toBe(false);
+    for (let i = duo.game().tick; i < 240; i++) duo.core.step();
+    expect(duo.game().tick).toBe(240);
     // The AI rivals have opened for business; the idle humans have not.
     expect(duo.game().buildings.some((b) => b.owner === 2)).toBe(true);
     expect(duo.game().buildings.some((b) => b.owner === 3)).toBe(true);
@@ -409,7 +422,9 @@ describe('Commands in a room', () => {
     const out = core.handle(ada, { t: 'start' });
     expect(core.room.playerOf).toEqual([0, -1, 1, 2]);
     expect(pick(out, 'welcome', cy)[0]).toMatchObject({ seat: 2, player: 1 });
-    expect(core.handle(cy, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'arcade' } })).toEqual([]);
+    expect(core.handle(cy, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'bistro' } })).toEqual([]);
+    // A future-era tool is refused with its unlock notice, by player index too.
+    expect(rejectTo(core.handle(cy, { t: 'cmd', cmd: { c: 'build', tile: idx(4, 6), kind: 'arcade' } }), cy)).toBe('Arcade unlocks in Era II: Transit & Trade');
     const game = core.game as GameState;
     expect(game.buildings[0].owner).toBe(1);
     expect(game.players[1]).toMatchObject({ name: 'Player 3', kind: 'human', house: 2 });
@@ -444,6 +459,64 @@ describe('Stepping the simulation', () => {
     for (let i = 1; i < 10; i += 2) expect(ticks[i] - (i > 1 ? ticks[i - 2] : 30)).toBe(3);
     const steps = ticks.map((k, i) => k - (i ? ticks[i - 1] : 30));
     expect(steps.every((n) => n === 1 || n === 2)).toBe(true);
+  });
+
+  it('keeps every Ledger reconciled with its Treasury on every beat when 2× starts on an odd tick', () => {
+    // The room as two clients see it: a full snapshot at the start, then every broadcast delta.
+    const room = seated(2);
+    const [ada, ben] = room.ids;
+    const { core } = room;
+    const startSnap = pick(core.handle(ada, { t: 'start' }), 'snap', '*')[0];
+    const game = core.game as GameState;
+    const view = new CityView();
+    view.apply(clone(startSnap));
+    const beat = (): Snap => {
+      const snap = pick(core.step(), 'snap', '*')[0];
+      view.apply(clone(snap));
+      game.players.forEach((p, i) => {
+        expect(view.ledgers[i]).toEqual({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger });
+        // Ledger drawer: "Opening §900 + match change = § in hand" against the Treasury chip.
+        expect(Math.round(START_CASH + ledgerCashChange(view.ledgers[i].total)), `tick ${game.tick} player ${i}`).toBe(view.players[i].cash);
+        expect(view.players[i].debt).toBe(p.debt);
+        expect(view.players[i].milestones).toEqual(p.milestones);
+      });
+      return snap;
+    };
+    while (game.tick < 83) beat();
+    expect(pick(core.handle(ada, { t: 'speed', speed: 2 }), 'reject')).toEqual([]);
+    for (let i = 0; i < 5; i++) beat();
+    expect(game.tick).toBe(93);
+    // Adjacent Pocket Parks: Block Baron and Civic Benefactor (+§120) on the next beat
+    // (Milestones are judged every fifth tick: 95 falls inside it).
+    const before = view.players[0].cash;
+    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'park' } })).toEqual([]);
+    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: idx(4, 6), kind: 'park' } })).toEqual([]);
+    const parks = beat();
+    expect(parks.k % 10).not.toBe(0);
+    expect(parks.lg).toBeDefined();
+    expect(view.players[0].milestones[1]).toBeGreaterThanOrEqual(0);
+    expect(view.players[0].milestones[2]).toBeGreaterThanOrEqual(0);
+    expect(view.ledgers[0].total.dividends).toBe(MILESTONES[2].cash);
+    expect(view.players[0].cash).toBe(before - 2 * CIVICS.park.cost + MILESTONES[2].cash);
+    // A §400 loan for Ada, and Ben borrows too: both reconcile on the same beat.
+    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
+    expect(core.handle(ben, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
+    const loans = beat();
+    expect(loans.k % 10).not.toBe(0);
+    expect(loans.lg).toBeDefined();
+    expect(view.ledgers[0].total.borrowed).toBe(LOAN_STEP);
+    expect(view.ledgers[1].total.borrowed).toBe(LOAN_STEP);
+    expect(view.players[0].cash).toBe(before - 2 * CIVICS.park.cost + MILESTONES[2].cash + LOAN_STEP);
+    expect(view.players[0].debt).toBe(LOAN_STEP);
+    // The rest of the Era, AI Houses trading: no broadcast lands on a multiple of ten, none is stale.
+    let ledgers = 0;
+    while (game.phase === 'playing' && game.quarter === 1) {
+      const snap = beat();
+      if (game.phase === 'playing' && game.quarter === 1) expect(snap.k % 2).toBe(1);
+      if (snap.lg) ledgers++;
+    }
+    expect(ledgers).toBeGreaterThan(MODES.standard.quarterTicks / 2 / 10 - 10);
+    expect(game.players[0].totalLedger.interest).toBeGreaterThan(0);
   });
 
   it('lets only the host set the pace, and only to 1×, 1.5× or 2×', () => {
@@ -570,7 +643,11 @@ describe('Match end, rematch and Endless', () => {
     const { core, host, game } = started(1, { mode: 'blitz', speed: 2 });
     const { beats, last } = playOut(core);
     const total = MODES.blitz.quarters * MODES.blitz.quarterTicks;
-    expect(beats).toBe(total / 2);
+    expect(MODES.blitz.quarters).toBe(4);
+    // Four eras at pace 2×, plus three Era Councils that run their full real-time countdown
+    // (the lone human never picks): the Council clock does not speed up with the pace.
+    expect(beats).toBe(total / 2 + 3 * COUNCIL_BEATS);
+    expect(game().players.every((p) => p.charters.length === 3)).toBe(true);
     expect(game().tick).toBe(total);
     expect(game().phase).toBe('ended');
     expect(core.room.status).toBe('ended');
@@ -586,7 +663,7 @@ describe('Match end, rematch and Endless', () => {
     expect(core.step()).toEqual([]);
     expect(game().tick).toBe(total);
     expect(rejectTo(core.handle(host, { t: 'cmd', cmd: { c: 'borrow' } }), host)).toBe('The match is not running');
-    expect(core.summary()).toMatchObject({ status: 'ended', quarter: 2, tick: total });
+    expect(core.summary()).toMatchObject({ status: 'ended', quarter: 4, era: 4, council: false, tick: total });
   });
 
   it('starts a rematch for the host: a fresh city, a new seed, welcomes and a full snapshot', () => {
@@ -636,15 +713,16 @@ describe('Match end, rematch and Endless', () => {
     const out = core.handle(ada, { t: 'endless' });
     expect(out.map((o) => [o.to, o.msg.t])).toEqual([['*', 'lobby'], ['*', 'snap']]);
     expect(pick(out, 'lobby')[0].lobby.status).toBe('playing');
-    expect(pick(out, 'snap')[0]).toMatchObject({ full: true, k: limit, q: [3, 0, 1], res: null });
+    expect(pick(out, 'snap')[0]).toMatchObject({ full: true, k: limit, q: [5, 0, 1], res: null, cn: null });
     expect(core.room.status).toBe('playing');
     expect(core.room.matchNo).toBe(1);
     expect(game().endless).toBe(true);
     expect(core.running).toBe(true);
-    // It runs through two more quarter closes without ending again.
+    // It runs through two more era closes without ending again, and without another Council.
     for (let i = 0; i < MODES.blitz.quarterTicks + 20; i++) expect(core.step()).toHaveLength(1);
     expect(game().tick).toBe(limit + 2 * MODES.blitz.quarterTicks + 40);
-    expect(game().quarter).toBe(5);
+    expect(game().quarter).toBe(7);
+    expect(game().phase).toBe('playing');
     expect(core.room.status).toBe('playing');
     expect(core.handle(ben, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
   });

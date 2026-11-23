@@ -1,10 +1,12 @@
 // MERCADIA client entry. Owns the frame loop, input, and the hand-offs between the title
 // screen's attract-mode district, solo matches, and multiplayer rooms.
-import { HOUSES, buildCost, buildName } from '../shared/constants';
+import { BUILD_KINDS, CHARTERS, ERAS, HOUSES, MILESTONES, START_CASH, buildName, eraDef, isUnlocked } from '../shared/constants';
 import { CITY } from '../shared/map';
 import type { ClientMsg, LobbyView } from '../shared/protocol';
+import { buildCostFor, ledgerCashChange, starsOf } from '../shared/sim';
 import type { BuildKind, Fx, MatchMode } from '../shared/types';
 import { Foley } from './audio';
+import { freeCentre, playInsets } from './chronicle';
 import { Hud, LobbyScreen, TitleScreen, storedName } from './hud';
 import { MatchWatch, devHooksAllowed, disarm, normKey, resolveKey } from './input';
 import { Renderer, type UiState } from './renderer';
@@ -13,7 +15,7 @@ import { LocalSession, NetSession, attractSetups, createRoom, roomExists, soloSe
 const stage = document.getElementById('stage') as HTMLDivElement;
 const renderer = new Renderer(document.getElementById('city') as HTMLCanvasElement);
 const audio = new Foley();
-const ui: UiState = { me: -1, tool: null, hoverTile: -1, selectedTile: -1, selectedCitizen: -1 };
+const ui: UiState = { me: -1, tool: null, hoverTile: -1, selectedTile: -1, selectedCitizen: -1, guideLots: [] };
 
 let session: Session = new LocalSession('attract', attractSetups(), 'endless', (Date.now() & 0xffff) + 17);
 let net: NetSession | null = null;
@@ -34,6 +36,7 @@ const hud = new Hud({
   isHost: () => (net ? net.isHost : session.kind === 'solo'),
   disarm: () => resetUi(),
   refit: () => refit(),
+  focus: (tile) => renderer.panTo(tile),
 });
 
 const title = new TitleScreen({
@@ -60,7 +63,7 @@ const lobby = new LobbyScreen({
 function setInsets(): void {
   const w = window.innerWidth;
   if (phase === 'playing') {
-    renderer.insets = w <= 720 ? { top: 150, right: 0, bottom: w <= 640 ? 160 : 130, left: 0 } : { top: 64, right: w > 1180 ? 120 : 60, bottom: 84, left: 0 };
+    renderer.insets = playInsets(w);
   } else {
     // Leave room for the title card: it sits left on wide screens, bottom on phones.
     renderer.insets = w <= 720 ? { top: 10, right: 0, bottom: Math.round(window.innerHeight * 0.52), left: 0 } : { top: 20, right: 0, bottom: 20, left: Math.min(460, Math.round(w * 0.3)) };
@@ -192,8 +195,13 @@ function accepted(): void {
 
 function setTool(k: BuildKind | null): void {
   if (ui.me < 0) return;
-  // No blueprint may be armed over a finished match.
-  if (k && (phase !== 'playing' || session.view.ended)) k = null;
+  // No blueprint may be armed over a finished match, or while the Era Council sits.
+  if (k && (phase !== 'playing' || session.view.ended || session.view.inCouncil)) k = null;
+  // A tool whose era has not come is never armed: say when it unlocks instead.
+  if (k && !isUnlocked(k, session.view.quarter)) {
+    hud.lockedNotice(k);
+    k = null;
+  }
   ui.tool = k;
   stage.classList.toggle('building', !!k);
   if (k) {
@@ -220,7 +228,7 @@ function tryBuild(tile: number, keep: boolean): void {
     return;
   }
   if (ui.tool === 'tramstop' && CITY.avenueAdj[tile] < 0) return reject('A Tram Stop must touch the avenue');
-  if (me.cash < buildCost(ui.tool)) return reject(`Not enough cash for a ${buildName(ui.tool)}`);
+  if (me.cash < buildCostFor(me, ui.tool)) return reject(`Not enough cash for a ${buildName(ui.tool)}`);
   session.command({ c: 'build', tile, kind: ui.tool });
   if (!keep) setTool(null);
 }
@@ -240,8 +248,10 @@ function onFx(f: Fx): void {
     case 'build':
       audio.build(mine(f.p));
       // Desktop opens the new shop's Inspector beside the city. On a phone the Inspector is a
-      // bottom sheet over the dock, so it waits for a tap and building can continue.
-      if (mine(f.p) && window.innerWidth > 640) select(f.tile);
+      // bottom sheet over the dock, so it waits for a tap and building can continue. While the
+      // Founding Guide is walking the player through their opening it waits everywhere: the
+      // guide's second step is the player's own click on their first shop.
+      if (mine(f.p) && window.innerWidth > 640 && !hud.guideActive) select(f.tile);
       break;
     case 'upgrade':
       if (mine(f.p)) audio.fanfare();
@@ -266,8 +276,24 @@ function onFx(f: Fx): void {
       audio.award();
       break;
     case 'quarter':
-      audio.quarter();
+      // A new era: the era bell under a warm chord.
+      audio.era();
       audio.rain(false);
+      break;
+    case 'council':
+      audio.council();
+      audio.rain(false);
+      break;
+    case 'milestone':
+      if (mine(f.p)) audio.milestone();
+      else audio.sting();
+      break;
+    case 'charter':
+      if (mine(f.p)) audio.seal();
+      break;
+    case 'dispatch':
+      // Headlines that carry no sound of their own: lead changes and rivalry clashes.
+      if (f.tier === 1 && (f.cat === 'lead' || f.cat === 'rival' || f.cat === 'promo')) audio.sting();
       break;
     default:
       break;
@@ -284,6 +310,7 @@ const keys = new Set<string>();
 
 stage.addEventListener('pointerdown', (e) => {
   audio.unlock();
+  hud.closeFeedOnPhone();
   ui.touch = e.pointerType === 'touch' || e.pointerType === 'pen';
   stage.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -407,7 +434,16 @@ window.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   // The policy lives in input.ts: build and speed hotkeys never leak through the Title,
   // the Lobby or the Victory modal.
-  const act = resolveKey(e.key, { phase, victoryOpen: hud.victoryOpen, ended: session.view.ended, me: ui.me, kind: session.kind, tool: ui.tool });
+  const act = resolveKey(e.key, {
+    phase,
+    victoryOpen: hud.victoryOpen,
+    ended: session.view.ended,
+    me: ui.me,
+    kind: session.kind,
+    tool: ui.tool,
+    councilOpen: hud.councilOpen || session.view.inCouncil,
+    quarter: session.view.quarter,
+  });
   switch (act.a) {
     case 'pan':
       keys.add(normKey(e.key));
@@ -440,6 +476,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'tool':
       setTool(act.kind);
+      break;
+    case 'locked':
+      hud.lockedNotice(act.kind);
       break;
     default:
       // A swallowed Space must not scroll or re-press a focused button behind an overlay.
@@ -584,10 +623,67 @@ function frame(now: number): void {
    * Solo and attract only: run the local simulation forward by n ticks at once.
    * A cheat on a public host, so it is inert there unless the URL carries ?dev=1.
    */
-  warp(n: number) {
+  warp(n: number, hold = false) {
     if (!devHooks) return false;
-    if (session instanceof LocalSession) session.warp(n);
+    if (session instanceof LocalSession) session.warp(n, hold);
+    hud.sync(0, true);
     return true;
+  },
+  /** Dev hook: pan the camera to a lot, as the Chronicle's click-to-focus does. */
+  focus(tile: number) {
+    if (!devHooks) return false;
+    renderer.panTo(tile);
+    return true;
+  },
+  /** The era on the clock, 1..4. */
+  get era() {
+    return session.view.era;
+  },
+  get eraName() {
+    return eraDef(session.view.quarter).name;
+  },
+  /** Build tools the current era allows, and those still behind an Era lock. */
+  get unlocks() {
+    return BUILD_KINDS.filter((k) => isUnlocked(k, session.view.quarter));
+  },
+  get locked() {
+    return BUILD_KINDS.filter((k) => !isUnlocked(k, session.view.quarter));
+  },
+  /** Dynasty Milestones per House. */
+  get milestones() {
+    return session.view.players.map((p) => ({
+      house: HOUSES[p.house].key,
+      stars: starsOf(p),
+      earned: MILESTONES.filter((_, i) => (p.milestones[i] ?? -1) >= 0).map((m) => m.key),
+    }));
+  },
+  /** Dynasty Charters per House. */
+  get charters() {
+    return session.view.players.map((p) => ({ house: HOUSES[p.house].key, charters: p.charters.slice(), names: p.charters.map((k) => CHARTERS[k].name) }));
+  },
+  /** The Mercadia Chronicle's recent dispatches, oldest first. */
+  chronicle() {
+    return session.view.chronicle.map((d) => ({ n: d.n, tick: d.tick, cat: d.cat, tier: d.tier, head: d.head, pill: d.pill, player: d.player, tile: d.tile, icon: d.icon }));
+  },
+  /** The open Era Council, or null. */
+  council() {
+    const c = session.view.council;
+    if (!session.view.inCouncil || !c) return null;
+    return { era: c.era, next: c.next, offers: c.offers.map((o) => o.slice()), picks: c.picks.slice(), left: c.left, total: c.total, unlocked: c.unlocked.slice(), level3: c.level3, rows: c.rows.map((r) => ({ ...r })) };
+  },
+  /** The Founding Guide: its step (0 once retired), the steps done, and whether it is retired for good. */
+  guide() {
+    return { ...hud.guideInfo(), lots: (ui.guideLots ?? []).slice() };
+  },
+  get speed() {
+    return session.kind === 'multi' ? session.view.speed : session.speed;
+  },
+  get paused() {
+    return session.paused;
+  },
+  /** The four eras, for reference. */
+  get eras() {
+    return ERAS.map((e) => ({ n: e.n, roman: e.roman, name: e.name }));
   },
   get skip() {
     return renderer.skip;
@@ -598,11 +694,14 @@ function frame(now: number): void {
       ready: v.ready,
       tick: v.tick,
       quarter: v.quarter,
+      era: v.era,
+      phase: v.ended ? 'ended' : v.inCouncil ? 'council' : 'playing',
+      mode: v.mode,
       ended: v.ended,
       citizens: v.citizens.size,
       trams: v.trams.length,
       event: v.event ? v.event.kind : null,
-      players: v.players.map((p) => ({ name: p.name, house: HOUSES[p.house].key, kind: p.kind, cash: p.cash, crown: p.crown })),
+      players: v.players.map((p) => ({ name: p.name, house: HOUSES[p.house].key, kind: p.kind, cash: p.cash, crown: p.crown, stars: starsOf(p), charters: p.charters.slice() })),
       buildings: v.buildings.map((b) => ({ id: b.id, tile: b.tile, kind: b.kind, owner: b.owner, level: b.level, stance: b.stance })),
     };
   },
@@ -629,6 +728,30 @@ function frame(now: number): void {
   /** Screen position of the centre of a tile. */
   tileScreen(tile: number) {
     return renderer.tileToScreen((tile % 12) + 0.5, Math.floor(tile / 12) + 0.5);
+  },
+  /**
+   * My Treasury against my Ledger, as this client holds them right now: cash in hand, and the
+   * Ledger drawer's closing line (opening cash plus the match's ledger). They must agree to the §.
+   */
+  ledger() {
+    const v = session.view;
+    const p = v.players[ui.me];
+    const lg = v.ledgers[ui.me];
+    if (!p || !lg) return null;
+    return {
+      tick: v.tick,
+      cash: p.cash,
+      debt: p.debt,
+      closing: Math.round(START_CASH + ledgerCashChange(lg.total)),
+      dividends: lg.total.dividends,
+      borrowed: lg.total.borrowed,
+      repaid: lg.total.repaid,
+    };
+  },
+  /** The camera, the HUD insets and the centre of the free city area (click-to-focus checks). */
+  get camera() {
+    const { width, height, insets, cam } = renderer;
+    return { x: cam.x, y: cam.y, zoom: cam.zoom, width, height, insets: { ...insets }, centre: freeCentre(renderer), gliding: renderer.gliding };
   },
 };
 

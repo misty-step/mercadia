@@ -4,31 +4,48 @@ import {
   AI_PERSONAS,
   ARCHS,
   BUILD_KINDS,
+  CHARTERS,
   CIVICS,
   DAYPART_NAMES,
   DESIRES,
+  ERAS,
+  ERA_COUNT,
+  ERA_UNLOCK,
   EVENTS,
+  HOST_SPEEDS,
   HOUSES,
+  LEVEL3_ERA,
+  LEVEL3_NOTICE,
   LOAN_MAX,
   LOAN_RATE,
   LOAN_STEP,
+  MILESTONES,
   MODES,
+  OBJECTIVE,
+  PAYROLL_TICKS,
+  SOLO_SPEEDS,
   START_CASH,
-  PROMO_COOLDOWN,
-  PROMO_COST,
   PROMO_TICKS,
   SHOPS,
   STANCES,
   buildCost,
   buildName,
+  eraDef,
+  eraLabel,
+  eraOf,
+  eraTitle,
   isShop,
-  loanRateLabel,
+  isUnlocked,
+  lockNotice,
+  unlocksOf,
 } from '../shared/constants';
-import { civicImpact, eventTouches, initials, lotSynergy, shopDiagnosis, toolTooltip } from '../shared/insight';
+import { civicImpact, eventTouches, guideState, initials, lotSynergy, milestoneProgress, shopDiagnosis, starterLots, toolTooltip, type GuideView } from '../shared/insight';
 import { CITY, tx, ty, walkDist } from '../shared/map';
 import type { BuildingView, CitizenView, CityView, LobbyView } from '../shared/protocol';
 import {
   TAKINGS_PER_MIN,
+  buildCostFor,
+  charterMod,
   citizenName,
   citizenTile,
   crownParts,
@@ -36,17 +53,22 @@ import {
   ledgerNet,
   lotBonuses,
   priceOf,
+  promoCooldownFor,
+  promoCostFor,
   queueCap,
   rentOf,
   restockCost,
   salvageValue,
+  starsOf,
   trafficPips,
   upgradeCost,
   wageOf,
 } from '../shared/sim';
-import { CS, type BuildKind, type Command, type Fx, type Ledger, type MatchMode, type MatchResult } from '../shared/types';
+import { CS, type BuildKind, type CharterKey, type Command, type Dispatch, type Fx, type Ledger, type MatchMode, type MatchResult } from '../shared/types';
 import type { Foley } from './audio';
-import { crest, dial, icon } from './icons';
+import { dispatchLot, feedRows, resolveTap } from './chronicle';
+import { crestSvg, starPips } from './heraldry';
+import { dial, grandCrest, icon } from './icons';
 import { Confirm } from './input';
 import type { Renderer, UiState } from './renderer';
 import type { Session } from './session';
@@ -64,11 +86,15 @@ export interface HudHost {
   disarm(): void;
   /** Fit the district to the free area of the screen. */
   refit(): void;
+  /** Pan the camera to a lot (the Chronicle's click-to-focus). */
+  focus(tile: number): void;
 }
 
 const SPECTATOR_TEXT = 'Match in progress: you are watching as a spectator.';
 /** Viewports at or below this width get the tabbed dock and the bottom-sheet inspector. */
 const narrow = (): boolean => window.innerWidth <= 640;
+/** The Founding Guide's hints at phone width: short enough to sit beside the title on one line. */
+const PHONE_HINTS = ['Pick a shop, tap a ringed lot.', 'Tap your shop.', ''];
 const phone = (): boolean => window.innerWidth <= 720;
 const soundLabel = (muted: boolean): string => (muted ? 'Unmute sound (M)' : 'Mute sound (M)');
 const setAttr = (el: Element | null | undefined, name: string, value: string): void => {
@@ -106,9 +132,62 @@ const SAY: Record<string, string> = {
   nightlife: 'The night is young.',
 };
 
+/** Short names for the Treasury's charter badges. */
+const CHARTER_SHORT: Record<CharterKey, string> = {
+  artisanry: 'Artisanry',
+  transit: 'Transit',
+  credit: 'Credit',
+  canal: 'Canal',
+  heralds: 'Heralds',
+  provisioners: 'Harbor',
+};
+
+/** The Chronicle's kicker for each category of dispatch. */
+const CAT_LABEL: Record<Dispatch['cat'], string> = {
+  era: 'New era',
+  milestone: 'Dynasty Milestone',
+  charter: 'Charter adopted',
+  lead: 'Crown race',
+  event: 'City event',
+  rival: 'Price war',
+  promo: 'Promo Blitz',
+  build: 'On the map',
+  market: 'Market',
+};
+const CAT_ICON: Record<Dispatch['cat'], string> = {
+  era: 'era', milestone: 'star', charter: 'charter', lead: 'crown', event: 'ledger', rival: 'shark', promo: 'heralds', build: 'corner', market: 'ledger',
+};
+const BRASS = '#D4A34A';
+const CANAL = '#3E8E9E';
+/** How long a headline dispatch holds the banner before it yields to the live city event. */
+const DISPATCH_HOLD_MS = 7000;
+
+const GUIDE_KEY = 'mercadia:guide';
+const FEED_KEY = 'mercadia:feed';
+const stored = (key: string): string | null => {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null; // private mode
+  }
+};
+const store = (key: string, value: string): void => {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // private mode: the choice lasts for this visit
+  }
+};
+/** "18%/era": the exact rate a standing loan costs this House over one era. */
+const loanRateFor = (quarterTicks: number, owner: { charters?: CharterKey[] } | undefined): string =>
+  `${(Math.round(LOAN_RATE * charterMod(owner, 'interest') * (quarterTicks / PAYROLL_TICKS) * 1000) / 10).toString()}%/era`;
+/** "Era II · Transit" for the clock chip; Endless days past the fourth stay in the Golden Dynasty. */
+const eraChip = (quarter: number): string => `${eraLabel(quarter)} · ${eraDef(quarter).short}`;
+
 const LEDGER_ROWS: [keyof Ledger, string, 1 | -1][] = [
   ['revenue', 'Revenue', 1],
   ['awards', 'Awards', 1],
+  ['dividends', 'Milestone dividends', 1],
   ['salvage', 'Property sales', 1],
   ['wages', 'Wages', -1],
   ['supplies', 'Supplies', -1],
@@ -122,7 +201,9 @@ const LEDGER_ROWS: [keyof Ledger, string, 1 | -1][] = [
 export class Hud {
   private root = $('hud');
   private clock = $('clock');
-  private ticker = $('ticker');
+  private chronicle = $('chronicle');
+  private guide = $('guide');
+  private council = $('council');
   private board = $('board');
   private inspector = $('inspector');
   private treasury = $('treasury');
@@ -147,10 +228,26 @@ export class Hud {
   private refs: Record<string, HTMLElement> = {};
   private ledgerOpen = false;
   private sellArmed = 0;
-  private tickerKey = '';
   private hintKind: BuildKind | null = null;
   private victoryFor = -1;
   private lastQuarter = 0;
+  // The Mercadia Chronicle.
+  private feedOpen = false;
+  private feedChosen = false; // the player has toggled the feed (this visit or an earlier one)
+  private feedKey = '';
+  private bannerKey = '';
+  private seenN = 0; // newest dispatch already noticed
+  private holdN = 0; // headline dispatch holding the banner…
+  private holdUntil = 0; // …until this time
+  // Founding Guide.
+  private guideDone = stored(GUIDE_KEY) === 'done';
+  private inspected = false;
+  private guideNow: GuideView | null = null;
+  private guideKey = '';
+  private guideLotsAt = 0;
+  // Era Council and era locks.
+  private councilKey = '';
+  private lockState: Partial<Record<BuildKind, boolean>> = {};
 
   constructor(private host: HudHost) {
     this.wire();
@@ -164,7 +261,22 @@ export class Hud {
     this.inspKey = '';
     this.victoryFor = -1;
     this.lastQuarter = 0;
-    this.tickerKey = '';
+    this.feedKey = '';
+    this.bannerKey = '';
+    this.seenN = 0;
+    this.holdN = 0;
+    this.holdUntil = 0;
+    this.feedChosen = !phone() && stored(FEED_KEY) !== null;
+    this.feedOpen = this.feedChosen && stored(FEED_KEY) === '1';
+    this.inspected = false;
+    this.guideNow = null;
+    this.guideKey = '';
+    this.guideLotsAt = 0;
+    this.guide.hidden = true;
+    this.host.ui.guideLots = [];
+    this.councilKey = '';
+    this.council.hidden = true;
+    this.lockState = {};
     this.inspector.hidden = true;
     this.ledger.hidden = true;
     this.ledgerOpen = false;
@@ -180,6 +292,9 @@ export class Hud {
 
   hide(): void {
     this.root.hidden = true;
+    this.council.hidden = true;
+    this.councilKey = '';
+    this.host.ui.guideLots = [];
     this.victory.hidden = true;
     this.lotcard.hidden = true;
     this.speech.hidden = true;
@@ -196,10 +311,42 @@ export class Hud {
     return !this.victory.hidden;
   }
 
-  toast(text: string, tone: boolean | 'good' | 'bad' | 'info' = false): void {
+  /** True while the Era Council modal owns the screen (the city is paused). */
+  get councilOpen(): boolean {
+    return !this.council.hidden;
+  }
+
+  /** True while the Founding Guide is still walking the player through their opening. */
+  get guideActive(): boolean {
+    return !!this.guideNow && this.guideNow.step > 0;
+  }
+
+  /** The Founding Guide as the smoke checks read it. */
+  guideInfo(): { step: number; done: boolean[]; dismissed: boolean; visible: boolean } {
+    const g = this.guideNow;
+    return { step: g ? g.step : 0, done: g ? g.done.slice() : [false, false, false], dismissed: this.guideDone, visible: !this.guide.hidden };
+  }
+
+  /** On a phone the expanded feed is an overlay: touching the city puts it away. */
+  closeFeedOnPhone(): void {
+    if (!phone() || !this.feedOpen) return;
+    this.feedOpen = false;
+    this.feedChosen = true;
+    this.sync(0, true);
+  }
+
+  /** A locked tool was clicked, or its hotkey pressed: say when it unlocks. Never silent. */
+  lockedNotice(kind: BuildKind): void {
+    this.toasts.querySelectorAll('.toast.lockmsg').forEach((el) => el.remove());
+    this.clearRefusals();
+    this.toast(lockNotice(kind), 'info', 'lockmsg');
+    this.host.audio.deny();
+  }
+
+  toast(text: string, tone: boolean | 'good' | 'bad' | 'info' = false, cls = ''): void {
     const kind = tone === true ? 'good' : tone === false ? 'info' : tone;
     const el = document.createElement('div');
-    el.className = kind === 'info' ? 'toast' : `toast ${kind}`;
+    el.className = (kind === 'info' ? 'toast' : `toast ${kind}`) + (cls ? ` ${cls}` : '');
     el.textContent = text;
     this.toasts.appendChild(el);
     while (this.toasts.children.length > 3) this.toasts.firstElementChild?.remove();
@@ -217,9 +364,10 @@ export class Hud {
     this.toasts.querySelectorAll('.toast.bad').forEach((el) => el.remove());
   }
 
-  showBanner(title: string, sub: string): void {
+  showBanner(title: string, sub: string, long = false): void {
     this.banner.innerHTML = `<b>${esc(title)}</b><span>${esc(sub)}</span>`;
     this.banner.classList.remove('show');
+    this.banner.classList.toggle('long', long);
     void this.banner.offsetWidth;
     this.banner.classList.add('show');
   }
@@ -234,8 +382,42 @@ export class Hud {
       const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-kind]');
       if (!btn) return;
       const kind = btn.dataset.kind as BuildKind;
+      // A future-era tool is never armed: the click answers with its unlock notice.
+      if (!isUnlocked(kind, s().view.quarter)) {
+        this.lockedNotice(kind);
+        return;
+      }
       this.host.audio.click();
       this.host.setTool(this.host.ui.tool === kind ? null : kind);
+    });
+
+    // The Chronicle: the chevron (and, on a phone, the headline) opens the recent feed; a
+    // dispatch tied to a lot pans the camera there. The banner's own focus button is wired
+    // where the banner is built (see build()).
+    this.chronicle.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+      if (btn) this.tapChronicle(btn);
+    });
+
+    this.guide.addEventListener('click', (e) => {
+      if (!(e.target as HTMLElement).closest('[data-act="dismiss"]')) return;
+      this.host.audio.click();
+      this.retireGuide();
+      this.sync(0, true);
+    });
+
+    this.council.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+      if (!btn || (btn as HTMLButtonElement).disabled) return;
+      const act = btn.dataset.act as string;
+      if (act === 'charter') {
+        this.host.audio.seal();
+        cmd({ c: 'charter', key: btn.dataset.key as CharterKey });
+      } else if (act === 'advance') {
+        this.host.audio.click();
+        s().advanceCouncil();
+      }
+      this.sync(0, true);
     });
     this.dock.addEventListener('pointerover', (e) => {
       const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-kind]');
@@ -371,17 +553,31 @@ export class Hud {
 
   onFx(f: Fx): void {
     const view = this.host.session().view;
-    if (f.k === 'event') {
-      if (f.phase !== 'end') {
-        this.ticker.classList.remove('flash');
-        void this.ticker.offsetWidth;
-        this.ticker.classList.add('flash');
+    const me = this.host.ui.me;
+    if (f.k === 'quarter') {
+      const era = eraOf(f.q);
+      if (f.q > ERA_COUNT) this.showBanner(`${eraLabel(f.q)} · Day ${f.q}`, 'The Golden Dynasty plays on');
+      else {
+        const names = unlocksOf(era).map((k) => buildName(k));
+        if (era === LEVEL3_ERA) names.push('Level 3');
+        this.showBanner(`${eraLabel(f.q)} · ${eraDef(f.q).name}`, names.length ? `Unlocked: ${names.join(' · ')}` : 'The final Crown reckoning');
       }
-    } else if (f.k === 'quarter') {
-      this.showBanner(`Quarter ${f.q}`, 'A new morning in Mercadia');
     } else if (f.k === 'award') {
       const p = view.players[f.p];
-      if (p) this.toast(`Golden Fork to ${HOUSES[p.house].name}`, f.p === this.host.ui.me);
+      if (p) this.toast(`Golden Fork to ${HOUSES[p.house].name}`, f.p === me);
+    } else if (f.k === 'milestone') {
+      const p = view.players[f.p];
+      const def = MILESTONES[f.m];
+      if (p && def && f.p === me) this.toast(`Dynasty Milestone: ${def.name} · ${def.pill}`, 'good', 'msmsg');
+    } else if (f.k === 'charter') {
+      const def = CHARTERS[f.key];
+      if (def && f.p === me) this.toast(`Charter sealed: ${def.name} · ${def.pill}`, 'good', 'chmsg');
+    } else if (f.k === 'dispatch' && f.tier === 1) {
+      // A headline dispatch: the banner takes it at once and flashes.
+      this.chronicle.classList.remove('flash');
+      void this.chronicle.offsetWidth;
+      this.chronicle.classList.add('flash');
+      this.sync(0, true);
     }
   }
 
@@ -401,16 +597,24 @@ export class Hud {
       this.build(session);
     }
     this.syncClock(session);
-    this.syncTicker(view);
+    this.syncChronicle(view);
     this.syncBoard(view);
     this.syncTreasury(view);
+    this.syncGuide(session);
     this.syncDock(view);
     this.syncInspector(view);
     if (this.ledgerOpen) this.syncLedger(view);
+    this.syncCouncil(session);
     this.syncVictory(session);
     if (view.quarter !== this.lastQuarter) {
-      if (this.lastQuarter === 0 && view.tick < 30) this.showBanner('Quarter 1', MODES[view.mode].name + ' match');
+      // The match opens on its one-line objective.
+      if (this.lastQuarter === 0 && view.tick < 30) this.showBanner(`${eraLabel(1)} · ${eraDef(1).name}`, this.host.ui.me >= 0 ? OBJECTIVE : `${MODES[view.mode].name} match`, true);
       this.lastQuarter = view.quarter;
+    }
+    // Phones stack the Chronicle bar under the score strip, whatever height the strip has.
+    if (phone()) {
+      const h = `${this.board.offsetHeight}px`;
+      if (this.root.style.getPropertyValue('--strip-h') !== h) this.root.style.setProperty('--strip-h', h);
     }
   }
 
@@ -421,33 +625,64 @@ export class Hud {
     // Clock.
     let pace = '';
     if (session.kind === 'solo') {
-      pace = `<div class="pace"><button data-act="pause" title="Pause (Space)" aria-label="Pause">${icon('pause')}</button>${[1, 2, 3]
-        .map((v) => `<button data-act="speed" data-v="${v}" title="${v}× speed">${v}×</button>`)
-        .join('')}</div>`;
+      pace = `<div class="pace" role="group" aria-label="Speed"><button data-act="pause" title="Pause (Space)" aria-label="Pause">${icon('pause')}</button>${SOLO_SPEEDS.map(
+        (v) => `<button data-act="speed" data-v="${v}" title="${v}× speed" aria-label="${v}× speed">${v}×</button>`,
+      ).join('')}</div>`;
     } else if (session.kind === 'multi') {
       const host = this.host.isHost();
       const tip = host ? 'Room pace' : 'Host controls match speed';
-      pace = `<div class="pace" title="${tip}">${[1, 1.5, 2]
+      pace = `<div class="pace" role="group" aria-label="Room pace" title="${tip}">${HOST_SPEEDS
         .map((v) => `<button data-act="speed" data-v="${v}" title="${host ? `${v}× speed for everyone` : tip}" aria-label="${v}× speed${host ? '' : ' — host controls match speed'}" ${host ? '' : 'disabled'}>${v}×</button>`)
         .join('')}</div>`;
     }
     this.clock.innerHTML = `<span class="wordmark">MERCADIA</span>
-      <div class="when"><b data-f="q"></b><span data-f="part"></span><i data-f="dial"></i></div>
+      <div class="when">
+        <div class="era" data-f="erabox"><b data-f="era"><span data-f="eranum"></span><span class="e-name" data-f="eraname"></span></b><small data-f="eraof"></small>
+          <i class="erabar" data-f="erabar" role="progressbar" aria-label="Era progress" aria-valuemin="0" aria-valuemax="100">${ERAS.map((e) => `<u data-e="${e.n}"><s></s></u>`).join('')}</i></div>
+        <span data-f="part"></span><i data-f="dial"></i></div>
       ${pace}
       <div class="tools">
         <button class="iconbtn" data-act="fit" title="Fit the district to the screen" aria-label="Fit view">${icon('fit')}</button>
         <button class="iconbtn" data-act="sound" data-f="sound" title="${soundLabel(this.host.audio.muted)}" aria-label="${soundLabel(this.host.audio.muted)}" aria-pressed="${this.host.audio.muted}"></button>
         <button class="iconbtn leave" data-act="leave" data-f="leave" title="Leave the match" aria-label="Leave the match">${icon('leave')}</button>
       </div>`;
+    // The Mercadia Chronicle: the active dispatch banner over a collapsible recent feed.
+    this.chronicle.innerHTML = `<div class="dispatch" data-f="dispatch">
+        <button class="d-main" data-act="focus" data-f="dmain">
+          <span class="d-badge" data-f="dbadge"></span>
+          <span class="d-body"><span class="d-kicker" data-f="dkicker"></span><span class="d-pill" data-f="dpill"></span><b class="d-head" data-f="dhead"></b></span>
+        </button>
+        <button class="d-focus" data-act="focus-lot" data-f="dfocus" title="Show on the map" aria-label="Show on the map" hidden><span class="d-focus-chip">${icon('focus')}</span></button>
+        <button class="iconbtn d-toggle" data-act="feed" data-f="dtoggle" aria-expanded="false" aria-controls="cfeed" title="Recent Chronicle" aria-label="Show or hide the recent Chronicle">${icon('chevron')}</button>
+        <i class="d-bar" data-f="dbar"></i>
+      </div>
+      <div class="cfeed" id="cfeed" data-f="cfeed" hidden></div>`;
+    // The banner's focus button is a control of its own: its tap pans to the lot and goes no
+    // further, so it can never be read as a tap on the banner (which, on a phone, opens the feed).
+    const lotBtn = this.chronicle.querySelector<HTMLElement>('[data-f="dfocus"]');
+    lotBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.tapChronicle(lotBtn);
+    });
+    this.bannerKey = '';
+    this.feedKey = '';
+    // Founding Guide.
+    this.guide.innerHTML = `<div class="g-obj">${esc(OBJECTIVE)}</div>
+      <div class="g-pips" data-f="gpips" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="g-step"><span class="g-n" data-f="gn"></span>
+        <div class="g-t"><b data-f="gtitle"></b><span data-f="ghint"></span></div>
+        <button class="iconbtn g-x" data-act="dismiss" title="Dismiss the guide" aria-label="Dismiss the Founding Guide">${icon('close')}</button></div>`;
+    this.guideKey = '';
     // Leaderboard.
     this.board.innerHTML = `<div class="bhead"><h3>Crown Index</h3>
       <button class="bktoggle" data-act="breakdown" aria-expanded="false" title="Crown Index = Worth (net worth ÷ 10) + Share (market share % × 3) + Prestige (civic prestige × 4). Click to show each House's parts.">Worth + Share + Prestige</button></div>
       <div class="rows">${view.players
       .map(
-        (p, i) => `<div class="row${i === me ? ' me' : ''}" data-p="${i}">
-          <i class="chip" style="background:${HOUSES[p.house].color}"></i>
+        (p, i) => `<div class="row${i === me ? ' me' : ''}" data-p="${i}" data-house="${HOUSES[p.house].key}" style="--house:${HOUSES[p.house].color}">
+          ${crestSvg(p.house)}
           <span class="nm">${esc(i === me ? 'You' : p.name)}<small>${esc(HOUSES[p.house].short)}</small></span>
           <span class="ini">${esc(initials(p.name, i === me))}</span>
+          <span class="stars" data-f="stars"></span>
           <span class="crown" data-f="crown"></span>
           <span class="sub"><span data-f="cash"></span><span data-f="share"></span></span>
           <span class="parts" data-f="parts"></span>
@@ -455,14 +690,16 @@ export class Hud {
       )
       .join('')}</div>
       <div class="tug"><div class="lbl"><span>Market share</span><span data-f="lead"></span></div>
-      <div class="bar">${view.players.map((p, i) => `<i data-s="${i}" style="background:${HOUSES[p.house].color};width:${100 / view.players.length}%"></i>`).join('')}</div></div>`;
+      <div class="bar">${view.players.map((p, i) => `<i data-s="${i}" style="background:${HOUSES[p.house].color};width:${100 / view.players.length}%"></i>`).join('')}</div></div>
+      <div class="mprog" data-f="mprog" hidden></div>
+      <div class="mlist" data-f="mlist"></div>`;
     // Treasury.
     this.treasury.hidden = !playing;
     this.treasury.innerHTML = `<div class="cash"><b data-f="cash"></b><span data-f="trend"></span></div>
-      <div class="line"><span>Net worth</span><b data-f="nw"></b></div>
-      <div class="line"><span>Debt</span><b data-f="debt"></b></div>
+      <div class="line"><span>Net worth <b data-f="nw"></b></span><span>Debt <b data-f="debt"></b></span></div>
+      <div class="charters" data-f="charters" aria-label="Dynasty Charters"></div>
       <div class="acts">
-        <button class="btn" data-act="borrow" title="Emergency Credit Line: borrow ${money(LOAN_STEP)} (limit ${money(LOAN_MAX)}). Interest is ${(LOAN_RATE * 100).toFixed(1)}% of your debt at every payroll (10 s) — ${loanRateLabel(view.quarterTicks)}." aria-label="Borrow ${money(LOAN_STEP)} at ${loanRateLabel(view.quarterTicks)}">Borrow ${money(LOAN_STEP)}<small> · ${loanRateLabel(view.quarterTicks)}</small></button>
+        <button class="btn" data-act="borrow">Borrow ${money(LOAN_STEP)}<small data-f="rate"></small></button>
         <button class="btn" data-act="repay" title="Repay up to ${money(LOAN_STEP)} of principal">Repay</button>
         <button class="btn" data-act="ledger" title="Ledger" aria-label="Ledger">${icon('ledger')}</button>
       </div>`;
@@ -480,21 +717,43 @@ export class Hud {
     this.dock.innerHTML =
       BUILD_KINDS.map((k, i) => {
         const shop = isShop(k);
-        return `${i === 6 ? '<span class="sep"></span>' : ''}<button class="tool" data-kind="${k}" data-group="${shop ? 'shops' : 'civic'}" title="${esc(toolTooltip(k))}" aria-label="${buildName(k)}, ${money(buildCost(k))}">
+        return `${i === 6 ? '<span class="sep"></span>' : ''}<button class="tool" data-kind="${k}" data-group="${shop ? 'shops' : 'civic'}" data-era="${ERA_UNLOCK[k]}">
           <span class="key">${i + 1}</span>${shop ? '<span class="want"><i></i><i></i><i></i></span>' : ''}
-          ${icon(k)}<span class="nm">${buildName(k).replace('Pocket ', '').replace('Festival ', '')}</span><span class="cost">${money(buildCost(k))}</span>
+          <span class="lock" hidden>${icon('lock')}<b>Era ${ERAS[ERA_UNLOCK[k] - 1].roman}</b></span>
+          ${icon(k)}<span class="nm">${buildName(k).replace('Pocket ', '').replace('Festival ', '')}</span><span class="cost" data-f="cost">${money(buildCost(k))}</span>
         </button>`;
       }).join('') + '<div class="hint" hidden></div>';
+    this.lockState = {};
     this.inspKey = '';
   }
 
   private syncClock(session: Session): void {
     const view = session.view;
     const q = (n: string): HTMLElement | null => this.clock.querySelector<HTMLElement>(`[data-f="${n}"]`);
-    const total = view.totalQuarters > 0 && !view.endless ? `/${view.totalQuarters}` : '';
-    setText(q('q'), `Q${view.quarter}${total}`);
+    // "Era I · Founding" over a four-segment bar: the eras behind are full, the current one fills.
+    const era = view.era;
+    const finite = view.totalQuarters > 0 && !view.endless;
+    // "Era I" + " · Founding": a phone keeps the numeral and drops the name.
+    setText(q('eranum'), eraLabel(view.quarter));
+    setText(q('eraname'), ` · ${eraDef(view.quarter).short}`);
+    setAttr(q('era'), 'aria-label', eraChip(view.quarter));
+    setText(q('eraof'), view.quarter > ERA_COUNT ? `Day ${view.quarter}` : finite ? `of ${ERAS[Math.min(ERA_COUNT, view.totalQuarters) - 1].roman}` : 'Endless');
+    const through = view.ended ? 1 : view.inCouncil ? 1 : view.dayPhase;
+    const bar = q('erabar');
+    if (bar) {
+      bar.querySelectorAll<HTMLElement>('u').forEach((u) => {
+        const n = Number(u.dataset.e);
+        const fill = n < era ? 100 : n === era ? Math.round(through * 100) : 0;
+        const inner = u.firstElementChild as HTMLElement;
+        if (inner.style.width !== `${fill}%`) inner.style.width = `${fill}%`;
+        toggle(u, 'now', n === era);
+      });
+      setAttr(bar, 'aria-valuenow', String(Math.round(through * 100)));
+      setAttr(bar, 'aria-valuetext', `${eraTitle(view.quarter)}, ${Math.round(through * 100)}% through`);
+    }
+    setAttr(q('erabox'), 'title', `${eraTitle(view.quarter)} — ${eraDef(view.quarter).blurb}`);
     const part = Math.min(3, Math.floor(view.dayPhase * 4));
-    setText(q('part'), view.ended ? 'Final bell' : DAYPART_NAMES[part]);
+    setText(q('part'), view.ended ? 'Final bell' : view.inCouncil ? 'Era Council' : DAYPART_NAMES[part]);
     setHtml(q('dial'), dial(view.dayPhase));
     const muted = this.host.audio.muted;
     const sound = q('sound');
@@ -515,34 +774,348 @@ export class Hud {
     toggle(this.clock.querySelector('[data-act="pause"]'), 'on', session.paused);
   }
 
-  private syncTicker(view: CityView): void {
+// ───────────────────────────── The Mercadia Chronicle ─────────────────────────────
+
+  /** A tap on a Chronicle control: pan to a lot, or open and close the recent feed. */
+  private tapChronicle(btn: HTMLElement): void {
+    const act = btn.dataset.act;
+    if (act !== 'focus-lot' && act !== 'focus' && act !== 'feed') return;
+    const res = resolveTap({ act, tile: Number(btn.dataset.tile ?? -1), banner: !!btn.closest('.dispatch'), phone: phone(), feedOpen: this.feedOpen });
+    this.host.audio.click();
+    if (res.focus >= 0) this.host.focus(res.focus);
+    this.feedOpen = res.feedOpen;
+    if (res.chose) {
+      this.feedChosen = true;
+      if (!phone()) store(FEED_KEY, this.feedOpen ? '1' : '0');
+    }
+    this.sync(0, true);
+  }
+
+  /** Stripe of a dispatch: brass for eras and milestones, canal for city events, else the acting House. */
+  private stripe(view: CityView, d: Dispatch): string {
+    if (d.cat === 'event') return CANAL;
+    if (d.cat === 'rival' || d.cat === 'promo' || d.cat === 'build') {
+      const p = view.players[d.player];
+      if (p) return HOUSES[p.house].color;
+    }
+    return BRASS;
+  }
+
+  /** The acting House's crest, or the icon of the city event or category. */
+  private badge(view: CityView, d: Dispatch): string {
+    const p = view.players[d.player];
+    if (d.cat === 'event') return icon(d.icon) || icon('ledger');
+    if (p) return crestSvg(p.house, { quiet: true });
+    return icon(CAT_ICON[d.cat]);
+  }
+
+  private syncChronicle(view: CityView): void {
+    const now = performance.now();
+    const list = view.chronicle;
+    const latest = list.length ? list[list.length - 1] : undefined;
+    if (!latest || latest.n < this.seenN) {
+      // A new match: nothing has been read yet.
+      this.seenN = 0;
+      this.holdN = 0;
+      this.holdUntil = 0;
+    }
+    if (latest && latest.n > this.seenN) {
+      // The newest headline (tier 1) takes the banner and holds it for a few seconds.
+      for (let i = list.length - 1; i >= 0 && list[i].n > this.seenN; i--) {
+        if (list[i].tier === 1) {
+          this.holdN = list[i].n;
+          this.holdUntil = now + DISPATCH_HOLD_MS;
+          break;
+        }
+      }
+      this.seenN = latest.n;
+    }
+    const r = (n: string): HTMLElement | null => this.chronicle.querySelector<HTMLElement>(`[data-f="${n}"]`);
+    const held = now < this.holdUntil ? list.find((d) => d.n === this.holdN) : undefined;
     const ev = view.event;
+    let shown: Dispatch | undefined;
     let key: string;
-    let html: string;
-    let pct = 0;
-    if (ev) {
+    let badge: string;
+    let kicker: string;
+    let head: string;
+    let pill = '';
+    let tip = '';
+    let stripe = BRASS;
+    let cat = 'market';
+    let tile = -1;
+    let mode: 'dispatch' | 'live' | 'forecast' | 'quiet';
+    if (!held && ev) {
+      // No fresh headline: the banner belongs to the live or forecast city event.
       const def = EVENTS[ev.kind];
-      if (ev.started) {
-        pct = 100 * (1 - (view.tick - ev.startAt) / Math.max(1, ev.endAt - ev.startAt));
-        key = `L${ev.kind}${ev.startAt}`;
-        html = `<div class="tk-top"><span class="tk-label live">Live</span><span class="tk-title">${def.title}</span><span class="tk-effect">${def.effect}</span></div><div class="tk-fx" title="What this event changes">${def.effect}</div><div class="tk-line">${def.headline}</div>`;
-      } else {
-        pct = 100 * ((view.tick - ev.announceAt) / Math.max(1, ev.startAt - ev.announceAt));
-        key = `F${ev.kind}${ev.startAt}`;
-        html = `<div class="tk-top"><span class="tk-label">Forecast</span><span class="tk-title">${def.title}</span><span class="tk-effect">${def.effect}</span></div><div class="tk-fx" title="What this event will change">${def.effect}</div><div class="tk-line">${def.forecast}</div>`;
+      mode = ev.started ? 'live' : 'forecast';
+      key = `E|${ev.kind}|${ev.startAt}|${mode}`;
+      badge = icon(ev.kind);
+      kicker = ev.started ? 'Live · City event' : 'Forecast · City event';
+      head = def.title;
+      pill = def.pill;
+      tip = `${def.effect}\n${ev.started ? def.headline : def.forecast}`;
+      stripe = CANAL;
+      cat = 'event';
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i].cat === 'event' && list[i].icon === ev.kind) {
+          tile = list[i].tile;
+          break;
+        }
       }
     } else {
-      const last = view.gazette[view.gazette.length - 1];
-      key = `G${last ? last.tick + last.text : ''}`;
-      html = `<div class="tk-top quiet"><span class="tk-label">Mercadia Gazette</span></div><div class="tk-line news${last && last.tone === 'rival' ? ' rival' : ''}">${esc(last ? last.text : 'All quiet along the canal.')}</div>`;
+      shown = held ?? latest;
+      if (shown) {
+        mode = 'dispatch';
+        key = `D|${shown.n}|${shown.tick}`;
+        badge = this.badge(view, shown);
+        kicker = CAT_LABEL[shown.cat];
+        head = shown.head;
+        pill = shown.pill;
+        tip = shown.pill ? `${shown.head} — ${shown.pill}` : shown.head;
+        stripe = this.stripe(view, shown);
+        cat = shown.cat;
+        tile = shown.tile;
+      } else {
+        mode = 'quiet';
+        key = 'Q';
+        badge = icon('ledger');
+        kicker = 'The Mercadia Chronicle';
+        head = 'All quiet along the canal.';
+      }
     }
-    if (key !== this.tickerKey) {
-      this.tickerKey = key;
-      this.ticker.innerHTML = html + '<i class="tk-bar"></i>';
-      toggle(this.ticker, 'forecast', !!ev && !ev.started);
+    const box = r('dispatch');
+    const main = r('dmain');
+    tile = dispatchLot({ tile });
+    key += `|${tile}`;
+    if (key !== this.bannerKey && box && main) {
+      this.bannerKey = key;
+      setHtml(r('dbadge'), badge);
+      setText(r('dkicker'), kicker);
+      setText(r('dhead'), head);
+      const pillEl = r('dpill');
+      setText(pillEl, pill);
+      if (pillEl) pillEl.hidden = !pill;
+      box.dataset.cat = cat;
+      box.dataset.mode = mode;
+      box.dataset.n = shown ? String(shown.n) : '';
+      box.style.setProperty('--stripe', stripe);
+      if (tile >= 0) main.dataset.tile = String(tile);
+      else delete main.dataset.tile;
+      toggle(main, 'focusable', tile >= 0);
+      setAttr(main, 'title', tile >= 0 && !phone() ? `${tip}\nClick to show it on the map` : tip);
+      setAttr(main, 'aria-label', `${kicker}: ${head}${pill ? ` — ${pill}` : ''}`);
+      // A dispatch with a lot gets the banner's own focus button, at every width.
+      const lotBtn = r('dfocus');
+      if (lotBtn) {
+        lotBtn.hidden = tile < 0;
+        if (tile >= 0) lotBtn.dataset.tile = String(tile);
+        else delete lotBtn.dataset.tile;
+        setAttr(lotBtn, 'aria-label', `Show on the map: ${head}`);
+      }
+      toggle(box, 'has-lot', tile >= 0);
     }
-    const bar = this.ticker.querySelector<HTMLElement>('.tk-bar');
-    if (bar) bar.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
+    // The city event's countdown rides along the bottom edge whenever one is forecast or live.
+    let pct = 0;
+    if (ev) pct = ev.started ? 100 * (1 - (view.tick - ev.startAt) / Math.max(1, ev.endAt - ev.startAt)) : 100 * ((view.tick - ev.announceAt) / Math.max(1, ev.startAt - ev.announceAt));
+    const bar = r('dbar');
+    if (bar) {
+      bar.style.width = `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
+      toggle(bar, 'forecast', !!ev && !ev.started);
+    }
+    // Recent feed: the latest dispatches, newest first. A desktop leaves out the one already in
+    // the banner; a phone leads with it, so the active dispatch can be focused from the feed too.
+    const exclude = mode === 'dispatch' && shown ? shown.n : -1;
+    const recent = feedRows(list, exclude, phone());
+    const feed = r('cfeed');
+    const feedKey = `${exclude}|${phone() ? 'p' : 'd'}|${recent.map((row) => row.d.n).join(',')}|${view.seed}|${view.players.map((p) => p.house).join('')}`;
+    if (feed && feedKey !== this.feedKey) {
+      this.feedKey = feedKey;
+      feed.innerHTML = recent
+        .map(({ d, active, lot }) => {
+          const focusable = lot >= 0;
+          const tag = focusable ? 'button' : 'div';
+          const attrs = focusable ? ` data-act="focus" data-tile="${lot}" title="Show on the map" aria-label="${esc(d.head)}${d.pill ? ` — ${esc(d.pill)}` : ''}. Show on the map"` : '';
+          return `<${tag} class="cline${focusable ? ' focusable' : ''}${active ? ' active' : ''}" data-n="${d.n}" data-cat="${d.cat}"${active ? ' data-active="1"' : ''}${attrs} style="--stripe:${this.stripe(view, d)}"><span class="c-badge">${this.badge(view, d)}</span><span class="c-head">${esc(d.head)}</span>${d.pill ? `<span class="c-pill">${esc(d.pill)}</span>` : ''}${focusable ? `<span class="c-focus">${icon('focus')}</span>` : ''}</${tag}>`;
+        })
+        .join('');
+    }
+    // Until the player chooses, the feed opens itself only where there is room: on a wide
+    // desktop once the Founding Guide has retired.
+    if (!this.feedChosen) this.feedOpen = !phone() && window.innerWidth >= 1280 && !this.guideActive;
+    const open = this.feedOpen && recent.length > 0;
+    if (feed && feed.hidden === open) feed.hidden = !open;
+    toggle(this.chronicle, 'open', open);
+    const tg = r('dtoggle');
+    setAttr(tg, 'aria-expanded', String(open));
+    if (tg) (tg as HTMLButtonElement).disabled = recent.length === 0;
+  }
+
+  // ───────────────────────────── Founding Guide ─────────────────────────────
+
+  /** The guide is finished or dismissed: it never comes back, in this match or the next. */
+  private retireGuide(): void {
+    this.guideDone = true;
+    store(GUIDE_KEY, 'done');
+    this.guideNow = null;
+    if (!this.guide.hidden) this.guide.hidden = true;
+    this.host.ui.guideLots = [];
+  }
+
+  private syncGuide(session: Session): void {
+    const view = session.view;
+    const ui = this.host.ui;
+    const me = view.players[ui.me];
+    if (!me || session.kind === 'attract' || this.guideDone || view.ended) {
+      if (!this.guide.hidden) this.guide.hidden = true;
+      this.guideNow = null;
+      if (ui.guideLots && ui.guideLots.length) ui.guideLots = [];
+      return;
+    }
+    const owned = view.buildings.filter((b) => b.owner === ui.me);
+    const g = guideState({ owned, inspected: this.inspected, stars: starsOf(me), dismissed: false });
+    // Done — or the Founding era is over and the first Era Council has convened: the opening
+    // it was guiding is behind the player either way.
+    if (g.step === 0 || view.quarter > 1 || view.inCouncil) {
+      this.retireGuide();
+      return;
+    }
+    this.guideNow = g;
+    if (this.guide.hidden) this.guide.hidden = false;
+    const slim = phone();
+    const key = `${g.step}|${g.done.join('')}|${slim ? 1 : 0}`;
+    if (key !== this.guideKey) {
+      this.guideKey = key;
+      const q = (n: string): HTMLElement | null => this.guide.querySelector<HTMLElement>(`[data-f="${n}"]`);
+      this.guide.dataset.step = String(g.step);
+      setText(q('gn'), String(g.step));
+      setText(q('gtitle'), g.title);
+      // On a phone the guide is one slim line: the title carries it, with a few words of how.
+      setText(q('ghint'), slim ? PHONE_HINTS[g.step - 1] : g.hint);
+      q('gpips')?.querySelectorAll('i').forEach((el, i) => {
+        toggle(el, 'done', g.done[i]);
+        toggle(el, 'now', i === g.step - 1);
+      });
+      setAttr(this.guide, 'aria-label', `Founding Guide, step ${g.step} of 3: ${g.title}`);
+    }
+    // Step 1 rings the prime starter corners on the map; the rings follow the foot traffic.
+    if (g.step === 1) {
+      const now = performance.now();
+      if (!ui.guideLots || !ui.guideLots.length || now - this.guideLotsAt > 4000) {
+        ui.guideLots = starterLots(view);
+        this.guideLotsAt = now;
+      } else if (ui.guideLots.some((t) => view.buildingAt(t))) ui.guideLots = ui.guideLots.filter((t) => !view.buildingAt(t));
+    } else if (ui.guideLots && ui.guideLots.length) ui.guideLots = [];
+  }
+
+  // ───────────────────────────── Era Council ─────────────────────────────
+
+  private syncCouncil(session: Session): void {
+    const view = session.view;
+    const c = view.council;
+    if (!view.inCouncil || !c || view.ended) {
+      if (!this.council.hidden) this.council.hidden = true;
+      this.councilKey = '';
+      return;
+    }
+    const me = this.host.ui.me;
+    const solo = session.kind !== 'multi';
+    const key = `${view.seed}|${c.era}|${me}|${session.kind}`;
+    if (key !== this.councilKey) {
+      this.councilKey = key;
+      this.council.innerHTML = this.councilHtml(view, me, solo);
+      this.council.hidden = false;
+      // Focus the dialog itself, never a charter: a stray Enter must not seal a choice.
+      this.council.querySelector<HTMLElement>('.council')?.focus({ preventScroll: true });
+    }
+    const mine = me >= 0 ? (c.picks[me] ?? null) : null;
+    this.council.querySelectorAll<HTMLElement>('.charter').forEach((el) => {
+      const on = el.dataset.key === mine;
+      toggle(el, 'sealed', on);
+      setAttr(el, 'aria-pressed', String(on));
+    });
+    this.council.querySelectorAll<HTMLElement>('.srow').forEach((row) => {
+      const id = Number(row.dataset.p);
+      const pick = c.picks[id] ?? null;
+      const el = row.querySelector<HTMLElement>('[data-f="pick"]');
+      setHtml(el, pick ? `${icon('seal')}<b>${CHARTERS[pick].name}</b>` : '<em>deliberating…</em>');
+      toggle(el, 'sealed', !!pick);
+      if (el) el.dataset.key = pick ?? '';
+    });
+    const adv = this.council.querySelector<HTMLButtonElement>('[data-act="advance"]');
+    if (adv) adv.disabled = me >= 0 && mine === null;
+    const note = this.council.querySelector<HTMLElement>('[data-f="cnote"]');
+    if (solo) setText(note, mine ? `${CHARTERS[mine].name} sealed. You may still change your mind before advancing.` : 'Choose one charter to advance. It is permanent.');
+    else {
+      const secs = Math.max(0, Math.ceil(c.left / 10));
+      setText(this.council.querySelector('[data-f="countdown"]'), `${secs}s`);
+      const fill = this.council.querySelector<HTMLElement>('[data-f="cdbar"]');
+      if (fill) fill.style.width = `${Math.max(0, Math.min(100, (c.left / Math.max(1, c.total)) * 100)).toFixed(1)}%`;
+      const waiting = view.players.filter((p, i) => p.kind === 'human' && (c.picks[i] ?? null) === null).length;
+      setText(
+        note,
+        me < 0
+          ? 'The Houses are choosing their charters.'
+          : mine
+            ? waiting > 0
+              ? `${CHARTERS[mine].name} sealed. Waiting for ${waiting} more House${waiting === 1 ? '' : 's'}…`
+              : 'Every House has chosen. The next era begins.'
+            : 'Choose before the countdown ends, or your steward chooses for you.',
+      );
+    }
+  }
+
+  private councilHtml(view: CityView, me: number, solo: boolean): string {
+    const c = view.council;
+    if (!c) return '';
+    const nextQ = c.era + 1;
+    const who = (id: number): string => esc(id === me ? 'You' : (view.players[id]?.name ?? ''));
+    const meP = view.players[me];
+    const unlocks = c.unlocked
+      .map((k) => `<span class="unlock" data-kind="${k}">${icon(k)}<b>${buildName(k)}</b><small>${money(buildCostFor(meP, k))}</small></span>`)
+      .concat(c.level3 ? [`<span class="unlock" data-kind="level3">${icon('level3')}<b>Level 3</b><small>grand architecture</small></span>`] : [])
+      .join('');
+    const rows = c.rows
+      .map((r, i) => {
+        const p = view.players[r.player];
+        if (!p) return '';
+        return `<div class="srow${r.player === me ? ' me' : ''}" data-p="${r.player}">
+          <span class="rk">${i + 1}</span>${crestSvg(p.house)}
+          <span class="nm">${who(r.player)}<small>${esc(HOUSES[p.house].short)}</small></span>
+          <span class="cr" title="Crown Index at the close of ${eraLabel(c.era)}">${r.crown}</span>
+          <span class="dl${r.delta > 0 ? ' up' : r.delta < 0 ? ' down' : ''}" title="Crown gained during ${eraLabel(c.era)}">${r.delta >= 0 ? '+' : '−'}${Math.abs(r.delta)}</span>
+          <span class="pick" data-f="pick"></span></div>`;
+      })
+      .join('');
+    const offers = me >= 0 ? (c.offers[me] ?? []) : [];
+    const cards = offers
+      .map((k) => {
+        const d = CHARTERS[k];
+        return `<button class="charter" data-act="charter" data-key="${k}" aria-pressed="false" aria-label="${d.name} — ${d.doctrine}. ${d.pill}">
+          <span class="ch-top"><span class="ch-ic">${icon(k)}</span><span class="ch-doc">${d.doctrine}</span><span class="ch-seal">${icon('seal')}Sealed</span></span>
+          <b class="ch-name">${d.name}</b>
+          <span class="ch-blurb">${d.blurb}</span>
+          <span class="ch-pill">${d.pill}</span></button>`;
+      })
+      .join('');
+    const held = meP && meP.charters.length ? `<span class="held">Already held: ${meP.charters.map((k) => CHARTERS[k].name).join(' · ')}</span>` : '';
+    const foot = solo
+      ? `<button class="btn primary big" data-act="advance" disabled>Advance to ${eraLabel(nextQ)}</button><span class="c-note" data-f="cnote"></span>`
+      : `<div class="countdown" title="The room advances when the countdown ends, or as soon as every connected player has chosen"><b class="mono" data-f="countdown"></b><i class="cd"><u data-f="cdbar"></u></i></div><span class="c-note" data-f="cnote"></span>`;
+    return `<div class="council" role="dialog" aria-modal="true" aria-label="Era Council: ${eraTitle(nextQ)}" tabindex="-1" data-era="${c.era}" data-next="${c.next}">
+      <header class="c-head">
+        <span class="kicker">Era Council · ${eraLabel(c.era)} closes</span>
+        <h2>${eraTitle(nextQ)}</h2>
+        <p>${eraDef(nextQ).blurb}</p>
+      </header>
+      <section class="c-unlocks"><h3>Unlocked for ${eraLabel(nextQ)}</h3>
+        <div class="ulist">${unlocks || '<span class="unlock none">Full district maturity · peak civic stakes · the final Crown reckoning</span>'}</div></section>
+      <section class="c-stand"><h3>${eraLabel(c.era)} standings · Crown Index</h3><div class="srows">${rows}</div></section>
+      ${
+        me >= 0
+          ? `<section class="c-charters"><h3>Adopt one Dynasty Charter <small>permanent</small>${held}</h3><div class="cgrid">${cards}</div></section>`
+          : ''
+      }
+      <footer class="c-foot">${foot}</footer></div>`;
   }
 
   private syncBoard(view: CityView): void {
@@ -555,6 +1128,7 @@ export class Hud {
       const rank = String(order.indexOf(i));
       if (row.style.order !== rank) row.style.order = rank;
       setText(row.querySelector('[data-f="crown"]'), String(p.crown));
+      setHtml(row.querySelector('[data-f="stars"]'), starPips(starsOf(p)));
       setText(row.querySelector('[data-f="cash"]'), money(p.cash));
       setText(row.querySelector('[data-f="share"]'), total > 0 ? `${Math.round(p.share * 100)}% share` : '—');
       // Worth + Share + Prestige = Crown, exactly.
@@ -577,6 +1151,34 @@ export class Hud {
     toggle(this.board, 'open', this.boardOpen);
     setAttr(this.board.querySelector('[data-act="breakdown"]'), 'aria-expanded', String(this.boardOpen));
     setText(this.board.querySelector('[data-f="lead"]'), total > 0 && lead >= 0 ? `${HOUSES[view.players[lead].house].short} leads` : 'No sales yet');
+    // Dynasty strip: the local player's next Milestone, and all four when the breakdown is open.
+    const meP = view.players[this.host.ui.me];
+    const mp = this.board.querySelector<HTMLElement>('[data-f="mprog"]');
+    const ml = this.board.querySelector<HTMLElement>('[data-f="mlist"]');
+    if (!mp || !ml) return;
+    if (!meP) {
+      mp.hidden = true;
+      setHtml(ml, '');
+      return;
+    }
+    const rows = milestoneProgress(view, meP);
+    const next = rows.find((m) => !m.done);
+    mp.hidden = false;
+    setHtml(
+      mp,
+      next
+        ? `${icon('star')}<b>${next.name}</b><span class="mp-r">${next.pill}</span><span class="mp-l2"><i class="mp-bar"><u style="width:${Math.round(next.progress * 100)}%"></u></i><span class="mp-d">${next.detail}</span></span>`
+        : `${icon('star')}<b>All four Milestones earned</b><span class="mp-r">★4</span>`,
+    );
+    setAttr(mp, 'title', next ? `Next Dynasty Milestone: ${next.name} — ${next.goal}. Reward: ${next.pill}` : 'Charter Merchant, Block Baron, Civic Benefactor and District Sovereign: all earned');
+    toggle(mp, 'all', !next);
+    // A long name beside a long reward (Civic Benefactor · +§120 · +4 Prestige) sets a touch tighter
+    // so neither is cut short.
+    toggle(mp, 'tight', !!next && next.name.length + next.pill.length > 30);
+    setHtml(
+      ml,
+      rows.map((m) => `<div class="ml${m.done ? ' done' : ''}" title="${esc(m.goal)} — ${esc(m.pill)}">${icon(m.done ? 'check' : 'star')}<b>${m.name}</b><span>${m.done ? m.pill : m.detail}</span></div>`).join(''),
+    );
   }
 
   private syncTreasury(view: CityView): void {
@@ -589,13 +1191,27 @@ export class Hud {
     const lg = view.ledgers[me.id];
     const net = lg ? ledgerNet(lg.cur) : 0;
     const trend = q('trend');
-    setText(trend, `${net >= 0 ? '+' : '−'}§${Math.abs(Math.round(net)).toLocaleString('en-US')} this quarter`);
+    setText(trend, `${net >= 0 ? '+' : '−'}§${Math.abs(Math.round(net)).toLocaleString('en-US')} this era`);
     toggle(trend, 'up', net > 0);
     toggle(trend, 'down', net < 0);
     setText(q('nw'), money(me.netWorth));
-    setText(q('debt'), me.debt > 0 ? `${money(me.debt)} of ${money(LOAN_MAX)}` : 'None');
+    setText(q('debt'), me.debt > 0 ? `${money(me.debt)}/${money(LOAN_MAX)}` : 'None');
     const borrow = this.treasury.querySelector<HTMLButtonElement>('[data-act="borrow"]');
     const repay = this.treasury.querySelector<HTMLButtonElement>('[data-act="repay"]');
+    // The exact per-era rate rides on the Borrow button (halved under Merchant Credit).
+    const rate = loanRateFor(view.quarterTicks, me);
+    setText(q('rate'), ` · ${rate}`);
+    setAttr(borrow, 'aria-label', `Borrow ${money(LOAN_STEP)} at ${rate}`);
+    setAttr(
+      borrow,
+      'title',
+      `Emergency Credit Line: borrow ${money(LOAN_STEP)} (limit ${money(LOAN_MAX)}). Interest is ${(LOAN_RATE * charterMod(me, 'interest') * 100).toFixed(1)}% of your debt at every payroll (10 s) — ${rate}.`,
+    );
+    // Dynasty Charters adopted at the Era Councils.
+    const badges = q('charters');
+    setHtml(badges, me.charters.map((k) => `<span class="cbadge" data-key="${k}" title="${CHARTERS[k].name} — ${CHARTERS[k].pill}">${icon(k)}<b>${CHARTER_SHORT[k]}</b></span>`).join(''));
+    if (badges && badges.hidden !== (me.charters.length === 0)) badges.hidden = me.charters.length === 0;
+    setAttr(this.treasury, 'title', me.charters.length ? '' : `Dynasty Charters are adopted at the Era Council${view.era < ERA_COUNT ? `, after ${eraLabel(view.quarter)}` : ''}.`);
     if (borrow) borrow.disabled = view.ended || me.debt + LOAN_STEP > LOAN_MAX;
     if (repay) repay.disabled = view.ended || me.debt <= 0 || me.cash < 1;
     toggle(this.treasury.querySelector('[data-act="ledger"]'), 'primary', this.ledgerOpen);
@@ -607,8 +1223,26 @@ export class Hud {
     const totalUnmet = view.unmet.reduce((a, b) => a + b, 0) + 1;
     this.dock.querySelectorAll<HTMLElement>('.tool').forEach((btn) => {
       const k = btn.dataset.kind as BuildKind;
+      const locked = !isUnlocked(k, view.quarter);
+      const cost = buildCostFor(me, k);
       toggle(btn, 'on', this.host.ui.tool === k);
-      toggle(btn, 'poor', me.cash < buildCost(k));
+      toggle(btn, 'poor', !locked && me.cash < cost);
+      // Future-era tools stay on the dock under an Era lock badge, and shimmer as they unlock.
+      toggle(btn, 'locked', locked);
+      if (locked) setAttr(btn, 'data-locked', String(ERA_UNLOCK[k]));
+      else if (btn.hasAttribute('data-locked')) btn.removeAttribute('data-locked');
+      const lock = btn.querySelector<HTMLElement>('.lock');
+      if (lock && lock.hidden === locked) lock.hidden = !locked;
+      setAttr(btn, 'title', locked ? `${lockNotice(k)}\n${toolTooltip(k)}` : toolTooltip(k));
+      setAttr(btn, 'aria-label', locked ? `${buildName(k)}, locked: ${lockNotice(k)}` : `${buildName(k)}, ${money(cost)}`);
+      setText(btn.querySelector('[data-f="cost"]'), money(cost));
+      if (this.lockState[k] === true && !locked) {
+        btn.classList.add('unlocked');
+        window.setTimeout(() => btn.classList.remove('unlocked'), 3200);
+      }
+      this.lockState[k] = locked;
+      // Founding Guide, step 1: the two Era I shops are pointed out.
+      toggle(btn, 'guided', !!this.guideNow && this.guideNow.step === 1 && (k === 'roastery' || k === 'bistro') && this.host.ui.tool === null);
       if (isShop(k)) {
         const di = DESIRES.indexOf(SHOPS[k].desire);
         // Unmet demand: how many citizens wanted this and found no shop.
@@ -654,7 +1288,8 @@ export class Hud {
     hint.hidden = false;
     const blurb = isShop(k) ? SHOPS[k].blurb : CIVICS[k].blurb;
     let extra = '';
-    if (this.host.ui.tool === k) extra = k === 'tramstop' ? '<em>Place along the tramway avenue · Esc cancels</em>' : '<em>Click a green lot · Esc cancels</em>';
+    if (!isUnlocked(k, view.quarter)) extra = `<em>${icon('lock')}Unlocks in Era ${ERAS[ERA_UNLOCK[k] - 1].roman}: ${ERAS[ERA_UNLOCK[k] - 1].name}</em>`;
+    else if (this.host.ui.tool === k) extra = k === 'tramstop' ? '<em>Place along the tramway avenue · Esc cancels</em>' : '<em>Click a green lot · Esc cancels</em>';
     else if (isShop(k)) {
       const di = DESIRES.indexOf(SHOPS[k].desire);
       const lvl = this.demandLevel(view, di, 1);
@@ -703,6 +1338,8 @@ export class Hud {
     toggle(this.inspector, 'collapsed', this.sheetCollapsed);
     setAttr(this.refs.collapse, 'aria-expanded', String(!this.sheetCollapsed));
     toggle(this.root, 'sheet', true);
+    // Founding Guide, step 2: the player has opened one of their own shops.
+    if (mine && b && isShop(b.kind)) this.inspected = true;
     this.reveal(tile);
     if (!b) {
       if (kindOfTile === 'lot') setHtml(this.refs.pips, pipsHtml(trafficPips(view, tile)));
@@ -755,7 +1392,8 @@ export class Hud {
     setText(r.served, String(b.served));
     setText(r.turned, String(b.turned));
     toggle(r.turned, 'warn', b.turned > 0 && b.turned > b.served * 0.15);
-    setText(r.costs, `${money((wageOf(b) + rentOf(b, view.event?.started === true && view.event.kind === 'renthike')) * 6)}`);
+    const owner = view.players[b.owner];
+    setText(r.costs, `${money((wageOf(b, owner) + rentOf(b, view.event?.started === true && view.event.kind === 'renthike')) * 6)}`);
     if (!mine) {
       setText(r.stance, `${STANCES[b.stance].name} ${STANCES[b.stance].label}`);
       return;
@@ -768,10 +1406,17 @@ export class Hud {
       if (b.level >= 3) {
         up.disabled = true;
         setHtml(up, 'Level 3 — fully appointed');
+        setAttr(up, 'data-state', 'max');
+      } else if (b.level === 2 && view.era < LEVEL3_ERA) {
+        // Grand architecture waits for the Grand Boulevard.
+        up.disabled = true;
+        setHtml(up, `${icon('lock')}${LEVEL3_NOTICE}`);
+        setAttr(up, 'data-state', 'locked');
       } else {
-        const c = upgradeCost(b);
+        const c = upgradeCost(b, owner);
         up.disabled = cash < c || view.ended;
         setHtml(up, `Upgrade to Lv ${b.level + 1}<span class="cost">${money(c)}</span>`);
+        setAttr(up, 'data-state', 'open');
       }
     }
     // Promo Blitz.
@@ -790,10 +1435,10 @@ export class Hud {
         setHtml(promo, `Promo ready in ${Math.ceil((b.promoReadyAt - view.tick) / 10)}s`);
         pm.hidden = false;
         toggle(pm, 'promo', false);
-        meter.style.width = `${(1 - (b.promoReadyAt - view.tick) / PROMO_COOLDOWN) * 100}%`;
+        meter.style.width = `${(1 - (b.promoReadyAt - view.tick) / promoCooldownFor(owner)) * 100}%`;
       } else {
-        promo.disabled = cash < PROMO_COST || view.ended;
-        setHtml(promo, `Promo Blitz · 20s<span class="cost">${money(PROMO_COST)}</span>`);
+        promo.disabled = cash < promoCostFor(owner) || view.ended;
+        setHtml(promo, `Promo Blitz · 20s<span class="cost">${money(promoCostFor(owner))}</span>`);
         pm.hidden = true;
       }
     }
@@ -805,7 +1450,7 @@ export class Hud {
     }
     const rs = r.restock as HTMLButtonElement | undefined;
     if (rs) {
-      const c = restockCost(view, b, false);
+      const c = restockCost(view, b, false, owner);
       rs.disabled = b.stock >= def.stockMax || cash < def.unitCost || view.ended;
       setHtml(rs, b.stock >= def.stockMax ? 'Stockroom full' : `Restock<span class="cost">${money(Math.min(c, Math.max(0, cash)))}</span>`);
     }
@@ -866,9 +1511,9 @@ export class Hud {
     }
     const owner = view.players[b.owner];
     const house = owner ? HOUSES[owner.house] : HOUSES[0];
-    const ownerName = mine ? 'Your property' : owner ? `${esc(owner.name)} · ${house.name}` : '';
-    const head = `<div class="head">${icon(b.kind)}<div class="t"><b>${buildName(b.kind)}${isShop(b.kind) ? ` <span class="mono" style="display:inline;font-size:11px;color:var(--ink-3)">Lv ${b.level}</span>` : ''}</b>
-      <span><i style="background:${house.color}"></i>${ownerName}</span></div>${close}</div>`;
+    const ownerName = mine ? `Your property · ${house.name}` : owner ? `${esc(owner.name)} · ${house.name}` : '';
+    const head = `<div class="head owned" style="--house:${house.color}">${owner ? crestSvg(owner.house) : ''}<div class="t"><b>${icon(b.kind)}${buildName(b.kind)}${isShop(b.kind) ? ` <span class="mono" style="display:inline;font-size:11px;color:var(--ink-3)">Lv ${b.level}</span>` : ''}</b>
+      <span>${ownerName}</span></div>${close}</div>`;
     const tags = this.bonusTags(view, tile);
     if (!isShop(b.kind)) {
       const def = CIVICS[b.kind];
@@ -922,17 +1567,17 @@ export class Hud {
     const change = (l: Ledger): string => signed(ledgerCashChange(l));
     const me = view.players[this.host.ui.me];
     const rows = LEDGER_ROWS.map(
-      ([k, label, sign], i) => `<tr class="${i === 3 || i === 8 ? 'sep' : ''}"><td>${label}</td>${cell(lg.cur[k], sign)}${cell(lg.last[k], sign)}${cell(lg.total[k], sign)}</tr>`,
+      ([k, label, sign], i) => `<tr class="${i === 4 || i === 9 ? 'sep' : ''}" data-k="${k}"><td>${label}</td>${cell(lg.cur[k], sign)}${cell(lg.last[k], sign)}${cell(lg.total[k], sign)}</tr>`,
     ).join('');
     setHtml(
       this.ledger.querySelector('[data-f="body"]'),
-      `<table><thead><tr><th></th><th>This Q</th><th>Last Q</th><th>Match</th></tr></thead><tbody>${rows}
+      `<table><thead><tr><th></th><th>This era</th><th>Last era</th><th>Match</th></tr></thead><tbody>${rows}
        <tr class="net"><td>Net cashflow</td>${net(lg.cur)}${net(lg.last)}${net(lg.total)}</tr>
        <tr class="fin"><td colspan="4">Financing</td></tr>
        <tr><td>Loan draws</td>${cell(lg.cur.borrowed, 1)}${cell(lg.last.borrowed, 1)}${cell(lg.total.borrowed, 1)}</tr>
        <tr><td>Loan repayments</td>${cell(lg.cur.repaid, -1)}${cell(lg.last.repaid, -1)}${cell(lg.total.repaid, -1)}</tr>
        <tr class="net"><td>Change in cash</td>${change(lg.cur)}${change(lg.last)}${change(lg.total)}</tr></tbody></table>
-       <p class="recon">Opening ${money(START_CASH)} + match change = <b>${money(START_CASH + ledgerCashChange(lg.total))}</b> in hand${me && me.debt > 0 ? ` · ${money(me.debt)} owed at ${loanRateLabel(view.quarterTicks)}` : ''}</p>`,
+       <p class="recon">Opening ${money(START_CASH)} + match change = <b>${money(START_CASH + ledgerCashChange(lg.total))}</b> in hand${me && me.debt > 0 ? ` · ${money(me.debt)} owed at ${loanRateFor(view.quarterTicks, me)}` : ''}</p>`,
     );
   }
 
@@ -969,8 +1614,9 @@ export class Hud {
         const p = view.players[r.player];
         const parts = crownParts(r);
         return `<tr class="${r.player === res.winner ? 'win' : ''}${r.player === me ? ' me' : ''}">
-          <td><span class="rk">${i + 1}</span><i style="background:${HOUSES[p.house].color}"></i>${who(r.player)}<small>${p.kind === 'ai' && p.persona ? AI_PERSONAS[p.persona].title : HOUSES[p.house].short}</small>
-            <em>${money(r.revenue)} revenue · ${r.served} served · ${r.shops} shop${r.shops === 1 ? '' : 's'} + ${r.civic} civic</em></td>
+          <td><span class="rk">${i + 1}</span>${crestSvg(p.house, { gilded: (r.stars ?? 0) >= MILESTONES.length })}${who(r.player)}<small>${p.kind === 'ai' && p.persona ? AI_PERSONAS[p.persona].title : HOUSES[p.house].short}</small>${starPips(r.stars ?? 0)}
+            <em>${money(r.revenue)} revenue · ${r.served} served · ${r.shops} shop${r.shops === 1 ? '' : 's'} + ${r.civic} civic</em>
+            ${(r.charters ?? []).length ? `<em class="chs">${(r.charters ?? []).map((k) => CHARTERS[k].name).join(' · ')}</em>` : ''}</td>
           <td title="Net worth ${money(r.netWorth)} ÷ 10">${parts.worth}<small>${money(r.netWorth)}</small></td>
           <td title="Market share ${Math.round(r.share * 100)}% × 3">${parts.share}<small>${Math.round(r.share * 100)}%</small></td>
           <td title="Civic Prestige ${r.prestige} × 4">${parts.prestige}<small>${Math.round(r.prestige)} pts</small></td>
@@ -984,12 +1630,12 @@ export class Hud {
         const title = k === 'corner' ? 'Corner King' : k === 'shark' ? 'Price Shark' : 'Civic Patron';
         if (!a) return `<div class="award"><div class="a-title">${icon(awardIcon[k])}${title}</div><div class="a-detail">Unclaimed this match</div></div>`;
         const p = view.players[a.player];
-        return `<div class="award"><div class="a-title">${icon(awardIcon[k])}${title}</div><div class="a-who"><i style="background:${HOUSES[p.house].color}"></i>${who(a.player)}</div><div class="a-detail">${esc(a.detail)}</div></div>`;
+        return `<div class="award"><div class="a-title">${icon(awardIcon[k])}${title}</div><div class="a-who">${crestSvg(p.house, { quiet: true })}${who(a.player)}</div><div class="a-detail">${esc(a.detail)}</div></div>`;
       })
       .join('');
     const canDecide = session.kind === 'solo' || this.host.isHost();
     const headline = res.winner === me ? 'The district is yours.' : `${house.name} takes the district.`;
-    const quarters = view.endless ? `Quarter ${view.quarter}` : `${view.totalQuarters} quarters`;
+    const quarters = view.endless ? `${eraLabel(view.quarter)}${view.quarter > ERA_COUNT ? ` · Day ${view.quarter}` : ''}` : `${view.totalQuarters} eras`;
     return `<div class="victory edition" role="dialog" aria-modal="true" aria-label="Mercadia Gazette, Final Edition: match summary" tabindex="-1">
       <header class="masthead">
         <span class="m-side">Final Edition</span>
@@ -997,9 +1643,9 @@ export class Hud {
         <span class="m-side r">${MODES[view.mode].name} · ${quarters}</span>
       </header>
       <div class="front">
-        ${crest(house.color, house.dark, house.light, house.short.charAt(0))}
+        ${grandCrest(win.house)}
         <div class="story">
-          <div class="kicker">Closing bell · ${esc(house.name)}</div>
+          <div class="kicker">Closing bell · ${esc(house.name)} · ${house.crestName}</div>
           <h2>${headline}</h2>
           ${res.highlight ? `<p class="highlight">${esc(res.highlight)}</p>` : ''}
           <div class="equation" aria-label="Winning Crown Index breakdown">
@@ -1016,7 +1662,7 @@ export class Hud {
           <table><thead><tr><th>House</th><th title="Net worth ÷ 10">Worth</th><th title="Market share % × 3">Share</th><th title="Civic Prestige × 4">Prestige</th><th>Crown</th></tr></thead><tbody>${rows}</tbody></table>
         </section>
         <section class="trend">
-          <h3>Market share, quarter by quarter</h3>
+          <h3>Market share, era by era</h3>
           ${this.sparkline(view, res, me)}
         </section>
       </div>
@@ -1053,7 +1699,9 @@ export class Hud {
     const X = (i: number): number => L + (pw * i) / (n - 1);
     const Y = (v: number): number => T + ph * (1 - v / top);
     const f = (v: number): string => v.toFixed(1);
-    // Quarter gridlines and labels.
+    // Roman numerals for the four eras; Endless days past the fourth are numbered.
+    const eraName = (q: number): string => (q <= ERA_COUNT ? ERAS[q - 1].roman : `D${q}`);
+    // Era gridlines and labels.
     const q0 = Math.max(0, view.quarter - Math.ceil(n / per));
     const quarters = Math.ceil(n / per);
     const every = Math.max(1, Math.ceil(quarters / 8));
@@ -1064,9 +1712,9 @@ export class Hud {
       const x0 = start < 0 ? L : X(start);
       const x1 = X(end);
       if (q < quarters) grid += `<line x1="${f(x1)}" y1="${T}" x2="${f(x1)}" y2="${T + ph}" class="g"/>`;
-      if ((q - 1) % every === 0) grid += `<text x="${f((x0 + x1) / 2)}" y="${H - 6}" text-anchor="middle" class="ax">Q${q0 + q}</text>`;
+      if ((q - 1) % every === 0) grid += `<text x="${f((x0 + x1) / 2)}" y="${H - 6}" text-anchor="middle" class="ax">${eraName(q0 + q)}</text>`;
       const shares = view.players.map((p, i) => `${i === me ? 'You' : p.name} ${Math.round((samples[end][i] ?? 0) / 10)}%`).join(' · ');
-      grid += `<rect x="${f(x0)}" y="${T}" width="${f(Math.max(1, x1 - x0))}" height="${ph}" class="hit"><title>End of Q${q0 + q}: ${esc(shares)}</title></rect>`;
+      grid += `<rect x="${f(x0)}" y="${T}" width="${f(Math.max(1, x1 - x0))}" height="${ph}" class="hit"><title>Close of ${q0 + q <= ERA_COUNT ? eraLabel(q0 + q) : `Day ${q0 + q}`}: ${esc(shares)}</title></rect>`;
     }
     const half = Math.round(top / 2);
     const yaxis = [0, half, top]
@@ -1100,7 +1748,7 @@ export class Hud {
     const legend = view.players
       .map((p, i) => `<span><i style="background:${HOUSES[p.house].color}"></i>${i === me ? 'You' : esc(p.name)}</span>`)
       .join('');
-    return `<svg class="spark" viewBox="0 0 ${W} ${H}" role="img" aria-label="Market share by quarter for each House">${yaxis}${grid}${lines}${dots}</svg>
+    return `<svg class="spark" viewBox="0 0 ${W} ${H}" role="img" aria-label="Market share by era for each House">${yaxis}${grid}${lines}${dots}</svg>
       <div class="legend">${legend}</div>`;
   }
 
@@ -1118,7 +1766,7 @@ export class Hud {
     if (ui.tool && me && hov >= 0 && CITY.tiles[hov] === 'lot' && !view.buildingAt(hov)) {
       const bon = lotBonuses(view, hov);
       const names = [bon.corner ? 'Corner' : '', bon.canal ? 'Canal-front' : '', bon.transit ? 'Transit' : ''].filter(Boolean);
-      const cost = buildCost(ui.tool);
+      const cost = buildCostFor(me, ui.tool);
       const illegal = ui.tool === 'tramstop' && CITY.avenueAdj[hov] < 0;
       const perks: string[] = [];
       if (bon.corner) perks.push('+15% pull');
@@ -1153,9 +1801,11 @@ export class Hud {
       setHtml(this.speech, this.speechHtml(view, c));
       const p = r.citizenScreen(c, alpha);
       this.speech.hidden = false;
-      // Never let the card ride up into the clock, ticker or score strip: when there is no
-      // room above the citizen, it docks below them instead.
-      const safeTop = (phone() ? this.board.getBoundingClientRect().bottom : this.clock.getBoundingClientRect().bottom) + 6;
+      // Never let the card ride up into the clock, the Chronicle banner or the score strip:
+      // when there is no room above the citizen, it docks below them instead. (On a phone the
+      // Chronicle bar sits under the strip; on a mid-size screen it wraps under the clock.)
+      const bannerBottom = this.chronicle.querySelector('.dispatch')?.getBoundingClientRect().bottom ?? 0;
+      const safeTop = Math.max(phone() ? this.board.getBoundingClientRect().bottom : this.clock.getBoundingClientRect().bottom, bannerBottom) + 6;
       const h = this.speech.offsetHeight || 120;
       const below = p.y - h < safeTop;
       toggle(this.speech, 'below', below);
@@ -1211,6 +1861,13 @@ export interface TitleHost {
   createRoom(name: string): Promise<void>;
   joinRoom(code: string, name: string): Promise<void>;
 }
+
+/** The three match lengths as the Title and the Lobby offer them. */
+const MODE_SEG: [MatchMode, string, string][] = [
+  ['blitz', 'Blitz', '4 brisk eras'],
+  ['standard', 'Standard', '4 eras'],
+  ['endless', 'Endless', 'past Era IV'],
+];
 
 const NAME_KEY = 'mercadia:name';
 export const storedName = (): string => {
@@ -1276,15 +1933,17 @@ export class TitleScreen {
     this.el.innerHTML = `
       <h1>MERCADIA</h1>
       <div class="rule"></div>
-      <p class="tag" style="margin:0">Rival merchants reshape a sunlit canal-and-tramway city block by block.</p>
+      <p class="tag" style="margin:0">Rival merchant dynasties reshape a sunlit canal-and-tramway city era by era.</p>
       <div class="solo">
         <button class="btn primary big wide" data-act="solo">Play Solo Now</button>
+        <p class="objective">${esc(OBJECTIVE)}</p>
         <div class="opts">
           <label>Rivals</label>${seg('rivals', [['1', '1 AI'], ['2', '2 AI'], ['3', '3 AI']], String(this.rivals))}
-          <label>Length</label>${seg('mode', [['blitz', 'Blitz', '2 quarters'], ['standard', 'Standard', '4 quarters'], ['endless', 'Endless', 'sandbox']], this.mode)}
+          <label>Length</label>${seg('mode', MODE_SEG, this.mode)}
         </div>
+        <p class="modeblurb" data-f="modeblurb">${MODES[this.mode].blurb}</p>
         <div class="rivals">${personas
-          .map((p, i) => `<div class="rival${i < this.rivals ? '' : ' off'}"><i style="background:${HOUSES[i + 1].color}"></i><b>${AI_PERSONAS[p].name}</b><span>${AI_PERSONAS[p].title}</span></div>`)
+          .map((p, i) => `<div class="rival${i < this.rivals ? '' : ' off'}">${crestSvg(i + 1, { quiet: true })}<b>${AI_PERSONAS[p].name}</b><span>${AI_PERSONAS[p].title}</span></div>`)
           .join('')}</div>
       </div>
       <hr />
@@ -1431,8 +2090,8 @@ export class LobbyScreen {
         let right = '';
         if (me) {
           who = `<input id="l-name" maxlength="16" value="${esc(s.name)}" aria-label="Your name" /><small>${h.name}</small>`;
-          right = `<div class="houses" role="group" aria-label="House colour">${HOUSES.map(
-            (hh, k) => `<button data-act="house" data-v="${k}" class="${k === s.house ? 'on' : ''}" style="background:${hh.color}" title="${hh.name}" aria-label="${hh.name}" ${taken.has(k) ? 'disabled' : ''}></button>`,
+          right = `<div class="houses" role="group" aria-label="House">${HOUSES.map(
+            (hh, k) => `<button data-act="house" data-v="${k}" class="${k === s.house ? 'on' : ''}" title="${hh.name} — ${hh.crestName}" aria-label="${hh.name}, ${hh.crestName}" aria-pressed="${k === s.house}" ${taken.has(k) ? 'disabled' : ''}>${crestSvg(k, { quiet: true })}</button>`,
           ).join('')}</div>`;
         } else if (s.kind === 'human') {
           who = `<b>${esc(s.name)}</b><small>${h.name}${s.connected ? '' : ' · reconnecting'}</small>`;
@@ -1445,7 +2104,7 @@ export class LobbyScreen {
           right = host ? `<button class="switch" data-act="fill" data-seat="${i}" data-v="1" title="Let an AI take this seat"><i></i>AI</button>` : '';
         }
         if (me && i === lobby.host) right += '<span class="badge">Host</span>';
-        return `<div class="seat${me ? ' me' : ''}${s.kind === 'open' ? ' open' : ''}"><i class="sw" style="background:${s.kind === 'open' ? 'transparent;box-shadow:inset 0 0 0 1px var(--hair)' : h.color}"></i><div class="who">${who}</div><div class="right">${right}</div></div>`;
+        return `<div class="seat${me ? ' me' : ''}${s.kind === 'open' ? ' open' : ''}">${s.kind === 'open' ? '<i class="sw" style="background:transparent;box-shadow:inset 0 0 0 1px var(--hair)"></i>' : crestSvg(s.house)}<div class="who">${who}</div><div class="right">${right}</div></div>`;
       })
       .join('');
     const participants = lobby.seats.filter((s) => s.kind !== 'open').length;
@@ -1460,7 +2119,7 @@ export class LobbyScreen {
       : pvp
         ? '<span class="badge">Pure PvP</span>'
         : '';
-    const modes: [MatchMode, string, string][] = [['blitz', 'Blitz', '2 quarters'], ['standard', 'Standard', '4 quarters'], ['endless', 'Endless', 'sandbox']];
+    const modes = MODE_SEG;
     const copied = performance.now() < this.copied;
     this.el.innerHTML = `
       <h3>Multiplayer room</h3>
@@ -1472,6 +2131,7 @@ export class LobbyScreen {
       <div class="opts"><label>Length</label><div class="seg">${modes
         .map(([v, label, small]) => `<button data-act="mode" data-v="${v}" class="${v === lobby.mode ? 'on' : ''}" ${host ? '' : 'disabled'}>${label}<small>${small}</small></button>`)
         .join('')}</div></div>
+      <p class="modeblurb">${MODES[lobby.mode].blurb} · Era Councils between eras</p>
       <div class="go">
         ${host ? `<button class="btn primary big" data-act="start" ${participants < 2 ? 'disabled' : ''}>Start Match</button>` : '<button class="btn primary big" disabled>Waiting for the host</button>'}
         <button class="btn big" data-act="leave">Leave</button>

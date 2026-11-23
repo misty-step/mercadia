@@ -252,6 +252,75 @@ export class Foley {
     this.tone(ctx, 'sine', 392 * 2.98, 392 * 2.98, t, 0.7, 0.04, 0.004);
   }
 
+  /** A soft pad note with a slow attack: the building block of the warm era chords. */
+  private pad(ctx: Ctx, f: number, t: number, dur: number, gain: number): void {
+    const o = ctx.createOscillator();
+    const lp = ctx.createBiquadFilter();
+    const g = ctx.createGain();
+    o.type = 'triangle';
+    o.frequency.value = f;
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(700, t);
+    lp.frequency.exponentialRampToValueAtTime(2200, t + 0.12);
+    lp.frequency.exponentialRampToValueAtTime(900, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(lp).connect(g).connect(this.master as GainNode);
+    o.start(t);
+    o.stop(t + dur + 0.03);
+  }
+
+  /** Era transition: a warm rolled major chord over the era bell. */
+  era(): void {
+    const ctx = this.ready('era', 1500);
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    this.tone(ctx, 'sine', 196, 196, t, 1.8, 0.12, 0.004);
+    [261.63, 329.63, 392, 523.25, 659.25].forEach((f, i) => this.pad(ctx, f, t + 0.06 + i * 0.07, 1.3 - i * 0.08, 0.075));
+    this.tone(ctx, 'sine', 1046.5, 1046.5, t + 0.5, 0.9, 0.035, 0.002);
+  }
+
+  /** The Era Council convenes: two unhurried chamber chimes. */
+  council(): void {
+    const ctx = this.ready('council', 1500);
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    [293.66, 440].forEach((f, i) => {
+      this.tone(ctx, 'sine', f, f, t + i * 0.32, 1.4, 0.11, 0.004);
+      this.tone(ctx, 'sine', f * 2.01, f * 2.01, t + i * 0.32, 0.8, 0.045, 0.004);
+    });
+  }
+
+  /** Dynasty Milestone: a bright rising triad with a brass star on top. */
+  milestone(): void {
+    const ctx = this.ready('milestone', 700);
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    [392, 493.88, 587.33, 783.99].forEach((f, i) => this.pad(ctx, f, t + i * 0.09, 0.7, 0.08));
+    [1567.98, 2349.3].forEach((f, i) => this.tone(ctx, 'sine', f, f, t + 0.36 + i * 0.07, 0.5, 0.04, 0.002));
+  }
+
+  /** A charter is sealed: a wax-seal press, soft and short. */
+  seal(): void {
+    const ctx = this.ready('seal', 220);
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    this.tone(ctx, 'sine', 150, 70, t, 0.09, 0.32, 0.002);
+    this.hiss(ctx, t, 0.04, 0.1, 'lowpass', 900);
+    this.tone(ctx, 'triangle', 880, 830, t + 0.05, 0.12, 0.05, 0.002);
+  }
+
+  /** A headline dispatch that has no sound of its own (a lead change, a rivalry): two-note sting. */
+  sting(): void {
+    const ctx = this.ready('sting', 600);
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    this.pad(ctx, 440, t, 0.22, 0.09);
+    this.pad(ctx, 659.25, t + 0.12, 0.42, 0.09);
+    this.hiss(ctx, t, 0.08, 0.05, 'bandpass', 3800, 0.8);
+  }
+
   /** Rain bed that follows the cloudburst in and out. */
   rain(on: boolean): void {
     const ctx = this.ctx;
