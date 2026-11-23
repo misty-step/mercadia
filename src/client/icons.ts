@@ -1,4 +1,6 @@
 // Bespoke inline SVG icons. 24×24, 1.6 stroke, drawn for this game — no emoji, no icon font.
+import { HOUSES } from '../shared/constants';
+import { CREST_SHAPES, SHIELD, SHIELD_SHADE } from './heraldry';
 
 const svg = (body: string, cls = 'ic'): string =>
   `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${body}</svg>`;
@@ -31,6 +33,28 @@ export const ICONS: Record<string, string> = {
   patron: svg('<path d="M4 20h16M5.5 20V10.5M9.8 20V10.5M14.2 20V10.5M18.5 20V10.5"/><path d="M3.5 10.5 12 4l8.5 6.5z"/>'),
   fit: svg('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
   chevron: svg('<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>'),
+  // ── City events (the Chronicle's badges) ──
+  cloudburst: svg('<path d="M7 15.5a4 4 0 0 1 .6-7.9 5.2 5.2 0 0 1 10 1.3 3.4 3.4 0 0 1-.6 6.6z"/><path d="m9 18.3-1 2.4M13 18.3l-1 2.4M17 18.3l-1 2.4"/>'),
+  cruise: svg('<path d="M3.5 15.5h17l-2 4.5h-13z"/><path d="M6.5 15.5v-4h11v4"/><path d="M9.5 11.5V8h5v3.5"/><path d="M12 8V4.8"/>'),
+  freeride: svg('<path d="M4 8h16v2.6a1.9 1.9 0 0 0 0 3.8V17H4v-2.6a1.9 1.9 0 0 0 0-3.8z"/><path d="M10 8.6v8" stroke-dasharray="1.6 1.9"/><path d="M13.2 12.5h3.6"/>'),
+  critic: svg('<path d="M7.5 3.5v5a2.5 2.5 0 0 0 5 0v-5M10 3.5V21"/><path d="M17 3.5c-1.8 1.6-2.3 4.4-2 8h2zM17 11.5V21"/>'),
+  lantern: svg('<path d="M12 2.5V5"/><path d="M8.5 5h7"/><path d="M8 7.5h8c1.6 2.4 1.6 6.6 0 9H8c-1.6-2.4-1.6-6.6 0-9z"/><path d="M10 16.5h4v2h-4zM12 18.5v3"/>'),
+  renthike: svg('<path d="M3.5 20.5V10l5.5-4 5.5 4v10.5"/><path d="M7.5 20.5v-5h3v5"/><path d="M19 14V5M16.5 7.5 19 5l2.5 2.5"/>'),
+  supplycrunch: svg('<path d="M4 8.5 12 5l8 3.5V17l-8 3.5L4 17z"/><path d="m4 8.5 8 3.5 8-3.5M12 12v8.5"/>'),
+  // ── Chronicle categories ──
+  era: svg('<path d="M4 20.5h16"/><path d="M6.5 20.5v-7a5.5 5.5 0 0 1 11 0v7"/><path d="M12 4.6V3M6.2 6.6 5.1 5.5M17.8 6.6l1.1-1.1"/><circle cx="12" cy="13.6" r="1.7"/>'),
+  charter: svg('<path d="M7 4.5h10.5A1.5 1.5 0 0 1 19 6v7.5"/><path d="M7 4.5A1.5 1.5 0 0 0 5.5 6v12.5H12"/><path d="M8.5 9h7M8.5 12.5h4.5"/><circle cx="17" cy="17.5" r="3"/>'),
+  seal: svg('<circle cx="12" cy="9.5" r="5.5"/><path d="m9.6 9.6 1.7 1.7 3.2-3.3"/><path d="M8.6 14 7 20.5l5-2.4 5 2.4-1.6-6.5"/>'),
+  focus: svg('<circle cx="12" cy="12" r="5"/><path d="M12 3.5v3.5M12 17v3.5M3.5 12H7M17 12h3.5"/>'),
+  lock: svg('<rect x="6" y="11" width="12" height="9" rx="1.8"/><path d="M8.5 11V8.3a3.5 3.5 0 0 1 7 0V11"/>'),
+  level3: svg('<path d="M4 20.5h16"/><path d="M6 20.5V9h12v11.5"/><path d="M4.5 9h15M8 9V5.5h8V9"/><path d="M9.5 13h5M9.5 16.5h5"/>'),
+  // ── Dynasty Charters ──
+  artisanry: svg('<path d="M4.5 19.5 12.5 11.5"/><path d="m11.5 6.5 6 6 2-2L17 8l1-1-2.5-2.5-1 1-1-1z"/>'),
+  transit: svg('<rect x="6" y="5.5" width="12" height="11.5" rx="2.5"/><path d="M6 11.5h12M12 5.5V3"/><path d="m8.5 17-1.7 3.5M15.5 17l1.7 3.5"/><circle cx="9.2" cy="14.3" r=".7" fill="currentColor"/><circle cx="14.8" cy="14.3" r=".7" fill="currentColor"/>'),
+  credit: svg('<ellipse cx="12" cy="7" rx="6.5" ry="2.8"/><path d="M5.5 7v5c0 1.5 2.9 2.8 6.5 2.8s6.5-1.3 6.5-2.8V7"/><path d="M5.5 12v5c0 1.5 2.9 2.8 6.5 2.8s6.5-1.3 6.5-2.8v-5"/>'),
+  canal: svg('<path d="M3 13.5c2.5-6.2 15.5-6.2 18 0"/><path d="M6.3 13.5v-2.9M10 13.5V9.4M14 13.5V9.4M17.7 13.5v-2.9"/><path d="M3 18.3c1.5-1.2 3-1.2 4.5 0s3 1.2 4.5 0 3-1.2 4.5 0 3 1.2 4.5 0"/>'),
+  heralds: svg('<path d="M4 10.5v3.2l8.5 3.3V7z"/><path d="M12.5 8.5c3 0 5.2-1.4 6.7-3.5v14c-1.5-2.1-3.7-3.5-6.7-3.5"/><path d="M6.6 14.7 8 20h2.4l-1-4.4"/>'),
+  provisioners: svg('<path d="M3 14.5h18l-2.5 5h-13z"/><path d="M7 14.5v-5h4.5v5M12.5 14.5V7H17v7.5"/>'),
 };
 
 export const icon = (name: string): string => ICONS[name] ?? '';
@@ -65,27 +89,35 @@ export function dial(phase: number): string {
 }
 
 /**
- * The winning House's crest for the Final Edition: a shield in the House colour with its
- * initial, a brass crown above and a laurel either side.
+ * The winning House's crest for the Final Edition: its own heraldic shield and emblem, gilded,
+ * under a brass crown and between two laurel sprays.
  */
-export function crest(color: string, dark: string, light: string, letter: string): string {
+export function grandCrest(house: number): string {
+  const h = HOUSES[((house % HOUSES.length) + HOUSES.length) % HOUSES.length];
   const leaf = (x: number, y: number, r: number, flip: boolean): string =>
     `<ellipse cx="${x}" cy="${y}" rx="5.2" ry="2.3" transform="rotate(${flip ? -r : r} ${x} ${y})" fill="#84A98C"/>`;
   const laurel = [0, 1, 2, 3, 4]
     .map((i) => {
-      const y = 70 - i * 9.5;
+      const y = 72 - i * 9.5;
       const dx = 9 + i * 1.2 - i * i * 0.5;
       return leaf(48 - 30 - dx + 6, y, 52 - i * 9, false) + leaf(48 + 30 + dx - 6, y, 52 - i * 9, true);
     })
     .join('');
-  return `<svg class="crest" viewBox="0 0 96 96" role="img" aria-label="Crest of the winning House">
+  const emblem = CREST_SHAPES[h.crest]
+    .map((s) =>
+      s.stroke
+        ? `<path d="${s.d}" fill="none" stroke="#FAF7F0" stroke-width="${s.stroke}" stroke-linecap="round" stroke-linejoin="round"/>`
+        : `<path d="${s.d}" fill="#FAF7F0" fill-rule="evenodd"/>`,
+    )
+    .join('');
+  return `<svg class="crest grand" viewBox="0 0 96 96" role="img" data-crest="${h.crest}" aria-label="${h.name} crest: ${h.crestName}"><title>${h.name} — ${h.crestName}</title>
     ${laurel}
-    <path d="M26 30h44v22c0 14-9 23-22 28-13-5-22-14-22-28z" fill="${color}"/>
-    <path d="M48 30h22v22c0 14-9 23-22 28z" fill="${dark}"/>
-    <path d="M26 30h44v7H26z" fill="${light}" opacity=".55"/>
-    <path d="M30 14l7 8 11-12 11 12 7-8-3 14H33z" fill="#D4A34A"/>
-    <path d="M48 10l11 12 7-8-3 14H48z" fill="#B98A34"/>
-    <path d="M33 28h30v3.4H33z" fill="#7A5A16"/>
-    <text x="48" y="63" text-anchor="middle" font-family="Fraunces, Georgia, serif" font-weight="700" font-size="27" fill="#FAF7F0">${letter}</text>
+    <path d="M30 13l7 8 11-12 11 12 7-8-3 13H33z" fill="#D4A34A"/>
+    <path d="M48 9l11 12 7-8-3 13H48z" fill="#B98A34"/>
+    <path d="M33 26h30v3.2H33z" fill="#7A5A16"/>
+    <g transform="translate(20.4 28) scale(2.3)">
+      <path d="${SHIELD}" fill="${h.color}"/><path d="${SHIELD_SHADE}" fill="${h.dark}"/>${emblem}
+      <path d="${SHIELD}" fill="none" stroke="#D4A34A" stroke-width="1.1" stroke-linejoin="round"/>
+    </g>
   </svg>`;
 }

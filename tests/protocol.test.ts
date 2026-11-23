@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { advance } from '../src/shared/ai';
-import { DESIRES, MODES } from '../src/shared/constants';
+import { DESIRES, MODES, eraOf } from '../src/shared/constants';
 import { CITIZEN_STRIDE, CityView, SnapEncoder, type Snap } from '../src/shared/protocol';
-import { applyCommand, continueEndless, createGame, dayPhase, forceEvent, headlineEvent, marketShares, netWorth, crownIndex, quarterTick } from '../src/shared/sim';
+import { applyCommand, closeCouncil, continueEndless, createGame, dayPhase, forceEvent, headlineEvent, marketShares, netWorth, crownIndex, quarterTick } from '../src/shared/sim';
 import type { GameState } from '../src/shared/types';
 import { ais, build, clone, freeze, labGame } from './helpers';
+
+// Whole seeded matches are played in here: leave room for a busy machine.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
 
 /** Snapshots cross a socket as JSON; never hand the view live references into the simulation. */
 const wire = (snap: Snap): Snap => clone(snap);
@@ -15,6 +18,8 @@ function expectViewMatches(view: CityView, s: GameState, speed = 1): void {
   expect(view.tick).toBe(s.tick);
   expect(view.quarter).toBe(s.quarter);
   expect(view.ended).toBe(s.phase === 'ended');
+  expect(view.inCouncil).toBe(s.phase === 'council');
+  expect(view.era).toBe(eraOf(s.quarter));
   expect(view.endless).toBe(s.endless);
   expect(view.speed).toBe(speed);
   expect(view.qTick).toBe(quarterTick(s));
@@ -31,6 +36,11 @@ function expectViewMatches(view: CityView, s: GameState, speed = 1): void {
     expect(Math.abs(v.share - shares[i])).toBeLessThanOrEqual(0.0005 + 1e-9);
     expect(v.crown).toBe(crownIndex(s, p));
     expect(v.netWorth).toBe(netWorth(s, p));
+    // The dynasty record: charters, milestone ticks and the counters behind the progress pill.
+    expect(v.charters).toEqual(p.charters);
+    expect(v.milestones).toEqual(p.milestones);
+    expect(v.served).toBe(p.stats.served);
+    expect(v.civicBuilt).toBe(p.stats.civicBuilt);
   });
   // Buildings
   expect(view.buildings).toHaveLength(s.buildings.length);
@@ -72,6 +82,8 @@ function expectViewMatches(view: CityView, s: GameState, speed = 1): void {
   const e = headlineEvent(s);
   expect(view.event).toEqual(e ? { kind: e.kind, announceAt: e.announceAt, startAt: e.startAt, endAt: e.endAt, started: e.started } : null);
   expect(view.gazette).toEqual(s.gazette);
+  expect(view.chronicle).toEqual(s.chronicle);
+  expect(view.council).toEqual(s.council);
   expect(view.result).toEqual(s.result);
 }
 
@@ -154,7 +166,7 @@ describe('Snapshot encoding', () => {
     // A full snapshot in between changes none of this.
     expect(enc.encode(s, true).b).toHaveLength(2);
     expect(applyCommand(s, 1, { c: 'sell', id: c.id }).ok).toBe(true);
-    const d = build(s, 1, 9, 6, 'arcade');
+    const d = build(s, 1, 9, 6, 'bistro');
     const mixed = enc.encode(s, false);
     expect(mixed.br).toEqual([c.id]);
     expect(mixed.b?.map((v) => v.id)).toEqual([d.id]);
@@ -168,15 +180,21 @@ describe('Snapshot encoding', () => {
     const enc = new SnapEncoder();
     expect(enc.encode(s, false).gz).toEqual(s.gazette);
     expect(enc.encode(s, false).gz).toBeUndefined();
-    build(s, 0, 4, 6, 'plaza'); // a civic dedication makes the Gazette
+    build(s, 0, 4, 6, 'park'); // a civic dedication makes the Gazette and the Chronicle
     const news = enc.encode(s, false);
     expect(news.gz).toEqual(s.gazette);
     expect(news.gz?.[news.gz.length - 1].tone).toBe('civic');
-    expect(news.fx).toEqual([{ k: 'build', tile: s.buildings[0].tile, kind: 'plaza', p: 0 }]);
+    expect(news.ch).toEqual(s.chronicle);
+    expect(news.ch?.[news.ch.length - 1]).toMatchObject({ cat: 'build', pill: '+4 Prestige', player: 0, tile: s.buildings[0].tile });
+    expect(news.fx).toEqual([
+      { k: 'dispatch', n: s.chronicleN, tier: 2, cat: 'build' },
+      { k: 'build', tile: s.buildings[0].tile, kind: 'park', p: 0 },
+    ]);
     expect(news.res).toBeUndefined();
     s.fx = [];
     const quiet = enc.encode(s, false);
     expect(quiet.gz).toBeUndefined();
+    expect(quiet.ch).toBeUndefined();
     expect(quiet.fx).toBeUndefined();
     // The slow data rides along every tenth tick only.
     for (let i = 0; i < 20; i++) {
@@ -188,16 +206,19 @@ describe('Snapshot encoding', () => {
       expect(snap.dm !== undefined).toBe(s.tick % 10 === 0);
     }
     // The result is sent once when the match ends, and cleared once if play continues.
-    while (s.phase === 'playing') advance(s);
+    while (s.phase !== 'ended') {
+      if (s.phase === 'council') closeCouncil(s);
+      else advance(s);
+    }
     const final = enc.encode(s, false);
     expect(final.res).toEqual(s.result);
-    expect(final.q).toEqual([2, 1, 0]);
+    expect(final.q).toEqual([4, 1, 0]);
     expect(enc.encode(s, false).res).toBeUndefined();
     expect(enc.encode(s, true).res).toEqual(s.result);
     expect(continueEndless(s)).toBe(true);
     const on = enc.encode(s, false);
     expect(on.res).toBeNull();
-    expect(on.q).toEqual([3, 0, 1]);
+    expect(on.q).toEqual([5, 0, 1]);
     expect(enc.encode(s, false).res).toBeUndefined();
   });
 });
@@ -209,7 +230,7 @@ describe('SnapEncoder → CityView round trip', () => {
     const enc = new SnapEncoder();
     const view = new CityView();
     const delta = enc.encode(s, false);
-    expect(delta.fx?.length).toBe(1);
+    expect(delta.fx?.map((f) => f.k)).toEqual(['dispatch', 'build']); // a founding shop is news
     expect(view.apply(wire(delta))).toEqual([]);
     expect(view.ready).toBe(false);
     expect(view.buildings).toEqual([]);
@@ -355,14 +376,27 @@ describe('SnapEncoder → CityView round trip', () => {
     const view = new CityView();
     view.apply(wire(enc.encode(s, true)));
     let ended = 0;
-    while (s.phase === 'playing') {
-      advance(s);
+    let councils = 0;
+    let eras = 0;
+    while (s.phase !== 'ended') {
+      // An Era Council met on the way is closed at once; the view sees it open and then rise.
+      if (s.phase === 'council') closeCouncil(s);
+      else advance(s);
       const fx = view.apply(wire(enc.encode(s, false)));
       ended += fx.filter((f) => f.k === 'end').length;
+      councils += fx.filter((f) => f.k === 'council').length;
+      eras += fx.filter((f) => f.k === 'quarter').length;
       s.fx = [];
-      if (s.phase === 'playing') expect(view.result).toBeNull();
+      if ((s.phase as GameState['phase']) !== 'ended') expect(view.result).toBeNull();
+      expect(view.inCouncil).toBe(s.phase === 'council');
+      expect(view.council).toEqual(s.council);
     }
     expect(ended).toBe(1);
+    expect(councils).toBe(3);
+    expect(eras).toBe(3);
+    expect(view.quarter).toBe(4);
+    expect(view.players.map((p) => p.charters)).toEqual(s.players.map((p) => p.charters));
+    expect(view.players.every((p) => p.charters.length === 3)).toBe(true);
     expect(view.ended).toBe(true);
     expect(view.result).toEqual(s.result);
     expect(view.result?.rows).toHaveLength(3);
@@ -409,7 +443,7 @@ describe('SnapEncoder → CityView round trip', () => {
     expect(view.buildingAt(first.buildings[0].tile)).toBeUndefined();
     expect(view.building(first.buildings[0].id)).toBeUndefined();
     expect(view.players.map((p) => p.persona)).toEqual(['orson', 'vesper']);
-    expect(view).toMatchObject({ seed: 32, mode: 'blitz', quarterTicks: MODES.blitz.quarterTicks, totalQuarters: 2, tick: 0 });
+    expect(view).toMatchObject({ seed: 32, mode: 'blitz', quarterTicks: MODES.blitz.quarterTicks, totalQuarters: 4, tick: 0 });
     for (const z of view.citizens.values()) {
       expect(z.born).toBe(0);
       expect([z.px, z.py]).toEqual([z.x, z.y]);

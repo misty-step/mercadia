@@ -3,23 +3,30 @@ import type {
   AiPersona,
   Archetype,
   BuildKind,
+  CharterKey,
   CivicKind,
   Desire,
   EventKind,
   MatchMode,
+  MilestoneKey,
   ShopKind,
 } from './types';
 
-export const VERSION = '1.0.0';
+export const VERSION = '2.0.0';
 export const TICK_MS = 100;
 export const TICKS_PER_SEC = 10;
 
+/**
+ * The four Houses. `color` is the primary, `dark` the deep trim, `wash` the translucent
+ * enclave tint, and `crest` the geometric emblem that pairs with the colour everywhere.
+ */
 export const HOUSES = [
-  { key: 'vermilion', name: 'Vermilion Guild', short: 'Vermilion', color: '#D6453A', dark: '#A8322A', light: '#F0A39B' },
-  { key: 'cobalt', name: 'Cobalt Syndicate', short: 'Cobalt', color: '#2667B8', dark: '#1B4C8A', light: '#9DBDE6' },
-  { key: 'marigold', name: 'Marigold House', short: 'Marigold', color: '#D48C1C', dark: '#A56A10', light: '#F0CB8A' },
-  { key: 'emerald', name: 'Emerald Atelier', short: 'Emerald', color: '#248A63', dark: '#17664A', light: '#93CDB5' },
+  { key: 'vermilion', name: 'Vermilion Guild', short: 'Vermilion', color: '#D6453A', dark: '#9F2B23', light: '#F0A39B', wash: 'rgba(214, 69, 58, 0.16)', crest: 'compass', crestName: 'Compass Shield' },
+  { key: 'cobalt', name: 'Cobalt Syndicate', short: 'Cobalt', color: '#2667B8', dark: '#184785', light: '#9DBDE6', wash: 'rgba(38, 103, 184, 0.16)', crest: 'anchor', crestName: 'Harbor Anchor Shield' },
+  { key: 'marigold', name: 'Marigold House', short: 'Marigold', color: '#D48C1C', dark: '#9C620D', light: '#F0CB8A', wash: 'rgba(212, 140, 28, 0.17)', crest: 'sunburst', crestName: 'Sunburst Crown Shield' },
+  { key: 'emerald', name: 'Emerald Atelier', short: 'Emerald', color: '#248A63', dark: '#156145', light: '#93CDB5', wash: 'rgba(36, 138, 99, 0.16)', crest: 'laurel', crestName: 'Laurel Arch Shield' },
 ] as const;
+export type CrestKind = (typeof HOUSES)[number]['crest'];
 
 export const DESIRES: Desire[] = ['coffee', 'dining', 'leisure', 'fashion', 'culture', 'nightlife'];
 export const SHOP_KINDS: ShopKind[] = ['roastery', 'bistro', 'arcade', 'boutique', 'cinema', 'nightmarket'];
@@ -115,6 +122,160 @@ export const isCivic = (k: unknown): k is CivicKind => own(CIVICS, k);
 export const buildCost = (k: BuildKind): number => (isShop(k) ? SHOPS[k].cost : CIVICS[k].cost);
 export const buildName = (k: BuildKind): string => (isShop(k) ? SHOPS[k].name : CIVICS[k].name);
 
+// ───────────────────────────── Eras ─────────────────────────────
+
+export interface EraDef {
+  n: number;
+  roman: string;
+  name: string;
+  short: string; // for the clock chip: "Era I · Founding"
+  blurb: string;
+}
+
+/** The four escalating Eras of a dynasty. A match's `quarter` counter is its era (capped at IV). */
+export const ERAS: EraDef[] = [
+  { n: 1, roman: 'I', name: 'Founding Charter', short: 'Founding', blurb: 'Claim your corners and found a steady trade.' },
+  { n: 2, roman: 'II', name: 'Transit & Trade', short: 'Transit', blurb: 'Commuter and evening waves swell along the tramway.' },
+  { n: 3, roman: 'III', name: 'Grand Boulevard', short: 'Boulevard', blurb: 'Tourists and foodies arrive in force. Prestige races intensify.' },
+  { n: 4, roman: 'IV', name: 'Golden Dynasty', short: 'Golden', blurb: 'Full district prosperity and the final Crown reckoning.' },
+];
+export const ERA_COUNT = ERAS.length;
+/** The era a match clock is in: quarters past the fourth (Endless) stay in the Golden Dynasty. */
+export const eraOf = (quarter: number): number => (quarter < 1 ? 1 : quarter > ERA_COUNT ? ERA_COUNT : Math.floor(quarter));
+export const eraDef = (quarter: number): EraDef => ERAS[eraOf(quarter) - 1];
+/** "Era II" */
+export const eraLabel = (quarter: number): string => `Era ${eraDef(quarter).roman}`;
+/** "Era II: Transit & Trade" */
+export const eraTitle = (quarter: number): string => `${eraLabel(quarter)}: ${eraDef(quarter).name}`;
+
+/** The era in which each build tool unlocks. */
+export const ERA_UNLOCK: Record<BuildKind, number> = {
+  roastery: 1, bistro: 1, park: 1,
+  arcade: 2, nightmarket: 2, tramstop: 2,
+  boutique: 3, cinema: 3, plaza: 3,
+};
+/** Level 3 grand architecture unlocks with the Grand Boulevard. */
+export const LEVEL3_ERA = 3;
+export const isUnlocked = (k: BuildKind, quarter: number): boolean => eraOf(quarter) >= ERA_UNLOCK[k];
+/** Build tools that unlock exactly when this era begins. */
+export const unlocksOf = (era: number): BuildKind[] => BUILD_KINDS.filter((k) => ERA_UNLOCK[k] === era);
+/** "Arcade unlocks in Era II" — the notice shown instead of failing silently. */
+export const lockNotice = (k: BuildKind): string => `${buildName(k)} unlocks in Era ${ERAS[ERA_UNLOCK[k] - 1].roman}: ${ERAS[ERA_UNLOCK[k] - 1].name}`;
+export const LEVEL3_NOTICE = `Level 3 unlocks in Era ${ERAS[LEVEL3_ERA - 1].roman}: ${ERAS[LEVEL3_ERA - 1].name}`;
+
+/** A trade nobody can serve yet barely tempts the street: its desire weight before its era. */
+export const LOCKED_DESIRE = 0.25;
+/** The district grows livelier era by era: multiplier on the street-population target. */
+export const ERA_POP = [0.84, 0.93, 1.0, 1.06];
+
+// ───────────────────────────── Dynasty Charters ─────────────────────────────
+
+export interface CharterDef {
+  key: CharterKey;
+  name: string;
+  doctrine: string; // two or three words: what kind of House adopts it
+  blurb: string;
+  pill: string; // the exact mechanical effect, shown on the Chronicle and the Treasury badge
+  quality: number; // × shop quality
+  upgrade: number; // × upgrade cost
+  civicCost: number; // × civic build cost
+  civicPrestige: number; // × prestige earned through civic use
+  adoptPrestige: number; // prestige granted on adoption
+  interest: number; // × loan interest
+  wages: number; // × wages
+  frontage: number; // × quality on canal-front lots and inside a plaza aura
+  tourist: number; // × pull on tourists
+  promoCost: number; // × Promo Blitz cost
+  promoCooldown: number; // × Promo Blitz cooldown
+  supplies: number; // × supply cost
+  autoPremium: boolean; // false: Auto-Restock carries no convenience premium
+}
+
+const charter = (c: Pick<CharterDef, 'key' | 'name' | 'doctrine' | 'blurb' | 'pill'> & Partial<CharterDef>): CharterDef => ({
+  quality: 1, upgrade: 1, civicCost: 1, civicPrestige: 1, adoptPrestige: 0, interest: 1, wages: 1, frontage: 1, tourist: 1,
+  promoCost: 1, promoCooldown: 1, supplies: 1, autoPremium: true, ...c,
+});
+
+export const CHARTERS: Record<CharterKey, CharterDef> = {
+  artisanry: charter({
+    key: 'artisanry', name: 'Guild Artisanry', doctrine: 'Craft quality',
+    blurb: 'Master artisans raise every shop: finer goods, cheaper refits.',
+    pill: 'Quality +8% · Upgrades −20%', quality: 1.08, upgrade: 0.8,
+  }),
+  transit: charter({
+    key: 'transit', name: 'Transit Patronage', doctrine: 'Civic patronage',
+    blurb: 'The House underwrites parks, stops and plazas and is honoured for it.',
+    pill: 'Civic −25% · Civic prestige +50%', civicCost: 0.75, civicPrestige: 1.5, adoptPrestige: 3,
+  }),
+  credit: charter({
+    key: 'credit', name: 'Merchant Credit', doctrine: 'Financial discipline',
+    blurb: 'Bankers extend friendly terms and the payroll runs lean.',
+    pill: 'Interest −50% · Wages −15%', interest: 0.5, wages: 0.85,
+  }),
+  canal: charter({
+    key: 'canal', name: 'Canal Showcase', doctrine: 'Canal prestige',
+    blurb: 'Waterfront and plaza frontage become the talk of every tour guide.',
+    pill: 'Canal & plaza +10% · Tourists +15%', frontage: 1.1, tourist: 1.15,
+  }),
+  heralds: charter({
+    key: 'heralds', name: 'Market Heralds', doctrine: 'Street promotion',
+    blurb: 'Criers and flyers on retainer: Promo Blitzes come cheaper and sooner.',
+    pill: 'Promo −25% · Cooldown −25%', promoCost: 0.75, promoCooldown: 0.75,
+  }),
+  provisioners: charter({
+    key: 'provisioners', name: 'Harbor Provisioners', doctrine: 'Supply chain',
+    blurb: 'A standing contract with the barges keeps every stockroom cheap and full.',
+    pill: 'Supplies −15% · Free Auto-Restock', supplies: 0.85, autoPremium: false,
+  }),
+};
+export const CHARTER_KEYS = Object.keys(CHARTERS) as CharterKey[];
+export const isCharter = (k: unknown): k is CharterKey => own(CHARTERS, k);
+/** Charters offered to each House at every Council. */
+export const CHARTER_OFFERS = 3;
+/** Councils convene at the close of these eras. */
+export const COUNCIL_ERAS = [1, 2, 3];
+/** Multiplayer Council countdown, in 100 ms beats (18 s). Solo waits for the player. */
+export const COUNCIL_BEATS = 180;
+
+/** A persona's taste for each charter (higher is preferred). */
+export const CHARTER_TASTE: Record<AiPersona, Record<CharterKey, number>> = {
+  vesper: { heralds: 3, provisioners: 2.6, credit: 2.2, artisanry: 1.2, canal: 0.8, transit: 1 },
+  aurelia: { artisanry: 3, canal: 2.7, provisioners: 1.6, credit: 1.5, transit: 1.2, heralds: 0.6 },
+  orson: { transit: 3, credit: 2.4, provisioners: 2, artisanry: 1.4, heralds: 1.1, canal: 0.9 },
+};
+/** What the coming era rewards: Transit & Trade, Grand Boulevard, Golden Dynasty. */
+export const CHARTER_ERA_FIT: Record<number, Partial<Record<CharterKey, number>>> = {
+  2: { transit: 1.25, heralds: 1.15, provisioners: 1.1 },
+  3: { artisanry: 1.25, canal: 1.25 },
+  4: { credit: 1.15, canal: 1.1, artisanry: 1.1 },
+};
+
+// ───────────────────────────── Dynasty Milestones ─────────────────────────────
+
+export interface MilestoneDef {
+  key: MilestoneKey;
+  name: string;
+  goal: string;
+  cash: number; // dividend
+  prestige: number;
+  pill: string;
+}
+
+export const MILESTONE_SERVED = 25;
+export const MILESTONE_PROPERTIES = 3;
+export const MILESTONE_CIVICS = 2;
+export const MILESTONE_PRESTIGE = 18;
+export const MILESTONE_WORTH = 1200;
+export const MILESTONE_SHARE = 0.4;
+export const MILESTONE_SOVEREIGN_ERA = 3;
+
+export const MILESTONES: MilestoneDef[] = [
+  { key: 'merchant', name: 'Charter Merchant', goal: 'Serve 25 citizens', cash: 80, prestige: 0, pill: '+§80' },
+  { key: 'baron', name: 'Block Baron', goal: '3 properties or 2 adjacent lots', cash: 0, prestige: 4, pill: '+4 Prestige' },
+  { key: 'benefactor', name: 'Civic Benefactor', goal: '2 civic projects or 18 Civic Prestige', cash: 120, prestige: 4, pill: '+§120 · +4 Prestige' },
+  { key: 'sovereign', name: 'District Sovereign', goal: '§1,200 Net Worth or 40% share in Era III–IV', cash: 0, prestige: 6, pill: '+6 Prestige' },
+];
+
 export const STANCES = [
   { key: 'budget', name: 'Budget', mult: 0.75, cachet: 0.92, label: '-25%' },
   { key: 'fair', name: 'Fair', mult: 1.0, cachet: 1.0, label: '0%' },
@@ -141,28 +302,46 @@ export const LOAN_STEP = 400;
 export const LOAN_MAX = 1200;
 export const LOAN_RATE = 0.012; // per payroll
 export const PAYROLL_TICKS = 100;
-/** Interest a standing loan costs over one quarter, as a fraction (0.18 = 18%). */
+/** Interest a standing loan costs over one era, as a fraction (0.18 = 18%). */
 export const loanRatePerQuarter = (quarterTicks: number): number => LOAN_RATE * (quarterTicks / PAYROLL_TICKS);
-/** "18%/qtr" — the exact rate shown on the Borrow button. */
+/** "18%/era" — the exact per-era rate shown on the Borrow button. */
 export const loanRateLabel = (quarterTicks: number): string =>
-  `${(Math.round(loanRatePerQuarter(quarterTicks) * 1000) / 10).toString()}%/qtr`;
+  `${(Math.round(loanRatePerQuarter(quarterTicks) * 1000) / 10).toString()}%/era`;
 export const AUTO_RESTOCK_PREMIUM = 1.15;
 export const AUTO_RESTOCK_AT = 0.2;
 
 export const START_CASH = 900;
 
-export const MODES: Record<MatchMode, { name: string; quarters: number; quarterTicks: number; slots: number[]; span: number }> = {
-  blitz: { name: 'Blitz', quarters: 2, quarterTicks: 600, slots: [0.12, 0.66], span: 0.22 },
-  standard: { name: 'Standard', quarters: 4, quarterTicks: 1500, slots: [0.1, 0.42, 0.74], span: 0.18 },
-  endless: { name: 'Endless Sandbox', quarters: 0, quarterTicks: 1500, slots: [0.1, 0.42, 0.74], span: 0.18 },
+/**
+ * Every mode plays the full Era I → IV arc. `quarters` is the number of eras (0 = endless) and
+ * `quarterTicks` the length of one era: 150 s in Standard, 66 s in Blitz.
+ */
+export const MODES: Record<MatchMode, { name: string; quarters: number; quarterTicks: number; slots: number[]; span: number; blurb: string }> = {
+  blitz: { name: 'Blitz', quarters: 4, quarterTicks: 660, slots: [0.14, 0.64], span: 0.22, blurb: '4 brisk eras · about 5 minutes' },
+  standard: { name: 'Standard', quarters: 4, quarterTicks: 1500, slots: [0.1, 0.42, 0.74], span: 0.18, blurb: '4 deliberate eras · about 10 minutes' },
+  endless: { name: 'Endless', quarters: 0, quarterTicks: 1500, slots: [0.1, 0.42, 0.74], span: 0.18, blurb: 'Play on past Era IV' },
 };
+/** Solo speed controls (Pause is separate) and the multiplayer host's pace. */
+export const SOLO_SPEEDS = [0.5, 1, 2, 3];
+export const HOST_SPEEDS = [1, 1.5, 2];
+/** The one-line objective shown when a match begins. */
+export const OBJECTIVE = 'Lead your House across 4 Eras — highest Crown Index wins';
 export const FORECAST_LEAD = 0.05; // of a quarter
 export const TREND_PER_QUARTER = 4; // market-share samples kept per quarter (one per daypart)
 export const TREND_MAX = 96;
 /** Per-tick decay of a shop's lost-customer counters (half-life about 45 s). */
 export const LOST_DECAY = 0.9985;
-/** Ticks between rivalry headlines, so the Gazette is punchy rather than noisy. */
+/** Ticks between rivalry headlines, so the Chronicle is punchy rather than noisy. */
 export const RIVALRY_QUIET = 150;
+/** Dispatches the Chronicle keeps (the HUD shows the latest three or four). */
+export const CHRONICLE_KEEP = 14;
+/** A lead change is news once the new leader is this many Crown points clear… */
+export const LEAD_MARGIN = 3;
+/** …and at most once in this many ticks, checked every LEAD_CHECK ticks. */
+export const LEAD_QUIET = 120;
+export const LEAD_CHECK = 10;
+/** No lead-change dispatch before this tick (or a quarter of the era, if shorter). */
+export const LEAD_WARMUP = 300;
 
 export const DAYPART_NAMES = ['Morning', 'Noon', 'Golden Hour', 'Twilight'] as const;
 
@@ -228,6 +407,7 @@ export interface EventDef {
   forecast: string;
   headline: string;
   effect: string;
+  pill: string; // the Chronicle's impact tag
   demand: Partial<Record<Desire, number>>;
 }
 
@@ -237,6 +417,7 @@ export const EVENTS: Record<EventKind, EventDef> = {
     forecast: 'Barometer falling over the harbor — a cloudburst is minutes away.',
     headline: 'Sudden Cloudburst drenches the district. Crowds duck into cinemas and roasteries.',
     effect: 'Cinema & Roastery +45% · Nightmarket −35%',
+    pill: 'Cinema +45%',
     demand: { culture: 1.45, coffee: 1.45, nightlife: 0.65 },
   },
   cruise: {
@@ -244,6 +425,7 @@ export const EVENTS: Record<EventKind, EventDef> = {
     forecast: 'A white liner is sighted off the pier. Tourists are coming ashore.',
     headline: 'Harbor Cruise Arrival: wealthy tourists pour off the gangway.',
     effect: 'Tourist wave · Boutique & Bistro +40%',
+    pill: 'Boutique +40%',
     demand: { fashion: 1.4, dining: 1.4 },
   },
   freeride: {
@@ -251,6 +433,7 @@ export const EVENTS: Record<EventKind, EventDef> = {
     forecast: 'The Tramway Board declares a Free-Ride Day. Expect packed cars.',
     headline: 'Free-Ride Tram Day: every stop receives double the commuters.',
     effect: 'Commuter drops ×2 at every Tram Stop',
+    pill: 'Commuters ×2',
     demand: {},
   },
   critic: {
@@ -258,6 +441,7 @@ export const EVENTS: Record<EventKind, EventDef> = {
     forecast: 'A certain critic has been seen sharpening a pencil. Kitchens, look alive.',
     headline: 'Food Critic Visit: the best-rated Bistro or Roastery takes the Golden Fork.',
     effect: 'Top-rated Bistro/Roastery wins §250 + prestige',
+    pill: 'Golden Fork §250',
     demand: { dining: 1.15, coffee: 1.1 },
   },
   lantern: {
@@ -265,6 +449,7 @@ export const EVENTS: Record<EventKind, EventDef> = {
     forecast: 'Paper lanterns are being strung along the lanes for tonight.',
     headline: 'Street Lantern Festival: the lanes glow and the night trade roars.',
     effect: 'Nightmarket & Arcade +50%',
+    pill: 'Nightmarket +50%',
     demand: { nightlife: 1.5, leisure: 1.5 },
   },
   renthike: {
@@ -272,6 +457,7 @@ export const EVENTS: Record<EventKind, EventDef> = {
     forecast: 'Landlords are meeting behind closed shutters. Rents may rise.',
     headline: 'Commercial Rent Hike: upkeep is up by a quarter across the district.',
     effect: 'Rent +25% while it lasts',
+    pill: 'Rent +25%',
     demand: {},
   },
   supplycrunch: {
@@ -279,6 +465,7 @@ export const EVENTS: Record<EventKind, EventDef> = {
     forecast: 'Barges are held at the lock. Stock up before wholesale prices jump.',
     headline: 'Supply Crunch: wholesale prices leap. Thin margins get thinner.',
     effect: 'Restock cost +60%',
+    pill: 'Restock +60%',
     demand: {},
   },
 };

@@ -3,9 +3,9 @@
 //   npx tsx scripts/balance.ts 12 pvp        2 casual humans + 2 AI in Blitz (opening-curve probe)
 //   npx tsx scripts/balance.ts 12 all        Standard, Blitz and the Blitz 2H+2AI probe in one report
 import { advance } from '../src/shared/ai';
-import { CIVICS, DESIRES, HOUSES, SHOPS, SHOP_KINDS, isShop } from '../src/shared/constants';
+import { CHARTERS, CIVICS, DESIRES, HOUSES, LEVEL3_ERA, SHOPS, SHOP_KINDS, isShop, isUnlocked } from '../src/shared/constants';
 import { CITY, chebyshev } from '../src/shared/map';
-import { applyCommand, buildingAt, createGame, crownIndex, ledgerNet, marketShares, netWorth, priceOf, rentOf, trafficPips, upgradeCost, wageOf } from '../src/shared/sim';
+import { applyCommand, buildingAt, closeCouncil, createGame, crownIndex, eraNow, starsOf, ledgerNet, marketShares, netWorth, priceOf, rentOf, trafficPips, upgradeCost, wageOf } from '../src/shared/sim';
 import type { AiPersona, GameState, MatchMode, PlayerSetup, ShopKind } from '../src/shared/types';
 
 const seeds = Number(process.argv[2] ?? 12);
@@ -20,13 +20,26 @@ const ORDERS: AiPersona[][] = [
 const PERSONAS: AiPersona[] = ['vesper', 'aurelia', 'orson'];
 const avg = (v: number[]): number => v.reduce((a, b) => a + b, 0) / Math.max(1, v.length);
 
+/**
+ * One tick of a headless match. An Era Council costs no ticks here: AI Houses have already
+ * sealed their charter, an undecided stand-in human takes the steward's pick, and play resumes.
+ */
+function step(s: GameState): void {
+  if (s.phase === 'council') closeCouncil(s);
+  advance(s);
+}
+
 // ───────────────────────────── AI-only matches ─────────────────────────────
 
 function aiOnly(mode: MatchMode): void {
-  console.log(`\n== ${mode.toUpperCase()} · 4 AI tycoons · ${seeds} seeds ==`);
+  console.log(`\n== ${mode.toUpperCase()} · 4 AI Houses · ${seeds} seeds ==`);
   const crownBy: Record<string, number[]> = { vesper: [], aurelia: [], orson: [] };
   const wins: Record<string, number> = { vesper: 0, aurelia: 0, orson: 0 };
   const seats: Record<string, number> = { vesper: 0, aurelia: 0, orson: 0 };
+  const charterPicks: Record<string, Record<string, number>> = { vesper: {}, aurelia: {}, orson: {} };
+  const stars: Record<string, number[]> = { vesper: [], aurelia: [], orson: [] };
+  const firstMoves: number[] = [];
+  const parts: Record<string, number[][]> = { vesper: [], aurelia: [], orson: [] };
   for (let seed = 1; seed <= seeds; seed++) {
     const personas = ORDERS[(seed - 1) % ORDERS.length];
     const s = createGame({ seed: seed * 101, mode, players: personas.map((persona, i) => ({ name: `${persona}${i}`, house: i, kind: 'ai' as const, persona })) });
@@ -36,14 +49,14 @@ function aiOnly(mode: MatchMode): void {
       let turned = 0;
       let fixed = 0;
       for (let t = 0; t < s.quarterTicks; t++) {
-        advance(s);
+        step(s);
         pop += s.citizens.length;
         for (const f of s.fx) if (f.k === 'turn' || f.k === 'walkout') turned++;
         s.fx = [];
         if (s.tick % 100 === 0) for (const b of s.buildings) fixed += wageOf(b) + rentOf(b);
       }
       if (!verbose) continue;
-      console.log(`\n── seed ${seed} after Q${q}: pop avg ${(pop / s.tick).toFixed(0)}, lots built ${s.buildings.length}/49, turned ${turned}, fixed/quarter ${fixed.toFixed(0)}`);
+      console.log(`\n── seed ${seed} after Era ${q}: pop avg ${(pop / s.tick).toFixed(0)}, lots built ${s.buildings.length}/49, turned ${turned}, fixed/quarter ${fixed.toFixed(0)}`);
       const shares = marketShares(s);
       for (const p of s.players) {
         const mine = s.buildings.filter((b) => b.owner === p.id);
@@ -72,12 +85,27 @@ function aiOnly(mode: MatchMode): void {
       seats[p.persona as string]++;
     }
     const shops = s.buildings.filter((b) => isShop(b.kind)).length;
-    console.log(`seed ${String(seed).padStart(2)}: ${row}  | winner ${best.persona} | buildings ${s.buildings.length} (shops ${shops}) pop ${(pop / s.tick).toFixed(0)} served ${s.players.reduce((a, p) => a + p.stats.served, 0)}`);
+    for (const p of s.players) {
+      for (const c of p.charters) charterPicks[p.persona as string][c] = (charterPicks[p.persona as string][c] ?? 0) + 1;
+      stars[p.persona as string].push(starsOf(p));
+    }
+    firstMoves.push(Math.min(...s.buildings.map((b) => b.builtTick)));
+    {
+      const sh = marketShares(s);
+      for (const p of s.players) parts[p.persona as string].push([netWorth(s, p) / 10, sh[p.id] * 300, p.prestige * 4]);
+    }
+    console.log(`seed ${String(seed).padStart(2)}: ${row}  | winner ${best.persona} | buildings ${s.buildings.length} (shops ${shops}) pop ${(pop / s.tick).toFixed(0)} served ${s.players.reduce((a, p) => a + p.stats.served, 0)} stars ${s.players.map((p) => starsOf(p)).join('')}`);
   }
   for (const k of PERSONAS) {
     const v = crownBy[k];
     console.log(`${k.padEnd(8)} avg crown ${avg(v).toFixed(0).padStart(5)}  min ${Math.min(...v)} max ${Math.max(...v)}  wins ${wins[k]}/${seeds}  (seats ${seats[k]}, ${((wins[k] / Math.max(1, seats[k])) * 100).toFixed(0)}% per seat; an even table is 25%)`);
   }
+  for (const k of PERSONAS) {
+    const picks = Object.entries(charterPicks[k]).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${CHARTERS[c as keyof typeof CHARTERS].name} ×${n}`).join(', ');
+    console.log(`${k.padEnd(8)} crown parts: worth ${avg(parts[k].map((r) => r[0])).toFixed(0)} + share ${avg(parts[k].map((r) => r[1])).toFixed(0)} + prestige ${avg(parts[k].map((r) => r[2])).toFixed(0)}`);
+    console.log(`${k.padEnd(8)} milestones ${avg(stars[k]).toFixed(1)}/4 · charters: ${picks || 'none'}`);
+  }
+  console.log(`earliest AI build across seeds: tick ${Math.min(...firstMoves)} (${(Math.min(...firstMoves) / 10).toFixed(0)} s) — no tick-1 openings`);
   const top = Math.max(...PERSONAS.map((k) => wins[k]));
   const means = PERSONAS.map((k) => avg(crownBy[k]));
   console.log(`most wins by one persona: ${top}/${seeds} · average-crown spread: ${(((Math.max(...means) - Math.min(...means)) / Math.max(...means)) * 100).toFixed(0)}%`);
@@ -111,10 +139,11 @@ function casualHuman(s: GameState, id: number, offset: number): void {
     if (best >= 0 && applyCommand(s, id, { c: 'build', tile: best, kind: 'park' }).ok) return;
   }
   // Upgrade the shop that turns the most people away.
-  const busy = shops.filter((b) => b.level < 3 && b.turned >= 4 && upgradeCost(b) <= p.cash - 60).sort((a, b) => b.turned - a.turned)[0];
+  const cap = eraNow(s) >= LEVEL3_ERA ? 3 : 2;
+  const busy = shops.filter((b) => b.level < cap && b.turned >= 4 && upgradeCost(b, p) <= p.cash - 60).sort((a, b) => b.turned - a.turned)[0];
   if (busy && applyCommand(s, id, { c: 'upgrade', id: busy.id }).ok) return;
   // Otherwise open the trade the dock says is most wanted, on the busiest free lot.
-  const want = SHOP_KINDS.filter((k) => SHOPS[k].cost <= p.cash - 40)
+  const want = SHOP_KINDS.filter((k) => isUnlocked(k, s.quarter) && SHOPS[k].cost <= p.cash - 40)
     .map((k) => ({ k, score: s.unmet[DESIRES.indexOf(SHOPS[k].desire)] + 2 - 3 * shops.filter((b) => b.kind === k).length }))
     .sort((a, b) => b.score - a.score)[0];
   if (!want || !free.length) return;
@@ -163,17 +192,18 @@ function keenHuman(s: GameState, id: number, offset: number): void {
     const t = pick((x) => near(x, 1));
     if (t >= 0 && applyCommand(s, id, { c: 'build', tile: t, kind: 'park' }).ok) return;
   }
-  if (shops.length >= 3 && !mine.some((b) => b.kind === 'tramstop') && p.cash >= CIVICS.tramstop.cost) {
+  if (isUnlocked('tramstop', s.quarter) && shops.length >= 3 && !mine.some((b) => b.kind === 'tramstop') && p.cash >= CIVICS.tramstop.cost) {
     const t = pick((x) => near(x, 2), (x) => CITY.avenueAdj[x] >= 0);
     if (t >= 0 && applyCommand(s, id, { c: 'build', tile: t, kind: 'tramstop' }).ok) return;
   }
-  if (shops.length >= 3 && !mine.some((b) => b.kind === 'plaza') && p.cash >= CIVICS.plaza.cost + 40) {
+  if (isUnlocked('plaza', s.quarter) && shops.length >= 3 && !mine.some((b) => b.kind === 'plaza') && p.cash >= CIVICS.plaza.cost + 40) {
     const t = pick((x) => near(x, 2));
     if (t >= 0 && applyCommand(s, id, { c: 'build', tile: t, kind: 'plaza' }).ok) return;
   }
-  const busy = shops.filter((b) => b.level < 3 && b.turned >= 3 && upgradeCost(b) <= p.cash - 40).sort((a, b) => b.turned - a.turned)[0];
+  const cap = eraNow(s) >= LEVEL3_ERA ? 3 : 2;
+  const busy = shops.filter((b) => b.level < cap && b.turned >= 3 && upgradeCost(b, p) <= p.cash - 40).sort((a, b) => b.turned - a.turned)[0];
   if (busy && applyCommand(s, id, { c: 'upgrade', id: busy.id }).ok) return;
-  const want = SHOP_KINDS.filter((k) => SHOPS[k].cost <= p.cash - 20)
+  const want = SHOP_KINDS.filter((k) => isUnlocked(k, s.quarter) && SHOPS[k].cost <= p.cash - 20)
     .map((k) => ({ k, score: s.unmet[DESIRES.indexOf(SHOPS[k].desire)] + SHOPS[k].price / 8 - 4 * shops.filter((b) => b.kind === k).length }))
     .sort((a, b) => b.score - a.score)[0];
   if (want && free.length && !lastQuarter) {
@@ -186,11 +216,11 @@ function keenHuman(s: GameState, id: number, offset: number): void {
 
 function blitzPvp(human: (s: GameState, id: number, offset: number) => void, label: string): void {
   console.log(`\n== BLITZ · 2 ${label} humans + 2 AI · ${seeds} seeds (opening-curve probe) ==`);
-  let leadQ1 = 0;
-  let contendQ1 = 0;
+  let leadE1 = 0;
+  let contendE1 = 0;
   let humanWins = 0;
   let podium = 0;
-  const ratioQ1: number[] = [];
+  const ratioE1: number[] = [];
   for (let seed = 1; seed <= seeds; seed++) {
     const ai = [PERSONAS[seed % 3], PERSONAS[(seed + 1) % 3]];
     const players: PlayerSetup[] = [
@@ -201,7 +231,8 @@ function blitzPvp(human: (s: GameState, id: number, offset: number) => void, lab
     ];
     const s = createGame({ seed: seed * 101, mode: 'blitz', players });
     let q1: number[] = [];
-    while (s.phase === 'playing') {
+    while (s.phase !== 'ended') {
+      if (s.phase === 'council') closeCouncil(s);
       human(s, 0, 0);
       human(s, 1, 25);
       advance(s);
@@ -209,22 +240,22 @@ function blitzPvp(human: (s: GameState, id: number, offset: number) => void, lab
       if (s.tick === s.quarterTicks) q1 = s.players.map((p) => crownIndex(s, p));
     }
     const fin = s.players.map((p) => crownIndex(s, p));
-    const bestHumanQ1 = Math.max(q1[0], q1[1]);
-    const bestAiQ1 = Math.max(q1[2], q1[3]);
-    const lead = bestHumanQ1 >= bestAiQ1;
-    const contend = bestHumanQ1 >= bestAiQ1 * 0.85;
-    if (lead) leadQ1++;
-    if (contend) contendQ1++;
-    ratioQ1.push(bestHumanQ1 / Math.max(1, bestAiQ1));
+    const bestHumanE1 = Math.max(q1[0], q1[1]);
+    const bestAiE1 = Math.max(q1[2], q1[3]);
+    const lead = bestHumanE1 >= bestAiE1;
+    const contend = bestHumanE1 >= bestAiE1 * 0.85;
+    if (lead) leadE1++;
+    if (contend) contendE1++;
+    ratioE1.push(bestHumanE1 / Math.max(1, bestAiE1));
     const order = fin.map((c, i) => ({ c, i })).sort((a, b) => b.c - a.c);
     if (order[0].i < 2) humanWins++;
     if (order[0].i < 2 || order[1].i < 2) podium++;
     console.log(
-      `seed ${String(seed).padStart(2)}: Q1 bell  humans ${q1[0]}/${q1[1]}  ${ai[0]} ${q1[2]}  ${ai[1]} ${q1[3]}  ${lead ? 'HUMAN LEADS' : contend ? 'in contention' : 'trailing'}  | final  humans ${fin[0]}/${fin[1]}  ${ai[0]} ${fin[2]}  ${ai[1]} ${fin[3]}`,
+      `seed ${String(seed).padStart(2)}: Era I close  humans ${q1[0]}/${q1[1]}  ${ai[0]} ${q1[2]}  ${ai[1]} ${q1[3]}  ${lead ? 'HUMAN LEADS' : contend ? 'in contention' : 'trailing'}  | final  humans ${fin[0]}/${fin[1]}  ${ai[0]} ${fin[2]}  ${ai[1]} ${fin[3]}`,
     );
   }
-  console.log(`Q1 bell: a human leads in ${leadQ1}/${seeds} seeds · best human within 15% of the leader (or ahead) in ${contendQ1}/${seeds}`);
-  console.log(`Q1 bell: best human ÷ best AI Crown, mean ${avg(ratioQ1).toFixed(2)} (min ${Math.min(...ratioQ1).toFixed(2)}, max ${Math.max(...ratioQ1).toFixed(2)})`);
+  console.log(`Era I close: a human leads in ${leadE1}/${seeds} seeds · best human within 15% of the leader (or ahead) in ${contendE1}/${seeds}`);
+  console.log(`Era I close: best human ÷ best AI Crown, mean ${avg(ratioE1).toFixed(2)} (min ${Math.min(...ratioE1).toFixed(2)}, max ${Math.max(...ratioE1).toFixed(2)})`);
   console.log(`final bell: a human wins ${humanWins}/${seeds} · a human finishes top two in ${podium}/${seeds}`);
 }
 

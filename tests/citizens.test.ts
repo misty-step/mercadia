@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { advance } from '../src/shared/ai';
 import {
   ARCHETYPES,
@@ -28,6 +28,7 @@ import {
   chooseShop,
   citizenName,
   citizenTile,
+  closeCouncil,
   createGame,
   decide,
   desireWeights,
@@ -44,6 +45,9 @@ import {
 } from '../src/shared/sim';
 import { CS, type Archetype, type GameState } from '../src/shared/types';
 import { ais, build, dist2, freeze, fxOf, humans, jam, labGame, putCitizen, run, sendTo } from './helpers';
+
+// Whole seeded matches are played in here: leave room for a busy machine.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
 
 const STATES: number[] = Object.values(CS);
 const coffee = DESIRES.indexOf('coffee');
@@ -181,6 +185,7 @@ describe('Citizens on a living street (4 AI tycoons, 3000 ticks)', () => {
     const s = createGame({ seed: 3, mode: 'standard', players: ais(['vesper', 'aurelia', 'orson', 'vesper']) });
     const last = new Map<number, { x: number; y: number; state: number }>();
     for (let i = 0; i < 3000; i++) {
+      if (s.phase === 'council') closeCouncil(s); // the Era I Council costs the street no ticks
       advance(s);
       const stride = eventActive(s, 'cloudburst') ? 1.5 : 1.25; // personal pace varies a little; walkers hurry in the rain
       stat.popPeak = Math.max(stat.popPeak, s.citizens.length);
@@ -224,10 +229,11 @@ describe('Citizens on a living street (4 AI tycoons, 3000 ticks)', () => {
       s.fx = [];
     }
     stat.served = s.players.reduce((a, p) => a + p.stats.served, 0);
-  });
+  }, 60000);
 
-  it('keeps the population between 60 and 120 once the morning has filled the streets', () => {
-    expect(stat.popMin).toBeGreaterThanOrEqual(60);
+  it('keeps the population between 45 and 120 once the Founding morning has filled the streets', () => {
+    // Era I runs quieter than later eras (ERA_POP), so the floor sits below the old 60.
+    expect(stat.popMin).toBeGreaterThanOrEqual(45);
     expect(stat.popMax).toBeLessThanOrEqual(120);
     expect(stat.popPeak).toBeLessThanOrEqual(POP_MAX);
     expect(stat.popMax).toBeGreaterThan(stat.popMin);
@@ -261,7 +267,7 @@ describe('Competitive shop scoring', () => {
   const B = [9, 6] as const;
   const MIDDLE = idx(6, 7); // the footbridge: three steps from either door
   const pair = (): { s: GameState; a: ReturnType<typeof build>; b: ReturnType<typeof build> } => {
-    const s = freeze(labGame({ cash: 20000 }));
+    const s = freeze(labGame({ era: 3, cash: 20000 }));
     const a = build(s, 0, A[0], A[1], 'roastery');
     const b = build(s, 1, B[0], B[1], 'roastery');
     return { s, a, b };
@@ -448,7 +454,7 @@ describe('Competitive shop scoring', () => {
 
 describe('Choosing a shop', () => {
   const setup = (): { s: GameState; a: ReturnType<typeof build>; b: ReturnType<typeof build> } => {
-    const s = freeze(labGame({ cash: 20000 }));
+    const s = freeze(labGame({ era: 3, cash: 20000 }));
     return { s, a: build(s, 0, 3, 6, 'roastery'), b: build(s, 1, 9, 6, 'roastery') };
   };
   const MIDDLE = idx(6, 7);

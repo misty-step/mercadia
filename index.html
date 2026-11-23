@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
     <meta name="theme-color" content="#EFE9DC" />
-    <meta name="description" content="MERCADIA — rival merchants reshape a sunlit canal-and-tramway city block by block. A real-time isometric city tycoon for 1–4 players." />
+    <meta name="description" content="MERCADIA — rival merchant dynasties reshape a sunlit canal-and-tramway city era by era. A deliberate four-era isometric dynasty city tycoon for 1–4 players." />
     <title>MERCADIA</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -21,7 +21,9 @@
     <div id="hud" class="hud" hidden>
       <div class="topbar">
         <header id="clock" class="panel clock"></header>
-        <div id="ticker" class="panel ticker" role="status" aria-live="polite"></div>
+        <section id="chronicle" class="panel chronicle" aria-label="The Mercadia Chronicle" role="status" aria-live="polite"></section>
+        <i class="brk" aria-hidden="true"></i>
+        <aside id="guide" class="panel guide" aria-label="Founding Guide" hidden></aside>
       </div>
       <div class="rightcol">
         <aside id="board" class="panel board" aria-label="Rival leaderboard"></aside>
@@ -41,6 +43,7 @@
 
     <section id="title" class="panel title" hidden></section>
     <section id="lobby" class="panel title lobby" hidden></section>
+    <div id="council" class="scrim councilscrim" hidden></div>
     <div id="victory" class="scrim" hidden></div>
     <div id="toasts" class="toasts" aria-live="polite"></div>
 

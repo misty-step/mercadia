@@ -5,12 +5,14 @@
   --ink: #1e1a16;
   --ink-2: rgba(30, 26, 22, 0.68);
   --ink-3: rgba(30, 26, 22, 0.44);
-  --linen: rgba(250, 247, 240, 0.93);
+  --linen: rgba(250, 247, 240, 0.94);
   --linen-solid: #faf7f0;
-  --hair: rgba(30, 26, 22, 0.14);
+  --hair: rgba(30, 26, 22, 0.16);
   --hair-2: rgba(30, 26, 22, 0.08);
   --brass: #d4a34a;
   --brass-ink: #7a5a16;
+  --brass-deep: #9a7325;
+  --canal-ink: #1f5f6c;
   --terracotta: #c86443;
   --sage: #84a98c;
   --canal: #3e8e9e;
@@ -265,15 +267,15 @@ input:focus-visible {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 44px;
-  padding: 0 8px 0 12px;
+  gap: 9px;
+  height: 40px;
+  padding: 0 5px 0 11px;
 }
 .wordmark {
   font-family: var(--display);
   font-weight: 700;
-  font-size: 17px;
-  letter-spacing: 0.09em;
+  font-size: 16px;
+  letter-spacing: 0.08em;
   font-variation-settings: 'opsz' 40;
 }
 .clock .when {
@@ -288,7 +290,7 @@ input:focus-visible {
   font-weight: 700;
   font-size: 12px;
 }
-.clock .when span {
+.clock .when > span {
   font-size: 12px;
   color: var(--ink-2);
   min-width: 74px;
@@ -322,6 +324,11 @@ input:focus-visible {
   background: var(--ink);
   color: #faf7f0;
 }
+/* Hovering the active pace must not blank it (linen text on a white hover). */
+.clock .pace button.on:hover:not(:disabled) {
+  background: #3a322b;
+  border-color: #3a322b;
+}
 .clock .pace button:disabled:not(.on) {
   color: var(--ink-3);
 }
@@ -330,82 +337,6 @@ input:focus-visible {
   gap: 2px;
   padding-left: 6px;
   border-left: 1px solid var(--hair);
-}
-
-.ticker {
-  position: relative;
-  flex: 1 1 0;
-  min-width: 0;
-  max-width: 540px;
-  margin: 0 auto;
-  min-height: 44px;
-  padding: 6px 12px 7px;
-  overflow: hidden;
-}
-.ticker .tk-top {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.ticker .tk-label {
-  font-family: var(--mono);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  color: var(--ink-3);
-  flex: none;
-}
-.ticker .tk-label.live {
-  color: var(--terracotta);
-}
-.ticker .tk-title {
-  font-family: var(--display);
-  font-weight: 600;
-  font-size: 14.5px;
-  font-variation-settings: 'opsz' 24;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ticker .tk-effect {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: var(--ink-2);
-  white-space: nowrap;
-  flex: none;
-}
-.ticker .tk-line {
-  margin-top: 1px;
-  font-size: 11.5px;
-  color: var(--ink-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ticker .tk-bar {
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  height: 2px;
-  background: var(--terracotta);
-  transition: width 0.2s linear;
-}
-.ticker.forecast .tk-bar {
-  background: var(--brass);
-}
-.ticker.flash {
-  animation: tickerflash 0.9s ease-out;
-}
-@keyframes tickerflash {
-  0% {
-    background: #fff6dc;
-    transform: translateY(-3px);
-  }
-  100% {
-    background: var(--linen);
-    transform: translateY(0);
-  }
 }
 
 .rightcol {
@@ -420,7 +351,7 @@ input:focus-visible {
 }
 
 .board {
-  padding: 8px 10px 9px;
+  padding: 7px 10px 8px;
 }
 .board h3,
 .inspector h4,
@@ -444,7 +375,7 @@ input:focus-visible {
   grid-template-columns: 12px 1fr auto;
   align-items: center;
   column-gap: 7px;
-  padding: 3px 4px;
+  padding: 2px 4px;
   border-radius: 4px;
 }
 .board .row.me {
@@ -738,9 +669,11 @@ input:focus-visible {
 .treasury .line {
   display: flex;
   justify-content: space-between;
+  gap: 8px;
   font-size: 11px;
   color: var(--ink-2);
   margin-top: 1px;
+  white-space: nowrap;
 }
 .treasury .line b {
   font-family: var(--mono);
@@ -832,8 +765,8 @@ input:focus-visible {
   justify-items: center;
   align-content: center;
   gap: 1px;
-  width: 68px;
-  height: 62px;
+  width: 62px;
+  height: 56px;
   padding: 4px 2px 3px;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -1064,7 +997,7 @@ input:focus-visible {
 
 .banner {
   position: absolute;
-  top: 84px;
+  top: 132px;
   left: 50%;
   transform: translateX(-50%);
   text-align: center;
@@ -1081,7 +1014,14 @@ input:focus-visible {
   font-variation-settings: 'opsz' 144;
   letter-spacing: -0.01em;
   color: var(--ink);
-  text-shadow: 0 1px 0 rgba(250, 247, 240, 0.9), 0 0 18px rgba(250, 247, 240, 0.9);
+  /* Every era after the first opens on a sunrise, so the title carries its own pool of linen
+     light: invisible over the sunlit city, legible over the last of the night. */
+  text-shadow:
+    0 1px 0 rgba(250, 247, 240, 0.95),
+    0 0 6px rgba(250, 247, 240, 0.95),
+    0 0 20px rgba(250, 247, 240, 0.95),
+    0 0 42px rgba(250, 247, 240, 0.85),
+    0 0 70px rgba(250, 247, 240, 0.6);
 }
 .banner span {
   display: inline-block;
@@ -1402,13 +1342,21 @@ input:focus-visible {
 
 /* ───────────── Victory ───────────── */
 
+/* The Final Edition is the whole front page: the HUD steps back, so no half-covered panel
+   peeks out from under it. It returns with a Rematch or Continue in Endless. */
+body:has(#victory:not([hidden])) .hud {
+  opacity: 0;
+  transition: opacity 0.25s ease-out;
+}
+
 .scrim {
   position: fixed;
   inset: 0;
   display: grid;
   place-items: center;
   padding: 16px;
-  background: rgba(239, 233, 220, 0.42);
+  /* The final bell rings at twilight: a warm linen wash keeps the page sunlit over the dusk city. */
+  background: rgba(247, 239, 222, 0.6);
   z-index: 40;
 }
 .victory {
@@ -1631,8 +1579,11 @@ input:focus-visible {
 .board.open .parts {
   display: block;
 }
-.board.open .sub {
+.board .sub {
   display: none;
+}
+.board.open .sub {
+  display: flex;
 }
 
 /* Treasury: the rate rides on the Borrow button. */
@@ -1665,37 +1616,6 @@ input:focus-visible {
 .ledger .recon b {
   font-family: var(--mono);
   color: var(--ink);
-}
-
-/* Ticker: the event's modifiers, restated where the wide effect label does not fit. */
-.ticker .tk-fx {
-  display: none;
-  margin-top: 1px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  font-weight: 500;
-  color: var(--ink);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ticker .tk-line.news {
-  color: var(--ink);
-  font-size: 12.5px;
-}
-.ticker .tk-line.news.rival {
-  font-family: var(--display);
-  font-style: italic;
-  font-weight: 500;
-  font-size: 13px;
-}
-@media (max-width: 1180px) {
-  .ticker .tk-fx {
-    display: block;
-  }
-  .ticker .tk-fx + .tk-line {
-    display: none;
-  }
 }
 
 /* Build palette tabs (shown on narrow screens only). */
@@ -2205,16 +2125,14 @@ input:focus-visible {
   .topbar {
     right: calc(var(--gap) + 216px + 8px);
   }
-  .ticker .tk-effect {
-    display: none;
-  }
+
   .dock .tool {
     width: 60px;
   }
   .leftcol {
     width: 226px;
   }
-  .clock .when span {
+  .clock .when > span {
     min-width: 0;
   }
 }
@@ -2268,7 +2186,7 @@ input:focus-visible {
     border-left: 0;
     gap: 6px;
   }
-  .clock .when span {
+  .clock .when > span {
     display: none;
   }
   .clock .pace {
@@ -2278,37 +2196,9 @@ input:focus-visible {
     min-width: 26px;
     padding: 0 4px;
   }
-  .ticker {
-    flex: none;
-    max-width: none;
-    margin: 0;
-    height: 48px;
-    min-height: 0;
-    padding: 5px 9px 6px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-  }
-  .ticker .tk-line {
-    white-space: normal;
-  }
-  .ticker .tk-effect {
-    display: none;
-  }
-  .ticker .tk-top.quiet {
-    display: none;
-  }
-  .ticker .tk-line.news {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    overflow: hidden;
-    font-size: 12px;
-    line-height: 1.3;
-  }
+
   .rightcol {
-    top: calc(var(--gap) + 40px + 6px + 48px + 6px);
+    top: calc(var(--gap) + 40px + 6px);
     left: var(--gap);
     right: var(--gap);
     width: auto;
@@ -2331,9 +2221,20 @@ input:focus-visible {
     gap: 4px;
   }
   .board .row {
-    grid-template-columns: 9px 1fr;
+    grid-template-columns: 15px minmax(0, 1fr) auto;
     column-gap: 4px;
     padding: 1px 2px;
+  }
+  .board .row .hcrest {
+    width: 15px;
+    height: 15px;
+  }
+  .board .row .stars,
+  .board .mprog {
+    display: none;
+  }
+  .board.open .row .stars {
+    display: flex;
   }
   .board .row .nm,
   .board .bhead {
@@ -2350,16 +2251,12 @@ input:focus-visible {
     gap: 2px;
   }
   .board.open .row {
-    grid-template-columns: 9px 30px 34px 1fr;
+    grid-template-columns: 15px 28px auto 34px minmax(0, 1fr);
   }
   .board.open .row .parts {
     grid-column: auto;
     margin-top: 0;
     text-align: right;
-  }
-  .board .chip {
-    width: 9px;
-    height: 9px;
   }
   .board .crown {
     font-size: 12px;
@@ -2470,7 +2367,9 @@ input:focus-visible {
     bottom: 128px;
   }
   .banner {
-    top: 168px;
+    top: 200px;
+    width: calc(100vw - 32px);
+    white-space: normal;
   }
   .spectator {
     left: var(--gap);
@@ -2480,9 +2379,7 @@ input:focus-visible {
     padding: 10px 12px;
     font-size: 13px;
   }
-  .ticker .tk-fx {
-    font-size: 10.5px;
-  }
+
   .lotcard {
     white-space: normal;
     max-width: 236px;
@@ -2637,8 +2534,1415 @@ input:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   .banner.show,
-  .toast,
-  .ticker.flash {
+  .toast {
     animation-duration: 0.01s;
+  }
+}
+
+/* ───────────── v2 · Dynasty: heraldry, era clock, Chronicle, Founding Guide, Era Council ───────────── */
+
+/* House crests: one geometry, sized where it is used. */
+svg.hcrest {
+  display: block;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+.mstars {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+.mstar {
+  width: 9px;
+  height: 9px;
+  fill: rgba(30, 26, 22, 0.13);
+}
+.mstar.on {
+  fill: var(--brass);
+  stroke: var(--brass-ink);
+  stroke-width: 0.7;
+}
+.mstar.grand.on {
+  fill: #e6b54e;
+  stroke: #6a4d10;
+  stroke-width: 0.9;
+}
+
+/* Top bar: clock, then the Chronicle; the Founding Guide docks on its own line beneath. */
+.topbar {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.topbar .brk {
+  flex-basis: 100%;
+  height: 0;
+  margin-top: -8px;
+  pointer-events: none !important;
+}
+
+/* Era & Clock chip. */
+.clock .era {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: baseline;
+  column-gap: 8px;
+  row-gap: 3px;
+  min-width: 118px;
+}
+.clock .era b {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 13.5px;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  font-variation-settings: 'opsz' 24;
+}
+.clock .era small {
+  justify-self: end;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.clock .erabar {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2px;
+  height: 4px;
+}
+.clock .erabar u {
+  display: block;
+  overflow: hidden;
+  border-radius: 1px;
+  background: rgba(30, 26, 22, 0.13);
+  text-decoration: none;
+}
+.clock .erabar s {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--brass);
+  text-decoration: none;
+  transition: width 0.3s linear;
+}
+.clock .erabar u.now s {
+  background: var(--ink);
+}
+.clock .when > span {
+  min-width: 66px;
+}
+
+/* The Mercadia Chronicle: the active dispatch banner over a collapsible recent feed. */
+.chronicle {
+  position: relative;
+  flex: 1 1 320px;
+  min-width: 300px;
+  max-width: 420px;
+  padding: 0;
+  overflow: hidden;
+}
+.chronicle .dispatch {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-height: 40px;
+  border-left: 4px solid var(--stripe, var(--brass));
+}
+.chronicle .d-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 2px 5px 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: default;
+}
+.chronicle .d-main.focusable {
+  cursor: pointer;
+}
+.chronicle .d-main.focusable:hover {
+  background: rgba(255, 255, 255, 0.6);
+}
+.chronicle .d-badge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+}
+.chronicle .d-badge .hcrest {
+  width: 27px;
+  height: 27px;
+}
+.chronicle .d-badge .ic {
+  width: 23px;
+  height: 23px;
+}
+.chronicle .d-body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: 'kicker pill' 'head head';
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 1px;
+}
+.chronicle .d-kicker {
+  grid-area: kicker;
+}
+.chronicle .d-pill {
+  grid-area: pill;
+}
+.chronicle .d-head {
+  grid-area: head;
+}
+.chronicle .d-kicker {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chronicle .dispatch[data-mode='live'] .d-kicker {
+  color: var(--terracotta);
+}
+.chronicle .d-head {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.15;
+  font-variation-settings: 'opsz' 24;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chronicle .d-pill {
+  justify-self: end;
+  max-width: 100%;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--ink);
+  color: #faf7f0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chronicle .dispatch[data-cat='era'] .d-pill,
+.chronicle .dispatch[data-cat='milestone'] .d-pill,
+.chronicle .dispatch[data-cat='charter'] .d-pill,
+.chronicle .dispatch[data-cat='lead'] .d-pill {
+  background: var(--brass);
+  color: var(--ink);
+}
+.chronicle .dispatch[data-cat='event'] .d-pill {
+  background: var(--canal-ink);
+}
+.chronicle .d-toggle {
+  align-self: center;
+  margin: 0 4px 0 2px;
+}
+.chronicle .d-toggle:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.8);
+  border-color: var(--hair);
+}
+.chronicle .d-toggle:disabled {
+  opacity: 0.3;
+}
+.chronicle .d-toggle .ic {
+  transition: transform 0.15s ease-out;
+}
+.chronicle.open .d-toggle .ic {
+  transform: rotate(180deg);
+}
+.chronicle .d-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--terracotta);
+  transition: width 0.2s linear;
+}
+.chronicle .d-bar.forecast {
+  background: var(--brass);
+}
+.chronicle.flash {
+  animation: dispatchpop 0.9s ease-out;
+}
+@keyframes dispatchpop {
+  0% {
+    background: #fff1c4;
+    transform: translateY(-3px);
+  }
+  100% {
+    background: var(--linen);
+    transform: translateY(0);
+  }
+}
+.cfeed {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  border-top: 1px solid var(--hair);
+}
+.cline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 20px;
+  padding: 0 8px 0 8px;
+  border: 0;
+  border-left: 3px solid var(--stripe, var(--brass));
+  background: transparent;
+  text-align: left;
+  font-size: 11.5px;
+}
+.cline + .cline {
+  border-top: 1px solid var(--hair-2);
+}
+.cline .c-badge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+}
+.cline .c-badge .hcrest,
+.cline .c-badge .ic {
+  width: 15px;
+  height: 15px;
+}
+.cline .c-head {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cline .c-pill {
+  flex: none;
+  max-width: 44%;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cline .c-focus {
+  flex: none;
+  display: grid;
+}
+.cline .c-focus .ic {
+  width: 13px;
+  height: 13px;
+  color: var(--ink-3);
+}
+.cline.focusable {
+  cursor: pointer;
+}
+.cline.focusable:hover {
+  background: rgba(255, 255, 255, 0.72);
+}
+.cline.focusable:hover .c-focus .ic {
+  color: var(--ink);
+}
+
+/* Founding Guide: three steps, one at a time, then gone for good. */
+.guide {
+  flex: none;
+  width: 300px;
+  padding: 5px 7px 6px 10px;
+}
+.guide .g-obj {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 12px;
+  line-height: 1.25;
+  color: var(--ink-2);
+}
+.guide .g-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.guide .g-n {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--brass);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 11px;
+}
+.guide .g-t {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+.guide .g-t b {
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.guide .g-t span {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--ink-2);
+}
+.guide .g-x {
+  width: 24px;
+  height: 24px;
+  margin: -3px -2px 0 0;
+  color: var(--ink-2);
+}
+.guide .g-x:hover {
+  background: rgba(255, 255, 255, 0.8);
+  border-color: var(--hair);
+  color: var(--ink);
+}
+.guide .g-x .ic {
+  width: 14px;
+  height: 14px;
+}
+.guide .g-pips {
+  display: flex;
+  gap: 3px;
+  margin: 4px 0 5px;
+}
+.guide .g-pips i {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(30, 26, 22, 0.13);
+}
+.guide .g-pips i.now {
+  background: var(--ink);
+}
+.guide .g-pips i.done {
+  background: var(--brass);
+}
+.dock .tool.guided {
+  border-color: var(--brass);
+  animation: guidepulse 1.7s ease-in-out infinite;
+}
+@keyframes guidepulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(212, 163, 74, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(212, 163, 74, 0.6);
+  }
+}
+
+/* Era locks on the build dock. */
+.dock .tool .lock {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 4px 1px 3px;
+  border-radius: 3px;
+  background: var(--ink);
+  color: #faf7f0;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.dock .tool .lock .ic {
+  width: 9px;
+  height: 9px;
+  stroke-width: 2.6;
+  opacity: 1;
+}
+.dock .tool.locked {
+  cursor: help;
+  align-content: end;
+}
+.dock .tool.locked .key {
+  display: none;
+}
+.dock .tool.locked > .ic {
+  width: 16px;
+  height: 16px;
+}
+.dock .tool.locked .cost {
+  line-height: 1.1;
+}
+.dock .tool.locked > .ic,
+.dock .tool.locked .nm,
+.dock .tool.locked .cost {
+  opacity: 0.42;
+}
+.dock .tool.locked .want {
+  display: none;
+}
+.dock .tool.unlocked {
+  animation: unlockshimmer 1.6s ease-out 2;
+}
+@keyframes unlockshimmer {
+  0%,
+  100% {
+    background: rgba(212, 163, 74, 0);
+    box-shadow: inset 0 0 0 2px rgba(212, 163, 74, 0);
+  }
+  30% {
+    background: rgba(212, 163, 74, 0.34);
+    box-shadow: inset 0 0 0 2px var(--brass);
+  }
+}
+.dock .hint em .ic {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+.toast.lockmsg {
+  box-shadow: inset 3px 0 0 var(--brass);
+  padding-left: 14px;
+}
+.toast.msmsg,
+.toast.chmsg {
+  background: var(--ink);
+  box-shadow: inset 3px 0 0 var(--brass);
+  padding-left: 14px;
+}
+
+/* Leaderboard & Dynasty strip. */
+.board .row {
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
+  column-gap: 6px;
+}
+.board .row .hcrest {
+  width: 18px;
+  height: 18px;
+}
+.board .stars {
+  display: flex;
+}
+.board .sub,
+.board .parts {
+  grid-column: 2 / 5;
+}
+.board .mprog {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 5px;
+  row-gap: 2px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--hair);
+  cursor: help;
+}
+.board .mprog > .ic {
+  width: 12px;
+  height: 12px;
+  fill: var(--brass);
+  stroke: var(--brass-ink);
+  stroke-width: 1.4;
+}
+.board .mp-k {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.board .mp-r {
+  justify-self: end;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--brass-ink);
+  white-space: nowrap;
+}
+.board .mprog b {
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board .mp-d {
+  justify-self: end;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+/* The second line has its own track: the bar takes what the detail leaves, so a long detail
+   never squeezes the Milestone's name on the line above. */
+.board .mp-l2 {
+  grid-column: 1 / 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.board .mp-l2 .mp-d {
+  flex: none;
+}
+.board .mprog.tight b {
+  font-size: 11.5px;
+  letter-spacing: -0.01em;
+}
+.board .mprog.tight .mp-r {
+  font-size: 9px;
+  letter-spacing: -0.02em;
+}
+.board .mp-bar {
+  flex: 1 1 auto;
+  min-width: 20px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(30, 26, 22, 0.1);
+  overflow: hidden;
+}
+.board .mp-bar u {
+  display: block;
+  height: 100%;
+  background: var(--brass);
+  transition: width 0.4s ease-out;
+}
+.board .mlist {
+  display: none;
+  gap: 2px;
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid var(--hair);
+}
+.board.open .mlist {
+  display: grid;
+}
+.board.open .mprog {
+  display: none;
+}
+.board .ml {
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+.board .ml .ic {
+  width: 12px;
+  height: 12px;
+  color: var(--ink-3);
+}
+.board .ml.done .ic {
+  color: var(--green);
+  stroke-width: 2.4;
+}
+.board .ml b {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board .ml span {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 9.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.board .ml.done span {
+  color: var(--brass-ink);
+  font-weight: 700;
+}
+
+/* Treasury: Dynasty Charter badges. */
+.treasury .charters {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  align-items: center;
+  gap: 3px;
+  min-height: 18px;
+  margin-top: 5px;
+}
+.cbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 18px;
+  padding: 0 6px 0 4px;
+  border: 1px solid rgba(154, 115, 37, 0.55);
+  border-radius: 4px;
+  background: rgba(212, 163, 74, 0.17);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: help;
+}
+.cbadge .ic {
+  width: 12px;
+  height: 12px;
+  color: var(--brass-ink);
+}
+.cbadge b {
+  font-weight: 600;
+}
+.cnone {
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+
+/* Inspector: the owner's crest leads. */
+.inspector .head .hcrest {
+  width: 28px;
+  height: 28px;
+}
+.inspector .head .t b .ic {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  margin-right: 5px;
+  vertical-align: -2px;
+  color: var(--ink-2);
+}
+.inspector .btn[data-state='locked'] .ic {
+  width: 13px;
+  height: 13px;
+  margin-right: 6px;
+}
+
+/* Era Council: a compact card between eras. */
+.councilscrim {
+  z-index: 39;
+  /* Eras close at twilight: a warm linen wash keeps the Council sunlit over the dusk city. */
+  background: rgba(249, 240, 220, 0.74);
+}
+.council {
+  width: min(760px, 100%);
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  padding: 0 22px 16px;
+  background: var(--linen-solid);
+  border: 1px solid rgba(30, 26, 22, 0.28);
+  border-top: 4px solid var(--brass);
+  border-radius: var(--r);
+  outline: none;
+}
+.council .c-head {
+  padding: 13px 0 11px;
+  text-align: center;
+  border-bottom: 1px solid var(--ink);
+  box-shadow: 0 3px 0 var(--linen-solid), 0 4px 0 var(--ink);
+}
+.council .kicker {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.council h2 {
+  margin: 3px 0 2px;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 31px;
+  line-height: 1.05;
+  font-variation-settings: 'opsz' 96;
+}
+.council .c-head p {
+  margin: 0;
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 14.5px;
+  color: var(--ink-2);
+}
+.council h3 {
+  margin: 14px 0 6px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.council h3 small {
+  margin-left: 7px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(212, 163, 74, 0.25);
+  color: var(--brass-ink);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+.council h3 .held {
+  float: right;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-3);
+}
+.council .ulist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.council .unlock {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px 5px 8px;
+  border: 1px solid rgba(154, 115, 37, 0.6);
+  border-radius: var(--r);
+  background: rgba(212, 163, 74, 0.15);
+}
+.council .unlock .ic {
+  width: 20px;
+  height: 20px;
+}
+.council .unlock b {
+  font-size: 12.5px;
+  font-weight: 700;
+}
+.council .unlock small {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--ink-2);
+}
+.council .unlock.none {
+  font-family: var(--display);
+  font-style: italic;
+  font-size: 13.5px;
+}
+.council .srows {
+  display: grid;
+  gap: 1px;
+}
+.council .srow {
+  display: grid;
+  grid-template-columns: 14px 20px minmax(0, 1fr) 44px 46px minmax(0, 170px);
+  align-items: center;
+  column-gap: 8px;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.council .srow.me {
+  background: rgba(30, 26, 22, 0.055);
+}
+.council .srow .hcrest {
+  width: 20px;
+  height: 20px;
+}
+.council .srow .rk {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+.council .srow .nm {
+  font-weight: 600;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.council .srow .nm small {
+  margin-left: 5px;
+  font-weight: 400;
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+.council .srow .cr {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 13px;
+}
+.council .srow .dl {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.council .srow .dl.up {
+  color: var(--green);
+}
+.council .srow .dl.down {
+  color: var(--red);
+}
+.council .srow .pick {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.council .srow .pick.sealed {
+  color: var(--ink);
+}
+.council .srow .pick .ic {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--brass-ink);
+}
+.council .srow .pick b {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.council .cgrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.council .charter {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-height: 136px;
+  padding: 9px 10px 10px;
+  border: 1px solid rgba(30, 26, 22, 0.24);
+  border-radius: var(--r);
+  background: rgba(255, 255, 255, 0.62);
+  text-align: left;
+}
+.council .charter:hover {
+  border-color: var(--ink);
+  background: #fff;
+}
+.council .charter.sealed {
+  padding: 8px 9px 9px;
+  border: 2px solid var(--ink);
+  background: #fffaf0;
+}
+.council .ch-top {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.council .ch-ic {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(212, 163, 74, 0.24);
+}
+.council .ch-ic .ic {
+  width: 16px;
+  height: 16px;
+  color: var(--brass-ink);
+}
+.council .ch-doc {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.council .ch-seal {
+  display: none;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--brass-ink);
+}
+.council .charter.sealed .ch-seal {
+  display: inline-flex;
+}
+.council .ch-seal .ic {
+  width: 13px;
+  height: 13px;
+}
+.council .ch-name {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 17px;
+  line-height: 1.1;
+  font-variation-settings: 'opsz' 30;
+}
+.council .ch-blurb {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--ink-2);
+}
+.council .ch-pill {
+  justify-self: start;
+  margin-top: 3px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: var(--ink);
+  color: #faf7f0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.council .c-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hair);
+}
+.council .c-foot .btn {
+  flex: none;
+  height: 44px;
+  padding: 0 22px;
+  font-size: 15px;
+}
+.council .c-note {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.council .countdown {
+  flex: 0 0 210px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.council .countdown b {
+  min-width: 46px;
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1;
+}
+.council .cd {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(30, 26, 22, 0.1);
+  overflow: hidden;
+}
+.council .cd u {
+  display: block;
+  height: 100%;
+  background: var(--brass);
+  transition: width 0.12s linear;
+}
+
+/* Final Edition: the winning House's own crest, crests and stars in the standings. */
+.victory .crest.grand {
+  width: 104px;
+  height: 104px;
+}
+.victory.edition td .hcrest {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 5px;
+  vertical-align: -3px;
+}
+.victory.edition td .mstars {
+  margin-left: 6px;
+  vertical-align: 1px;
+}
+.victory.edition td em.chs {
+  font-style: italic;
+  color: var(--brass-ink);
+}
+.victory .a-who .hcrest {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 5px;
+  vertical-align: -2px;
+}
+
+/* The opening banner carries the objective: it stays a little longer. */
+.banner.show.long {
+  animation-duration: 5.4s;
+}
+
+/* Title and lobby. */
+.title .objective {
+  margin: 7px 0 0;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.modeblurb {
+  margin: 6px 0 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+}
+.title .rival {
+  grid-template-columns: 14px auto 1fr;
+}
+.title .rival .hcrest {
+  width: 14px;
+  height: 14px;
+  align-self: center;
+}
+.lobby .seat {
+  grid-template-columns: 22px 1fr auto;
+}
+.lobby .seat .hcrest {
+  width: 22px;
+  height: 22px;
+}
+.lobby .houses button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid transparent;
+}
+.lobby .houses button .hcrest {
+  width: 20px;
+  height: 20px;
+}
+.lobby .houses button.on {
+  border-color: var(--ink);
+  background: #fff;
+  box-shadow: none;
+}
+
+@media (max-width: 1180px) {
+  .clock .when > span {
+    min-width: 0;
+  }
+  .guide {
+    width: 272px;
+  }
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    flex-wrap: nowrap;
+  }
+  .topbar .brk {
+    display: none;
+  }
+  .clock .era {
+    min-width: 0;
+    column-gap: 5px;
+  }
+  .clock .era b {
+    font-size: 12.5px;
+  }
+  .clock .era small {
+    display: none;
+  }
+  .clock .pace button {
+    min-width: 24px;
+    padding: 0 3px;
+    font-size: 11px;
+  }
+  .clock .iconbtn {
+    width: 28px;
+  }
+  /* The compact Chronicle bar sits directly under the score strip. */
+  .chronicle {
+    position: absolute;
+    top: calc(40px + 6px + var(--strip-h, 30px) + 6px);
+    left: 0;
+    right: 0;
+    flex: none;
+    min-width: 0;
+    max-width: none;
+    z-index: 7;
+    background: rgba(250, 247, 240, 0.97);
+  }
+  .chronicle .dispatch {
+    min-height: 44px;
+  }
+  .chronicle .d-main {
+    gap: 7px;
+    padding-left: 6px;
+    cursor: pointer;
+  }
+  .chronicle .d-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'head' 'pill';
+    row-gap: 2px;
+  }
+  .chronicle .d-kicker {
+    display: none;
+  }
+  .chronicle .d-head {
+    font-size: 13.5px;
+  }
+  .board .mprog {
+    display: none;
+  }
+  .clock .era .e-name {
+    display: none;
+  }
+  .chronicle .d-badge,
+  .chronicle .d-badge .hcrest {
+    width: 24px;
+    height: 24px;
+  }
+  .chronicle .d-badge .ic {
+    width: 20px;
+    height: 20px;
+  }
+  .chronicle .d-pill {
+    justify-self: start;
+    padding: 0 6px;
+    font-size: 10px;
+    line-height: 1.5;
+  }
+  .cline {
+    min-height: 38px;
+    font-size: 12px;
+  }
+  /* The guide is a slim one-line bar above the treasury and the dock. */
+  .guide {
+    position: fixed;
+    left: var(--gap);
+    right: var(--gap);
+    bottom: 120px;
+    width: auto;
+    padding: 3px 3px 3px 8px;
+  }
+  .guide .g-obj,
+  .guide .g-pips {
+    display: none;
+  }
+  .guide .g-step {
+    align-items: center;
+    gap: 7px;
+  }
+  .guide .g-t {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .guide .g-t b {
+    flex: none;
+    font-size: 12px;
+  }
+  .guide .g-t span {
+    min-width: 0;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .guide .g-x {
+    width: 30px;
+    height: 30px;
+    margin: 0;
+  }
+  .board.open .mlist {
+    margin-top: 5px;
+    padding-top: 4px;
+  }
+  .treasury .charters {
+    flex: none;
+    flex-wrap: nowrap;
+    min-height: 0;
+    margin-top: 0;
+  }
+  .treasury .cbadge {
+    padding: 0 4px;
+  }
+  .treasury .cbadge b {
+    display: none;
+  }
+  .banner span {
+    max-width: calc(100vw - 32px);
+    white-space: normal;
+    letter-spacing: 0.08em;
+    line-height: 1.5;
+  }
+  .banner b {
+    white-space: normal;
+  }
+  /* Era Council: one scrollable column with large tap targets. */
+  .councilscrim {
+    padding: 8px;
+    align-items: start;
+  }
+  .council {
+    max-height: calc(100dvh - 16px);
+    padding: 0 12px 12px;
+  }
+  .council h2 {
+    font-size: 24px;
+  }
+  .council .c-head p {
+    font-size: 13px;
+  }
+  .council .cgrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .council .charter {
+    min-height: 76px;
+    padding: 10px 12px 11px;
+  }
+  .council .charter.sealed {
+    padding: 9px 11px 10px;
+  }
+  .council .srow {
+    grid-template-columns: 12px 18px minmax(0, 1fr) 38px 42px;
+    column-gap: 6px;
+    row-gap: 0;
+  }
+  .council .srow .pick {
+    grid-column: 3 / -1;
+    justify-content: flex-start;
+    font-size: 10.5px;
+  }
+  .council h3 .held {
+    float: none;
+    display: block;
+    margin-top: 2px;
+  }
+  .council {
+    padding-bottom: 0;
+  }
+  /* The decision stays in reach while the column scrolls. */
+  .council .c-foot {
+    position: sticky;
+    bottom: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    margin: 12px -12px 0;
+    padding: 10px 12px 12px;
+    background: var(--linen-solid);
+    border-top: 1px solid rgba(30, 26, 22, 0.28);
+  }
+  .council .c-foot .btn {
+    height: 48px;
+  }
+  .council .countdown {
+    flex: none;
+  }
+  .victory .crest.grand {
+    width: 64px;
+    height: 64px;
+  }
+}
+
+@media (max-width: 640px) {
+  .guide {
+    bottom: 152px;
+  }
+  .toasts {
+    bottom: 192px;
+  }
+  .hud.sheet .guide {
+    visibility: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chronicle.flash,
+  .dock .tool.guided,
+  .dock .tool.unlocked {
+    animation-duration: 0.01s;
+    animation-iteration-count: 1;
+  }
+}
+
+/* Open breakdown: cash, share and the three Crown parts run under the crest, full width. */
+.board.open .sub,
+.board.open .parts {
+  grid-column: 1 / -1;
+}
+.board .ml {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 5px;
+}
+.board .ml b {
+  flex: 1 0 auto;
+}
+.board .ml span {
+  margin-left: auto;
+}
+
+/* Wide desktops: the guide docks straight under the clock, whatever the Chronicle is doing. */
+@media (min-width: 1280px) {
+  .guide {
+    position: absolute;
+    left: 0;
+    top: 48px;
+  }
+}
+@media (max-width: 720px) {
+  .board.open .sub {
+    display: none;
+  }
+  .board.open .parts {
+    grid-column: auto;
+  }
+}
+
+/* Narrower docks: the Era lock badge tightens so neighbours never touch. */
+@media (max-width: 1060px) {
+  .dock .tool .lock {
+    gap: 1px;
+    padding: 1px 3px 1px 2px;
+    font-size: 8px;
+    letter-spacing: 0;
+  }
+  .dock .tool .lock .ic {
+    width: 8px;
+    height: 8px;
+  }
+}
+
+/* Mid-size: the dock sits bottom right, so the right column (Inspector) stops above it. */
+@media (min-width: 721px) and (max-width: 1060px) {
+  .rightcol {
+    max-height: calc(100dvh - 2 * var(--gap) - 74px);
   }
 }

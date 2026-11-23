@@ -4,7 +4,7 @@
 import { advance } from '../shared/ai';
 import { AI_ORDER, AI_PERSONAS } from '../shared/constants';
 import { CityView, SnapEncoder, type ClientMsg, type LobbyView, type ServerMsg } from '../shared/protocol';
-import { applyCommand, continueEndless, createGame } from '../shared/sim';
+import { applyCommand, closeCouncil, continueEndless, createGame } from '../shared/sim';
 import type { Command, Fx, GameState, MatchMode, PlayerSetup } from '../shared/types';
 import { HEARTBEAT_MS, SeatToken, browserStores } from './seat-token';
 
@@ -24,6 +24,8 @@ export interface Session {
   togglePause(): void;
   rematch(): void;
   endless(): void;
+  /** Solo: leave the Era Council once a charter is chosen. Multiplayer: the room decides. */
+  advanceCouncil(): void;
   dispose(): void;
   onReject: (err: string) => void;
   /** A command of ours went through (solo: it was applied; multiplayer: it was sent). */
@@ -72,6 +74,9 @@ export class LocalSession implements Session {
     this.state.fx = [];
     const fx = this.view.apply(snap);
     for (const f of fx) this.pending.push(f);
+    // Snapshots carry the ledgers once a second. The simulation is right here, so the solo
+    // Ledger drawer reads them fresh on every push and always reconciles with cash in hand.
+    this.view.ledgers = this.state.players.map((p) => ({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger }));
     this.interval = Math.min(260, Math.max(30, now - this.snapAt));
     this.snapAt = now;
   }
@@ -121,12 +126,37 @@ export class LocalSession implements Session {
     this.paused = !this.paused;
   }
 
-  /** Run the simulation forward at once (smoke checks and screenshots). */
-  warp(ticks: number): void {
-    for (let i = 0; i < ticks && this.state.phase === 'playing'; i++) {
+  /**
+   * Run the simulation forward at once (smoke checks and screenshots). Deterministic: an Era
+   * Council met on the way is closed with whatever is chosen (the steward's pick otherwise) and
+   * costs no ticks. With `hold`, the warp stops as a Council opens so it can be inspected.
+   * Returns the number of ticks actually advanced.
+   */
+  warp(ticks: number, hold = false): number {
+    let done = 0;
+    while (done < ticks && this.state.phase !== 'ended') {
+      if (this.state.phase === 'council') {
+        if (hold) break;
+        closeCouncil(this.state);
+        this.push(performance.now());
+        continue;
+      }
       advance(this.state);
-      if (i % 20 === 0) this.push(performance.now());
+      done++;
+      if (done % 20 === 0) this.push(performance.now());
     }
+    this.push(performance.now());
+    return done;
+  }
+
+  advanceCouncil(): void {
+    const c = this.state.council;
+    if (this.state.phase !== 'council' || !c) return;
+    if (this.me >= 0 && c.picks[this.me] == null) {
+      this.onReject('Choose a Dynasty Charter first');
+      return;
+    }
+    closeCouncil(this.state);
     this.push(performance.now());
   }
 
@@ -365,6 +395,10 @@ export class NetSession implements Session {
 
   endless(): void {
     this.send({ t: 'endless' });
+  }
+
+  advanceCouncil(): void {
+    // The room closes the Council itself: on the countdown, or once every human has chosen.
   }
 
   dispose(): void {

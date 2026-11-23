@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CRITIC_PRESTIGE,
   CRITIC_PRIZE,
@@ -15,6 +15,7 @@ import {
 import { CITY, idx, tx, ty } from '../src/shared/map';
 import {
   activeEvent,
+  closeCouncil,
   createGame,
   decide,
   demandMult,
@@ -28,6 +29,9 @@ import {
 } from '../src/shared/sim';
 import type { Desire, EventKind, Fx, GameState, MatchMode } from '../src/shared/types';
 import { build, clone, dist2, freeze, fxOf, humans, labGame, putCitizen, run } from './helpers';
+
+// Whole seeded matches are played in here: leave room for a busy machine.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
 
 const di = (d: Desire): number => DESIRES.indexOf(d);
 const mults = (s: GameState): Record<Desire, number> =>
@@ -69,12 +73,23 @@ describe('Dynamic events: the quarterly schedule', () => {
     const s = createGame({ seed: 4, mode: 'blitz', players: humans(2) });
     const first = clone(s.events);
     run(s, s.quarterTicks);
+    // The era has closed and the Council sits: the new schedule is drawn when it rises.
+    expect(s.phase).toBe('council');
+    expect(s.quarter).toBe(1);
+    // Nothing is live or forecast while the Council sits.
+    expect(s.events).toEqual([]);
+    expect(activeEvent(s)).toBeNull();
+    expect(headlineEvent(s)).toBeNull();
+    expect(closeCouncil(s)).toBe(true);
     expect(s.quarter).toBe(2);
     expectScheduleInside(s);
     expect(s.events[0].announceAt).toBeGreaterThan(first[first.length - 1].endAt);
     const e = createGame({ seed: 4, mode: 'endless', players: humans(1) });
-    for (let q = 2; q <= 3; q++) {
+    for (let q = 2; q <= 6; q++) {
       run(e, e.quarterTicks);
+      // Endless convenes a Council after Eras I, II and III, and none after that.
+      expect(e.phase).toBe(q <= 4 ? 'council' : 'playing');
+      if (e.phase === 'council') closeCouncil(e);
       expect(e.quarter).toBe(q);
       expectScheduleInside(e);
     }
@@ -173,12 +188,18 @@ describe('Dynamic events: the quarterly schedule', () => {
     expect(s.trams).toHaveLength(3);
     s.fx = [];
     run(s, 10);
-    expect(s.quarter).toBe(2);
-    const fx: Fx[] = s.fx.filter((f) => f.k === 'event' || f.k === 'quarter');
-    expect(fx).toEqual([
+    // The event is wound up at the era's close, before the Council sits…
+    expect(s.phase).toBe('council');
+    const closing: Fx[] = s.fx.filter((f) => f.k === 'event' || f.k === 'quarter' || f.k === 'council');
+    expect(closing).toEqual([
       { k: 'event', kind: 'freeride', phase: 'end' },
-      { k: 'quarter', q: 2 },
+      { k: 'council', era: 1 },
     ]);
+    expect(s.trams).toHaveLength(2);
+    // …and the next era opens with a fresh schedule once it rises.
+    closeCouncil(s);
+    expect(s.quarter).toBe(2);
+    expect(s.fx.filter((f) => f.k === 'quarter')).toEqual([{ k: 'quarter', q: 2 }]);
     expect(s.trams).toHaveLength(2);
     expect(activeEvent(s)).toBeNull();
     expectScheduleInside(s);
@@ -216,11 +237,11 @@ describe('Dynamic events: Sudden Cloudburst', () => {
   });
 
   it('A/B at one instant: the same crowd asked with and without rain picks Cinema and Roastery more, Nightmarket less', () => {
-    const base = freeze(labGame({ seed: 4, cash: 100000 }));
+    const base = freeze(labGame({ era: 3, seed: 4, cash: 100000 })); // the Cinema unlocks in Era III
     const cinema = build(base, 0, 3, 6, 'cinema');
     const roastery = build(base, 0, 9, 6, 'roastery');
     const market = build(base, 0, 8, 4, 'nightmarket');
-    base.tick = Math.round(base.quarterTicks * 0.8); // twilight: all three trades are wanted
+    base.tick += Math.round(base.quarterTicks * 0.8); // twilight: all three trades are wanted
     const poll = (rain: boolean): { indoor: number; night: number; firstIndoor: number; firstNight: number } => {
       const s = clone(base);
       if (rain) forceEvent(s, 'cloudburst');
@@ -256,7 +277,7 @@ describe('Dynamic events: Sudden Cloudburst', () => {
     let seedsWetter = 0;
     let seedsQuieter = 0;
     for (const seed of SEEDS) {
-      const base = labGame({ seed, cash: 100000 });
+      const base = labGame({ era: 3, seed, cash: 100000 });
       build(base, 0, 3, 6, 'cinema');
       build(base, 0, 9, 6, 'roastery');
       build(base, 0, 8, 4, 'nightmarket');
@@ -292,7 +313,7 @@ describe('Dynamic events: Sudden Cloudburst', () => {
 
 describe('Dynamic events: Food Critic Visit', () => {
   it('crowns the best-rated kitchen when the visit ends: prize, prestige, Golden Fork', () => {
-    const s = freeze(labGame({ players: 3, cash: 2000 }));
+    const s = freeze(labGame({ era: 3, players: 3, cash: 2000 }));
     const bistro = build(s, 0, 3, 6, 'bistro');
     const roastery = build(s, 1, 9, 6, 'roastery');
     const cinema = build(s, 2, 8, 4, 'cinema');
@@ -329,7 +350,7 @@ describe('Dynamic events: Food Critic Visit', () => {
   });
 
   it('breaks a tie on rating by covers served, and leaves hungry when no kitchen is open', () => {
-    const s = freeze(labGame({ cash: 2000 }));
+    const s = freeze(labGame({ era: 3, cash: 2000 }));
     const a = build(s, 0, 3, 6, 'bistro');
     const b = build(s, 1, 9, 6, 'bistro');
     a.rating = b.rating = 4;
@@ -340,7 +361,7 @@ describe('Dynamic events: Food Critic Visit', () => {
     expect(fxOf(s.fx, 'award')).toEqual([{ k: 'award', b: b.id, p: 1 }]);
     expect(s.players[0].stats.goldenForks).toBe(0);
 
-    const empty = freeze(labGame({ cash: 2000 }));
+    const empty = freeze(labGame({ era: 3, cash: 2000 }));
     build(empty, 0, 3, 6, 'cinema');
     build(empty, 1, 9, 6, 'park');
     const before = empty.players.map((p) => [p.cash, p.prestige]);
@@ -356,7 +377,7 @@ describe('Dynamic events: Food Critic Visit', () => {
 
 describe('Dynamic events: Rent Hike and Supply Crunch', () => {
   it('toggles the rent hike on and off with the event and leaves demand alone', () => {
-    const s = freeze(labGame({ cash: 2000 }));
+    const s = freeze(labGame({ era: 3, cash: 2000 }));
     const b = build(s, 0, 3, 6, 'boutique');
     expect(eventActive(s, 'renthike')).toBe(false);
     forceEvent(s, 'renthike', 25);
@@ -372,7 +393,7 @@ describe('Dynamic events: Rent Hike and Supply Crunch', () => {
   });
 
   it('raises the quoted restock cost for the length of a Supply Crunch', () => {
-    const s = freeze(labGame({ cash: 2000 }));
+    const s = freeze(labGame({ era: 3, cash: 2000 }));
     const b = build(s, 0, 3, 6, 'bistro');
     b.auto = false;
     b.stock = 4;
@@ -392,7 +413,7 @@ describe('Dynamic events: Rent Hike and Supply Crunch', () => {
 
 describe('Dynamic events: Harbor Cruise Arrival', () => {
   it('lands a wave of tourists at the pier, one every few ticks, and whets fashion and dining', () => {
-    const s = freeze(labGame({ cash: 5000 }));
+    const s = freeze(labGame({ era: 3, cash: 5000 }));
     build(s, 0, 9, 6, 'boutique');
     build(s, 0, 8, 6, 'bistro');
     forceEvent(s, 'cruise', 5 * CRUISE_TOURISTS + 50);

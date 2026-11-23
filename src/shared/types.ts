@@ -27,6 +27,12 @@ export type EventKind =
 export type MatchMode = 'blitz' | 'standard' | 'endless';
 export type AiPersona = 'vesper' | 'aurelia' | 'orson';
 export type Daypart = 0 | 1 | 2 | 3; // morning, noon, golden hour, twilight
+/** The four Eras of a dynasty: Founding Charter, Transit & Trade, Grand Boulevard, Golden Dynasty. */
+export type Era = 1 | 2 | 3 | 4;
+/** Permanent doctrines a House adopts at the Era Council. */
+export type CharterKey = 'artisanry' | 'transit' | 'credit' | 'canal' | 'heralds' | 'provisioners';
+/** The four cumulative Dynasty Milestones, in order. */
+export type MilestoneKey = 'merchant' | 'baron' | 'benefactor' | 'sovereign';
 
 /** Citizen states. */
 export const CS = {
@@ -50,6 +56,7 @@ export interface Ledger {
   marketing: number;
   salvage: number;
   awards: number;
+  dividends: number; // Dynasty Milestone dividends
   borrowed: number; // financing: credit-line draws (not part of net cashflow)
   repaid: number; // financing: principal repaid (not part of net cashflow)
 }
@@ -80,6 +87,8 @@ export interface Player {
   totalLedger: Ledger; // whole match
   stats: PlayerStats;
   aiNext: number; // next tick the AI thinks
+  charters: CharterKey[]; // Dynasty Charters adopted, in the order of the Councils
+  milestones: number[]; // per MILESTONES entry: the tick it was earned, or -1
 }
 
 export interface Building {
@@ -160,6 +169,42 @@ export interface GazetteLine {
   tone: 'event' | 'market' | 'civic' | 'rival';
 }
 
+/** Chronicle categories. The stripe colour follows: brass, canal, or the acting House. */
+export type DispatchCat = 'era' | 'milestone' | 'charter' | 'lead' | 'event' | 'rival' | 'promo' | 'build' | 'market';
+
+/** One dispatch of the Mercadia Chronicle: a punchy headline and its exact mechanical impact. */
+export interface Dispatch {
+  n: number; // serial number, 1-based, never reused within a match
+  tick: number;
+  cat: DispatchCat;
+  tier: 1 | 2; // 1 = headline banner + audio sting, 2 = feed only
+  head: string;
+  pill: string; // mechanical impact tag: "Cinema +45%", "+§80 · ★1", "New Leader"
+  player: number; // acting House (player index) or -1
+  tile: number; // lot to focus the camera on, or -1
+  icon: string; // event kind, build kind, or '' (the crest or category badge is used)
+}
+
+/** One row of the Era Council's standings: where a House stood at the era's close. */
+export interface CouncilRow {
+  player: number;
+  crown: number;
+  delta: number; // Crown Index gained during the era just closed
+}
+
+/** The Era Council: open between Eras I–II, II–III and III–IV. The simulation is paused. */
+export interface Council {
+  era: number; // the era that just closed (1..3)
+  next: number; // the era about to begin
+  offers: CharterKey[][]; // per player: three distinct charters
+  picks: (CharterKey | null)[]; // per player: the charter chosen so far
+  left: number; // countdown in 100 ms beats (multiplayer); solo waits for Advance
+  total: number; // countdown length, for the progress bar
+  rows: CouncilRow[]; // standings at the era's close, in rank order
+  unlocked: BuildKind[]; // build tools the next era unlocks
+  level3: boolean; // the next era unlocks Level 3 architecture
+}
+
 export type Fx =
   | { k: 'coin'; x: number; y: number; amt: number; p: number }
   | { k: 'star'; x: number; y: number }
@@ -175,6 +220,10 @@ export type Fx =
   | { k: 'event'; kind: EventKind; phase: 'forecast' | 'start' | 'end' }
   | { k: 'award'; b: number; p: number }
   | { k: 'quarter'; q: number }
+  | { k: 'council'; era: number }
+  | { k: 'charter'; p: number; key: CharterKey }
+  | { k: 'milestone'; p: number; m: number }
+  | { k: 'dispatch'; n: number; tier: 1 | 2; cat: DispatchCat }
   | { k: 'end' };
 
 export interface Award {
@@ -194,6 +243,8 @@ export interface ResultRow {
   served: number;
   shops: number;
   civic: number;
+  stars: number; // Dynasty Milestones earned
+  charters: CharterKey[];
 }
 
 /** Market share over the match: one sample per daypart, share×1000 per player. */
@@ -219,7 +270,7 @@ export interface GameState {
   quarterTicks: number;
   totalQuarters: number; // 0 = endless
   quarter: number; // 1-based
-  phase: 'playing' | 'ended';
+  phase: 'playing' | 'council' | 'ended';
   endless: boolean;
   players: Player[];
   buildings: Building[];
@@ -240,6 +291,12 @@ export interface GameState {
   result: MatchResult | null;
   trend: number[][]; // market share×1000 per player, sampled every daypart
   leaders: number[]; // Crown Index leader at each quarter's close
+  council: Council | null; // open Era Council, or null
+  chronicle: Dispatch[]; // the Mercadia Chronicle: recent dispatches, oldest first
+  chronicleN: number; // dispatches ever published
+  leader: number; // House currently holding the Crown Index lead, or -1 before one is established
+  leadTick: number; // tick of the last lead-change dispatch
+  eraCrowns: number[][]; // Crown Index per player at each era's close
 }
 
 export interface PlayerSetup {
@@ -264,7 +321,8 @@ export type Command =
   | { c: 'auto'; id: number; on: boolean }
   | { c: 'sell'; id: number }
   | { c: 'borrow' }
-  | { c: 'repay' };
+  | { c: 'repay' }
+  | { c: 'charter'; key: CharterKey };
 
 export interface CmdResult {
   ok: boolean;

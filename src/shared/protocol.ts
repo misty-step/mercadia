@@ -1,13 +1,16 @@
 // Wire protocol: messages, the compact snapshot encoder, and the client-side view store.
 // Solo play feeds the same encoder → view path that multiplayer uses over the socket.
-import { ARCHETYPES, DESIRES, EVENT_KINDS } from './constants';
+import { ARCHETYPES, DESIRES, EVENT_KINDS, MILESTONES, eraOf } from './constants';
 import { crownIndex, headlineEvent, marketShares, netWorth, quarterTick } from './sim';
 import type {
   AiPersona,
   Archetype,
   Building,
+  CharterKey,
   Command,
+  Council,
   Desire,
+  Dispatch,
   EventKind,
   Fx,
   GameState,
@@ -129,7 +132,7 @@ export interface Snap {
   t: 'snap';
   full: boolean;
   k: number; // tick
-  q: [number, number, number]; // quarter, ended, endless
+  q: [number, number, number]; // era clock (quarter), phase (0 playing, 1 ended, 2 Era Council), endless
   sp: number; // pace
   p: number[][]; // per player: cash, debt, prestige×10, share×1000, crown, netWorth
   c: number[]; // citizens, CITIZEN_STRIDE numbers each
@@ -144,6 +147,17 @@ export interface Snap {
   dm?: number[]; // met ×10 per desire, then unmet ×10 per desire
   fx?: Fx[];
   res?: MatchResult | null;
+  ch?: Dispatch[]; // the Chronicle, when a dispatch was published
+  cn?: Council | null; // the Era Council: sent while it sits, and once as null when it rises
+  dy?: DynastyRow[]; // per player: charters, milestones, progress counters
+}
+
+/** A House's dynasty record on the wire. */
+export interface DynastyRow {
+  c: CharterKey[]; // charters adopted
+  m: number[]; // milestone ticks (-1 = not yet)
+  sv: number; // citizens served
+  cb: number; // civic projects built
 }
 
 const toView = (b: Building): BuildingView => {
@@ -162,12 +176,18 @@ const toView = (b: Building): BuildingView => {
 export class SnapEncoder {
   private sent = new Map<number, string>();
   private gzN = -1;
+  private chN = -1;
   private resSent = false;
+  private cnOpen = false;
+  private dyKey = '';
 
   reset(): void {
     this.sent.clear();
     this.gzN = -1;
+    this.chN = -1;
     this.resSent = false;
+    this.cnOpen = false;
+    this.dyKey = '';
   }
 
   /** `full` snapshots carry everything and do not disturb the delta memory. */
@@ -194,7 +214,7 @@ export class SnapEncoder {
       t: 'snap',
       full,
       k: s.tick,
-      q: [s.quarter, s.phase === 'ended' ? 1 : 0, s.endless ? 1 : 0],
+      q: [s.quarter, s.phase === 'ended' ? 1 : s.phase === 'council' ? 2 : 0, s.endless ? 1 : 0],
       sp: speed,
       p: s.players.map((p) => [
         Math.round(p.cash),
@@ -208,6 +228,7 @@ export class SnapEncoder {
       tr,
       ev: e ? [EVENT_KINDS.indexOf(e.kind), e.announceAt, e.startAt, e.endAt, e.started ? 1 : 0] : null,
     };
+    const dynasty: DynastyRow[] = s.players.map((p) => ({ c: p.charters, m: p.milestones, sv: p.stats.served, cb: p.stats.civicBuilt }));
     const slow = full || s.tick % 10 === 0;
     if (slow) {
       snap.lg = s.players.map((p) => ({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger }));
@@ -224,6 +245,9 @@ export class SnapEncoder {
       };
       snap.b = s.buildings.map(toView);
       snap.gz = s.gazette;
+      snap.ch = s.chronicle;
+      snap.cn = s.council;
+      snap.dy = dynasty;
       snap.res = s.result;
       return snap;
     }
@@ -247,6 +271,24 @@ export class SnapEncoder {
     if (s.gazetteN !== this.gzN) {
       this.gzN = s.gazetteN;
       snap.gz = s.gazette;
+    }
+    if (s.chronicleN !== this.chN) {
+      this.chN = s.chronicleN;
+      snap.ch = s.chronicle;
+    }
+    // The Council rides every snapshot while it sits (picks and the countdown change), and
+    // is cleared with a single null when it rises.
+    if (s.council) {
+      this.cnOpen = true;
+      snap.cn = s.council;
+    } else if (this.cnOpen) {
+      this.cnOpen = false;
+      snap.cn = null;
+    }
+    const dyKey = JSON.stringify(dynasty);
+    if (dyKey !== this.dyKey) {
+      this.dyKey = dyKey;
+      snap.dy = dynasty;
     }
     if (s.fx.length) snap.fx = s.fx.slice();
     const hasRes = s.result !== null;
@@ -287,6 +329,10 @@ export interface PlayerView {
   share: number;
   crown: number;
   netWorth: number;
+  charters: CharterKey[];
+  milestones: number[];
+  served: number;
+  civicBuilt: number;
 }
 
 export interface TramView {
@@ -306,7 +352,7 @@ export interface EventView {
 
 const zeroLedger = (): Ledger => ({
   revenue: 0, wages: 0, supplies: 0, rent: 0, interest: 0, construction: 0, civic: 0, marketing: 0, salvage: 0, awards: 0,
-  borrowed: 0, repaid: 0,
+  dividends: 0, borrowed: 0, repaid: 0,
 });
 
 /** What the renderer and HUD read. Rebuilt incrementally from snapshots. */
@@ -319,6 +365,8 @@ export class CityView {
   tick = 0;
   quarter = 1;
   ended = false;
+  /** True while the Era Council sits and the city is paused. */
+  inCouncil = false;
   endless = false;
   speed = 1;
   players: PlayerView[] = [];
@@ -330,6 +378,9 @@ export class CityView {
   trams: TramView[] = [];
   event: EventView | null = null;
   gazette: GazetteLine[] = [];
+  /** The Mercadia Chronicle: recent dispatches, oldest first. */
+  chronicle: Dispatch[] = [];
+  council: Council | null = null;
   footfall: number[] = new Array<number>(144).fill(0);
   met: number[] = DESIRES.map(() => 0);
   unmet: number[] = DESIRES.map(() => 0);
@@ -347,6 +398,10 @@ export class CityView {
   get dayPhase(): number {
     return Math.min(0.9999, Math.max(0, this.qTick / this.quarterTicks));
   }
+  /** The era (1..4) on the clock. */
+  get era(): number {
+    return eraOf(this.quarter);
+  }
 
   building(id: number): BuildingView | undefined {
     return this.byId.get(id);
@@ -362,6 +417,8 @@ export class CityView {
       this.citizens.clear();
       this.trams = [];
       this.result = null;
+      this.chronicle = [];
+      this.council = null;
       if (s.meta) {
         this.seed = s.meta.seed;
         this.mode = s.meta.mode;
@@ -369,6 +426,7 @@ export class CityView {
         this.totalQuarters = s.meta.tq;
         this.players = s.meta.players.map((p, i) => ({
           id: i, ...p, cash: 0, debt: 0, prestige: 0, share: 0, crown: 0, netWorth: 0,
+          charters: [], milestones: MILESTONES.map(() => -1), served: 0, civicBuilt: 0,
         }));
         this.ledgers = this.players.map(() => ({ cur: zeroLedger(), last: zeroLedger(), total: zeroLedger() }));
       }
@@ -379,6 +437,7 @@ export class CityView {
     this.tick = s.k;
     this.quarter = s.q[0];
     this.ended = s.q[1] === 1;
+    this.inCouncil = s.q[1] === 2;
     this.endless = s.q[2] === 1;
     this.speed = s.sp;
     s.p.forEach((row, i) => {
@@ -444,6 +503,18 @@ export class CityView {
       this.buildingsRev++;
     }
     if (s.gz) this.gazette = s.gz.slice();
+    if (s.ch) this.chronicle = s.ch.slice();
+    if (s.cn !== undefined) this.council = s.cn ? { ...s.cn, picks: s.cn.picks.slice(), offers: s.cn.offers.map((o) => o.slice()) } : null;
+    if (!this.inCouncil) this.council = null;
+    if (s.dy)
+      s.dy.forEach((row, i) => {
+        const p = this.players[i];
+        if (!p) return;
+        p.charters = row.c.slice();
+        p.milestones = row.m.slice();
+        p.served = row.sv;
+        p.civicBuilt = row.cb;
+      });
     if (s.lg) this.ledgers = s.lg;
     if (s.ff) this.footfall = s.ff.map((v) => v / 10);
     if (s.dm) {

@@ -97,6 +97,8 @@ export class Pen {
   light = false; // true while drawing the night light pass
   seed = 1;
   private wi = 0;
+  /** Plot scale about the lot's centre: civic projects are drawn inside the House kerb. */
+  private k = 1;
 
   constructor(public ctx: CanvasRenderingContext2D) {}
 
@@ -105,13 +107,19 @@ export class Pen {
     this.light = light;
     this.seed = seed;
     this.wi = 0;
+    this.k = 1;
+  }
+
+  /** Shrink everything that follows toward the centre of the lot (1 = the whole tile). */
+  plot(k: number): void {
+    this.k = k;
   }
 
   X(u: number, v: number): number {
-    return (this.flip ? v - u : u - v) * HW;
+    return (this.flip ? v - u : u - v) * HW * this.k;
   }
   Y(u: number, v: number, z: number): number {
-    return (u + v) * HH - z;
+    return (1 + (u + v - 1) * this.k) * HH - z;
   }
 
   private trace(pts: number[]): void {
@@ -328,8 +336,8 @@ export class Pen {
     const cx = this.X(u, v);
     const y0 = this.Y(u, v, z0);
     const y1 = this.Y(u, v, z1);
-    const rx = r * 45.25;
-    const ry = r * 22.6;
+    const rx = r * 45.25 * this.k;
+    const ry = r * 22.6 * this.k;
     c.beginPath();
     c.moveTo(cx - rx, y1);
     c.lineTo(cx - rx, y0);
@@ -357,7 +365,7 @@ export class Pen {
     if (this.light) return;
     const c = this.ctx;
     c.beginPath();
-    c.ellipse(this.X(u, v), this.Y(u, v, z), r * 45.25, r * 22.6, 0, 0, Math.PI * 2);
+    c.ellipse(this.X(u, v), this.Y(u, v, z), r * 45.25 * this.k, r * 22.6 * this.k, 0, 0, Math.PI * 2);
     c.fillStyle = fill;
     c.fill();
   }
@@ -367,8 +375,8 @@ export class Pen {
     const c = this.ctx;
     const cx = this.X(u, v);
     const cy = this.Y(u, v, z);
-    const rx = r * 45.25;
-    const ry = r * 22.6;
+    const rx = r * 45.25 * this.k;
+    const ry = r * 22.6 * this.k;
     c.beginPath();
     c.ellipse(cx, cy, rx, h, 0, Math.PI, Math.PI * 2);
     c.ellipse(cx, cy, rx, ry, 0, 0, Math.PI);
@@ -1172,6 +1180,48 @@ export function shadowFootprint(kind: SceneKind): [number, number, number, numbe
   }
 }
 
+/**
+ * Civic projects (park, tram stop, plaza) are drawn at this scale about the centre of their
+ * lot, which leaves a rim of ground for the House kerb that frames every owned lot.
+ */
+export const CIVIC_PLOT = 0.86;
+const plotted = (u: number): number => 0.5 + (u - 0.5) * CIVIC_PLOT;
+
+/**
+ * Where the tall House banner stands, in tile-local u, v, z (already inside the civic plot):
+ * the roof of a shop, the fountain of a plaza, the shelter of a tram stop, the back of a park.
+ */
+export function bannerAnchor(kind: BuildKind, level: number): [number, number, number] {
+  switch (kind) {
+    case 'park': return [plotted(0.86), plotted(0.14), 1.2];
+    case 'tramstop': return [plotted(0.5), plotted(0.5), 17.4];
+    case 'plaza': return [plotted(0.5), plotted(0.5), 13];
+    // Hipped roofs carry the standard on the ridge, not out on a corner.
+    case 'bistro': return level === 3 ? [0.82, 0.17, 32.6] : [0.42, 0.38, level === 1 ? 26.6 : 40.6];
+    case 'roastery': return level === 2 ? [0.56, 0.5, 39.6] : flagAnchor(kind, level);
+    default: return flagAnchor(kind, level);
+  }
+}
+
+/**
+ * The solid silhouettes of a building, as boxes [u0, v0, u1, v1, height] in tile-local units:
+ * what hides the ground and the banners behind it.
+ */
+export function solidBoxes(kind: SceneKind, level: number): [number, number, number, number, number][] {
+  const a = plotted(0.04);
+  const b = plotted(0.96);
+  switch (kind) {
+    case 'park': return [[a, a, b, b, 1.2]];
+    case 'plaza': return [[plotted(0.02), plotted(0.02), plotted(0.98), plotted(0.98), 1.4]];
+    case 'tramstop': return [[a, a, b, b, 1.6], [plotted(0.1), plotted(0.3), plotted(0.9), plotted(0.72), 17]];
+    case 'garden': return [];
+    default: {
+      const fp = shadowFootprint(kind);
+      return [[fp[0], fp[1], fp[2], fp[3], buildingHeight(kind, level) * 0.92]];
+    }
+  }
+}
+
 /** Where the House pennant flies, in tile-local u, v, z. */
 export function flagAnchor(kind: BuildKind, level: number): [number, number, number] {
   switch (kind) {
@@ -1194,9 +1244,16 @@ export function drawScene(p: Pen, kind: SceneKind, level: number, house: number,
     case 'boutique': return boutique(p, level, h);
     case 'cinema': return cinema(p, level, h);
     case 'nightmarket': return nightmarket(p, level, h);
-    case 'park': return park(p, level, h);
-    case 'tramstop': return tramstop(p, level, h);
-    case 'plaza': return plaza(p, level, h);
+    case 'park':
+    case 'tramstop':
+    case 'plaza':
+      // Civic projects sit inside the lot's House kerb.
+      p.plot(CIVIC_PLOT);
+      if (kind === 'park') park(p, level, h);
+      else if (kind === 'tramstop') tramstop(p, level, h);
+      else plaza(p, level, h);
+      p.plot(1);
+      return;
     case 'home': return townhouse(p, variant);
     case 'station': return station(p);
     case 'garden': return gardenPlot(p, variant);

@@ -1,10 +1,13 @@
-import { beforeAll, describe, expect, it } from 'vitest';
-import { TEMPERAMENTS, VESPER_CIVIC, advance, aiDecide, aiThink, lotAppeal, tradeOutlook } from '../src/shared/ai';
-import { BUILD_KINDS, LOAN_MAX, LOAN_STEP, PROMO_COST, SHOPS, SHOP_KINDS, TRANSIT_RADIUS, isShop } from '../src/shared/constants';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { ERA_DOORS, OPENINGS, VESPER_CIVIC, advance, aiDecide, aiThink, lotAppeal, openingDelay, tradeOutlook } from '../src/shared/ai';
+import { BUILD_KINDS, CHARTER_TASTE, LEVEL3_ERA, LOAN_MAX, LOAN_STEP, PROMO_COST, SHOPS, SHOP_KINDS, TRANSIT_RADIUS, isShop, isUnlocked } from '../src/shared/constants';
 import { CITY, chebyshev, idx, manhattan, tx, ty } from '../src/shared/map';
-import { applyCommand, buildingAt, buildingById, createGame, queueCap } from '../src/shared/sim';
+import { applyCommand, buildingAt, buildingById, closeCouncil, createGame, eraNow, promoCostFor, queueCap } from '../src/shared/sim';
 import type { AiPersona, BuildKind, Command, GameState } from '../src/shared/types';
-import { ais, build, clone, freeze, fxOf, run } from './helpers';
+import { ais, atEra, build, clone, freeze, fxOf, run } from './helpers';
+
+// Whole seeded matches are played in here: leave room for a busy machine.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
 
 const PERSONAS: AiPersona[] = ['vesper', 'aurelia', 'orson', 'vesper'];
 const VESPER = 0;
@@ -23,6 +26,7 @@ function complaint(s: GameState, player: number, cmd: Command): string {
       if (buildingAt(s, cmd.tile)) return 'build on an occupied lot';
       if (!BUILD_KINDS.includes(cmd.kind)) return 'unknown kind';
       if (cmd.kind === 'tramstop' && CITY.avenueAdj[cmd.tile] < 0) return 'tram stop off the avenue';
+      if (!isUnlocked(cmd.kind, s.quarter)) return `${cmd.kind} is locked until a later era`;
       return '';
     case 'price': {
       const b = buildingById(s, cmd.id);
@@ -32,6 +36,7 @@ function complaint(s: GameState, player: number, cmd: Command): string {
     }
     case 'upgrade': {
       const b = buildingById(s, cmd.id);
+      if (b && b.level === 2 && eraNow(s) < LEVEL3_ERA) return 'Level 3 before the Grand Boulevard';
       return b && own(cmd.id) && isShop(b.kind) && b.level < 3 ? '' : 'bad upgrade';
     }
     case 'promo': {
@@ -48,6 +53,8 @@ function complaint(s: GameState, player: number, cmd: Command): string {
       return s.players[player].debt + LOAN_STEP <= LOAN_MAX ? '' : 'borrowing past the limit';
     case 'repay':
       return s.players[player].debt > 0 ? '' : 'repaying no debt';
+    case 'charter':
+      return 'an AI House seals its charter at the Council, never by command';
     default:
       return 'unknown command';
   }
@@ -73,6 +80,11 @@ interface MatchLog {
   prestigeAtHalf: number[];
   lv3Ticks: number; // ticks Aurelia's finished (Level 3) shops stood
   lv3PrestigeTicks: number; // … of which priced at Prestige
+  shopsAtEraClose: number[][]; // per era (I..IV): shops each House ran when the era closed
+  lockedBuildings: number; // buildings standing in an era that has not unlocked them
+  earlyLv3: number; // Level 3 shops standing before Era III
+  firstCommandTick: number[]; // first tick each House had a command accepted
+  aureliaStanceTicks: number[]; // shop-ticks Aurelia spent at Budget, Fair, Craft, Prestige
 }
 
 function playMatch(seed: number): MatchLog {
@@ -97,11 +109,22 @@ function playMatch(seed: number): MatchLog {
     prestigeAtHalf: [],
     lv3Ticks: 0,
     lv3PrestigeTicks: 0,
+    shopsAtEraClose: [],
+    lockedBuildings: 0,
+    earlyLv3: 0,
+    firstCommandTick: PERSONAS.map(() => Infinity),
+    aureliaStanceTicks: [0, 0, 0, 0],
   };
   const flag = (msg: string): void => {
     if (log.problems.length < 20) log.problems.push(`t${s.tick}: ${msg}`);
   };
-  while (s.phase === 'playing') {
+  while (s.phase !== 'ended') {
+    if (s.phase === 'council') {
+      // The era's books are closed; every AI House has already sealed its charter.
+      log.shopsAtEraClose.push(PERSONAS.map((_, p) => s.buildings.filter((b) => b.owner === p && isShop(b.kind)).length));
+      closeCouncil(s);
+      continue;
+    }
     const before = s.players.map((p) => ({ cash: p.cash, debt: p.debt }));
     const quarter = s.quarter;
     const thinking = s.players.filter((p) => s.tick >= p.aiNext).map((p) => p.id);
@@ -118,6 +141,10 @@ function playMatch(seed: number): MatchLog {
       }
     }
     advance(s);
+    for (const f of s.fx) {
+      const who = f.k === 'build' || f.k === 'upgrade' || f.k === 'promo' || f.k === 'restock' || f.k === 'sell' ? f.p : -1;
+      if (who >= 0) log.firstCommandTick[who] = Math.min(log.firstCommandTick[who], s.tick - 1);
+    }
     for (const f of fxOf(s.fx, 'build')) {
       log.builds[f.p].push({ kind: f.kind, tile: f.tile, tick: s.tick - 1 });
       if (f.p === ORSON && f.kind === 'park') {
@@ -146,6 +173,10 @@ function playMatch(seed: number): MatchLog {
       } else if (b.level !== 1 || b.stance !== 1) flag('a civic project was upgraded or repriced');
       if (b.kind === 'tramstop' && CITY.avenueAdj[b.tile] < 0) flag('tram stop off the avenue');
       if (b.level === 3) log.firstLv3[b.owner] = Math.min(log.firstLv3[b.owner], s.tick);
+      // Era locks bind the AI Houses exactly as they bind players.
+      if (s.phase === 'playing' && !isUnlocked(b.kind, s.quarter)) log.lockedBuildings++;
+      if (s.phase === 'playing' && b.level === 3 && eraNow(s) < LEVEL3_ERA) log.earlyLv3++;
+      if (b.owner === AURELIA && isShop(b.kind)) log.aureliaStanceTicks[b.stance]++;
       if (b.owner === AURELIA && b.level === 3 && isShop(b.kind)) {
         log.lv3Ticks++;
         if (b.stance === 3) log.lv3PrestigeTicks++;
@@ -171,6 +202,7 @@ function playMatch(seed: number): MatchLog {
       }
     }
   }
+  log.shopsAtEraClose.push(PERSONAS.map((_, p) => s.buildings.filter((b) => b.owner === p && isShop(b.kind)).length));
   return log;
 }
 
@@ -181,7 +213,7 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
 
   beforeAll(() => {
     logs = SEEDS.map(playMatch);
-  });
+  }, 60000);
 
   it('plays every match to the end and keeps the district legal on every tick', () => {
     for (const log of logs) {
@@ -207,19 +239,76 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
     }
   });
 
-  it('opens distinctly: Vesper a shop on a corner, Aurelia a canal-front Bistro or Boutique, Orson a Tram Stop', () => {
+  it('opens distinctly and deliberately: Vesper a corner shop, Aurelia a canal-front Bistro, Orson a shop and a park, then his Tram Stop the moment Era II unlocks it', () => {
     for (const log of logs) {
       const first = log.builds.map((b) => b[0]);
       for (const v of [VESPER, VESPER_2]) {
         expect(isShop(first[v].kind), `seed ${log.seed}`).toBe(true);
         expect(CITY.corner[first[v].tile], `seed ${log.seed}`).toBe(true);
       }
-      expect(flagship(first[AURELIA].kind), `seed ${log.seed}`).toBe(true);
+      // The Boutique is an Era III trade: her Founding flagship is a Bistro on the water.
+      expect(first[AURELIA].kind, `seed ${log.seed}`).toBe('bistro');
       expect(CITY.canalFront[first[AURELIA].tile], `seed ${log.seed}`).toBe(true);
-      expect(first[ORSON].kind, `seed ${log.seed}`).toBe('tramstop');
-      expect(CITY.avenueAdj[first[ORSON].tile]).toBeGreaterThanOrEqual(0);
-      // Everyone is trading within the first minute.
+      // The Tram Stop is an Era II project: Orson founds a shop, lays a park in Era I …
+      expect(isShop(first[ORSON].kind), `seed ${log.seed}`).toBe(true);
+      const eraOne = log.builds[ORSON].filter((b) => b.tick < log.s.quarterTicks);
+      expect(eraOne.some((b) => b.kind === 'park'), `seed ${log.seed}`).toBe(true);
+      expect(eraOne.every((b) => b.kind === 'roastery' || b.kind === 'bistro' || b.kind === 'park'), `seed ${log.seed}`).toBe(true);
+      // … and dedicates his first stop within seconds of the Era I Council rising.
+      const eraTwo = log.builds[ORSON].filter((b) => b.tick >= log.s.quarterTicks);
+      expect(eraTwo[0].kind, `seed ${log.seed}`).toBe('tramstop');
+      expect(eraTwo[0].tick, `seed ${log.seed}`).toBeLessThan(log.s.quarterTicks + 60);
+      expect(CITY.avenueAdj[eraTwo[0].tile]).toBeGreaterThanOrEqual(0);
+      // Nobody opens on tick one: each House waits out its opening delay, and the seats stagger.
+      first.forEach((f, p) => {
+        expect(f.tick, `seed ${log.seed} player ${p}`).toBeGreaterThanOrEqual(openingDelay(log.s, p));
+        expect(log.firstCommandTick[p], `seed ${log.seed} player ${p}`).toBeGreaterThanOrEqual(openingDelay(log.s, p));
+      });
+      expect(first.map((f) => f.tick)).toEqual(first.map((f) => f.tick).slice().sort((x, y) => x - y));
+      expect(first[0].tick).toBeGreaterThanOrEqual(OPENINGS.standard.firstMove);
+      // Everyone is trading within the first minute all the same.
       for (const f of first) expect(f.tick).toBeLessThan(600);
+    }
+  });
+
+  it('respects the era locks and expands at a measured pace', () => {
+    for (const log of logs) {
+      // No locked trade or project ever stands before its era, and no Level 3 before Era III.
+      expect(log.lockedBuildings, `seed ${log.seed}`).toBe(0);
+      expect(log.earlyLv3, `seed ${log.seed}`).toBe(0);
+      for (let p = 0; p < PERSONAS.length; p++) {
+        expect(log.firstLv3[p], `seed ${log.seed} player ${p}`).toBeGreaterThanOrEqual(2 * log.s.quarterTicks);
+        for (const b of log.builds[p]) {
+          const era = Math.min(4, Math.floor(b.tick / log.s.quarterTicks) + 1);
+          expect(isUnlocked(b.kind, era), `seed ${log.seed}: ${b.kind} at tick ${b.tick}`).toBe(true);
+        }
+      }
+      // Each era's door cap holds when that era closes: two or three shops in the Founding era.
+      expect(log.shopsAtEraClose).toHaveLength(4);
+      log.shopsAtEraClose.forEach((row, e) => {
+        row.forEach((n, p) => expect(n, `seed ${log.seed} era ${e + 1} player ${p}`).toBeLessThanOrEqual(ERA_DOORS[PERSONAS[p]][e]));
+      });
+      for (const n of log.shopsAtEraClose[0]) {
+        expect(n).toBeGreaterThanOrEqual(1);
+        expect(n).toBeLessThanOrEqual(3);
+      }
+      // The later eras' trades are taken up once they unlock.
+      const kinds = new Set(log.s.buildings.map((b) => b.kind));
+      expect(kinds.has('arcade') || kinds.has('nightmarket')).toBe(true);
+      expect(kinds.has('boutique') || kinds.has('cinema')).toBe(true);
+      // Every House sealed one charter per Council, each to its persona's taste.
+      log.s.players.forEach((p) => {
+        expect(p.charters, `seed ${log.seed} ${p.persona}`).toHaveLength(3);
+        expect(new Set(p.charters).size).toBe(3);
+      });
+    }
+    // Across the five matches each persona's favourite doctrine is its most adopted first pick.
+    const firstPicks: Record<AiPersona, string[]> = { vesper: [], aurelia: [], orson: [] };
+    for (const log of logs) for (const p of log.s.players) firstPicks[p.persona as AiPersona].push(p.charters[0]);
+    for (const persona of ['vesper', 'aurelia', 'orson'] as AiPersona[]) {
+      const taste = CHARTER_TASTE[persona];
+      const mean = firstPicks[persona].reduce((x, k) => x + taste[k as keyof typeof taste], 0) / firstPicks[persona].length;
+      expect(mean, persona).toBeGreaterThan(2); // well above an indifferent pick (the six tastes average about 1.8)
     }
   });
 
@@ -234,7 +323,7 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
       expect(log.orsonParks).toBeGreaterThanOrEqual(1);
       expect(log.orsonParksBesideOwnShop, `seed ${log.seed}`).toBe(log.orsonParks);
       // … holds the largest civic estate in town through the first half (the discounters only
-      // turn civic from Quarter 3), always a larger one than Aurelia, and leads both
+      // turn civic in the Golden Dynasty), always a larger one than Aurelia, and leads both
       // discounters on prestige at half-time.
       for (const other of [VESPER, AURELIA, VESPER_2]) {
         expect(log.civicsAtHalf[ORSON], `seed ${log.seed}`).toBeGreaterThan(log.civicsAtHalf[other]);
@@ -276,56 +365,63 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
     expect(flagships[AURELIA]).toBeGreaterThanOrEqual(2 * logs.length);
   });
 
-  it('Aurelia reaches Level 3 fast, upgrades more than anyone, and prices every established shop at Craft or Prestige', () => {
-    let firstToLv3 = 0;
+  it('Aurelia finishes more of her shops than anyone once Era III allows it, never discounts, and adapts her price when the queue stalls', () => {
     const lv3 = PERSONAS.map(() => 0);
-    const finished: number[] = []; // price stances of her Level 3 shops at the final bell
+    const shops = PERSONAS.map(() => 0);
+    const stance = [0, 0, 0, 0];
+    let lv3Ticks = 0;
+    let lv3PrestigeTicks = 0;
+    let matchesWithLv3 = 0;
     for (const log of logs) {
-      const half = (log.s.totalQuarters * log.s.quarterTicks) / 2;
-      expect(log.firstLv3[AURELIA], `seed ${log.seed}`).toBeLessThan(half);
-      if ([VESPER, ORSON, VESPER_2].every((other) => log.firstLv3[AURELIA] < log.firstLv3[other])) firstToLv3++;
-      for (let p = 0; p < PERSONAS.length; p++) lv3[p] += shopsOf(log.s, p).filter((b) => b.level === 3).length;
-      const mine = shopsOf(log.s, AURELIA);
-      expect(mine.filter((b) => b.level === 3).length, `seed ${log.seed}`).toBeGreaterThanOrEqual(1);
-      // Whenever she thinks, every shop that already stood is at Craft or Prestige.
-      expect(log.aureliaThoughts).toBeGreaterThan(200);
-      expect(log.aureliaBelowCraft, `seed ${log.seed}`).toBe(0);
-      expect(log.budgetShopTicks[AURELIA]).toBe(0);
-      // At the final bell: Craft below Level 3; a finished shop is at Prestige or, if it has
-      // been losing its customers to the price, back at Craft — never lower.
-      for (const b of mine) {
-        if (b.builtTick >= log.s.tick - TEMPERAMENTS.aurelia.think) continue;
-        expect(b.stance).toBeGreaterThanOrEqual(2);
-        if (b.level < 3) expect(b.stance).toBe(2);
-        else finished.push(b.stance);
+      for (let p = 0; p < PERSONAS.length; p++) {
+        lv3[p] += shopsOf(log.s, p).filter((b) => b.level === 3).length;
+        shops[p] += shopsOf(log.s, p).length;
       }
-      // Prestige is her default for a finished shop: it holds that price for a real share of
-      // the match in every seed.
-      expect(log.lv3Ticks, `seed ${log.seed}`).toBeGreaterThan(1000);
-      // Prestige is where a finished shop starts, and where it returns when the queue does;
-      // between rushes it concedes to Craft. Both prices are part of every match.
-      const share = log.lv3PrestigeTicks / log.lv3Ticks;
-      expect(share, `seed ${log.seed}`).toBeGreaterThan(0.08);
-      expect(share, `seed ${log.seed}`).toBeLessThan(0.95);
+      const mine = shopsOf(log.s, AURELIA);
+      if (mine.some((b) => b.level === 3)) matchesWithLv3++;
+      // Grand architecture is an Era III unlock for her as for everyone.
+      expect(log.firstLv3[AURELIA], `seed ${log.seed}`).toBeGreaterThanOrEqual(2 * log.s.quarterTicks);
+      expect(log.aureliaThoughts).toBeGreaterThan(200);
+      // She never runs a Budget price, in any match, on any shop.
+      expect(log.budgetShopTicks[AURELIA], `seed ${log.seed}`).toBe(0);
+      expect(log.aureliaStanceTicks[0], `seed ${log.seed}`).toBe(0);
+      expect(log.s.players[AURELIA].stats.budgetSales).toBe(0);
+      for (const b of mine) expect(b.stance, `seed ${log.seed}`).toBeGreaterThanOrEqual(1);
+      // Craft is where every shop of hers starts; she holds it for a real part of each match
+      // and steps back to Fair only while a queue has stalled.
+      expect(log.aureliaStanceTicks[2] + log.aureliaStanceTicks[3], `seed ${log.seed}`).toBeGreaterThan(500);
+      log.aureliaStanceTicks.forEach((n, i) => (stance[i] += n));
+      lv3Ticks += log.lv3Ticks;
+      lv3PrestigeTicks += log.lv3PrestigeTicks;
     }
-    expect(finished.length).toBeGreaterThanOrEqual(SEEDS.length * 2);
-    expect(finished.every((stance) => stance >= 2)).toBe(true);
-    expect(firstToLv3).toBeGreaterThanOrEqual(3);
-    for (const other of [VESPER, ORSON, VESPER_2]) expect(lv3[AURELIA]).toBeGreaterThan(lv3[other]);
+    // Most of her matches end with finished shops, and by share of portfolio she finishes far
+    // more than either discounter; the Transit Expansionist finishes fewest of all.
+    expect(matchesWithLv3).toBeGreaterThanOrEqual(3);
+    const share = lv3.map((n, p) => n / shops[p]);
+    for (const other of [VESPER, ORSON, VESPER_2]) expect(share[AURELIA], `vs ${other}`).toBeGreaterThan(share[other] * 1.25);
+    expect(lv3[AURELIA]).toBeGreaterThan(lv3[ORSON]);
+    expect(lv3[AURELIA]).toBeGreaterThanOrEqual(SEEDS.length * 2);
+    // Prestige is where a finished shop starts and where it returns when the queue does;
+    // between rushes it concedes. Both are part of her game.
+    expect(lv3Ticks).toBeGreaterThan(5000);
+    expect(lv3PrestigeTicks / lv3Ticks).toBeGreaterThan(0.05);
+    expect(lv3PrestigeTicks / lv3Ticks).toBeLessThan(0.95);
+    expect(stance[3]).toBeGreaterThan(0);
+    expect(stance[1]).toBeGreaterThan(0);
   });
 
-  it('Vesper, the Aggressive Discounter, builds only shops through Quarter 2, runs Budget prices and fires Promo Blitzes', () => {
+  it('Vesper, the Aggressive Discounter, builds only shops through Era II, runs Budget prices and fires Promo Blitzes', () => {
     let blitzes = 0;
     let lateCivics = 0;
     for (const log of logs) {
       const half = (log.s.totalQuarters * log.s.quarterTicks) / 2;
       for (const v of [VESPER, VESPER_2]) {
-        // Volume first: nothing civic before Quarter 3 …
+        // Volume first: nothing civic through the first two eras (nor before VESPER_CIVIC.fromQuarter) …
         expect(log.builds[v].filter((b) => b.tick < half).every((b) => isShop(b.kind)), `seed ${log.seed}`).toBe(true);
         expect(log.civicsAtHalf[v], `seed ${log.seed}`).toBe(0);
         // … then, trailing on prestige, he adapts: a few parks, one stop, one plaza at most.
         const civic = log.builds[v].filter((b) => !isShop(b.kind));
-        for (const b of civic) expect(b.tick, `seed ${log.seed}`).toBeGreaterThanOrEqual(half);
+        for (const b of civic) expect(b.tick, `seed ${log.seed}`).toBeGreaterThanOrEqual((VESPER_CIVIC.fromQuarter - 1) * log.s.quarterTicks);
         expect(civic.filter((b) => b.kind === 'park').length).toBeLessThanOrEqual(VESPER_CIVIC.parks);
         expect(civic.filter((b) => b.kind === 'tramstop').length).toBeLessThanOrEqual(VESPER_CIVIC.stops);
         expect(civic.filter((b) => b.kind === 'plaza').length).toBeLessThanOrEqual(VESPER_CIVIC.plazas);
@@ -334,7 +430,14 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
         expect(log.budgetShopTicks[v], `seed ${log.seed}`).toBeGreaterThan(1000);
         expect(log.s.players[v].stats.budgetSales, `seed ${log.seed}`).toBeGreaterThan(50);
         blitzes += log.s.players[v].stats.promos;
-        expect(log.s.players[v].totalLedger.marketing).toBe(log.s.players[v].stats.promos * PROMO_COST);
+        // Every blitz was paid for: full price, or the Market Heralds rate once that charter is his.
+        const p = log.s.players[v];
+        const heralds = promoCostFor({ charters: ['heralds'] });
+        expect(heralds).toBeLessThan(PROMO_COST);
+        expect(p.totalLedger.marketing).toBeLessThanOrEqual(p.stats.promos * PROMO_COST);
+        expect(p.totalLedger.marketing).toBeGreaterThanOrEqual(p.stats.promos * heralds);
+        if (!p.charters.includes('heralds')) expect(p.totalLedger.marketing).toBe(p.stats.promos * PROMO_COST);
+        expect((p.stats.promos * PROMO_COST - p.totalLedger.marketing) % (PROMO_COST - heralds)).toBe(0);
       }
       // The Price Shark award goes to a Vesper every time.
       const shark = log.s.result?.awards.find((a) => a.key === 'shark');
@@ -358,7 +461,7 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
     }
   });
 
-  it('does not borrow to expand during the final quarter: late loans are emergency credit only', () => {
+  it('does not borrow to expand during the final era: late loans are emergency credit only', () => {
     let expansion = 0;
     for (const log of logs) {
       for (const cash of log.lateCredit) expect(cash, `seed ${log.seed}`).toBeLessThan(0);
@@ -370,7 +473,8 @@ describe('AI personalities over full Standard matches (Vesper, Aurelia, Orson, V
 });
 
 describe('AI decisions in constructed situations', () => {
-  const duel = (persona: AiPersona, mode: 'standard' | 'endless' = 'standard'): GameState => {
+  /** One AI House against an idle human, at the opening tick of `era` (so its unlocks are in force). */
+  const duel = (persona: AiPersona, mode: 'standard' | 'endless' = 'standard', era = 1): GameState => {
     const s = createGame({
       seed: 5,
       mode,
@@ -381,6 +485,7 @@ describe('AI decisions in constructed situations', () => {
     });
     s.events = [];
     for (const p of s.players) p.cash = 5000;
+    if (era > 1) atEra(s, era);
     return s;
   };
   const prices = (cmds: Command[]): Record<number, number> =>
@@ -470,20 +575,31 @@ describe('AI decisions in constructed situations', () => {
     expect(prices(aiDecide(s, 0))).toEqual({});
   });
 
-  it('Aurelia prices at Craft, moves to Prestige at Level 3, and finishes her shops before opening a third', () => {
-    const s = duel('aurelia');
+  it('Aurelia prices at Craft, opens her Boutiques first in Era III, then finishes her shops and moves them to Prestige', () => {
+    const s = duel('aurelia', 'standard', 3);
     const a = build(s, 0, 4, 6, 'bistro');
     const b = build(s, 0, 5, 6, 'boutique');
     let cmds = aiDecide(s, 0);
     expect(prices(cmds)).toEqual({ [a.id]: 2, [b.id]: 2 });
+    // The Grand Boulevard is what she saved for: until two Boutiques stand, a new flagship
+    // door (a Bistro or a Boutique, whichever the street rewards) comes before any refit.
+    const door = cmds.filter((c) => c.c === 'build') as Extract<Command, { c: 'build' }>[];
+    expect(door).toHaveLength(1);
+    expect(flagship(door[0].kind)).toBe(true);
+    expect(cmds.some((c) => c.c === 'upgrade')).toBe(false);
+    const c2 = build(s, 0, 3, 6, 'boutique');
+    // Both flagships open: now she finishes what she has, one refit per thought, no third door.
+    cmds = aiDecide(s, 0);
+    expect(prices(cmds)).toEqual({ [a.id]: 2, [b.id]: 2, [c2.id]: 2 });
     expect(cmds.filter((c) => c.c === 'upgrade')).toHaveLength(1);
     expect(cmds.some((c) => c.c === 'build')).toBe(false);
     a.level = 3;
     b.level = 3;
+    c2.level = 3;
     cmds = aiDecide(s, 0);
-    expect(prices(cmds)).toEqual({ [a.id]: 3, [b.id]: 3 });
+    expect(prices(cmds)).toEqual({ [a.id]: 3, [b.id]: 3, [c2.id]: 3 });
     expect(cmds.some((c) => c.c === 'upgrade')).toBe(false);
-    // With both shops finished she turns to placemaking: a Festival Plaza.
+    // With her shops finished she turns to placemaking: a Festival Plaza.
     expect(cmds).toContainEqual(expect.objectContaining({ c: 'build', kind: 'plaza' }));
     // Orson, by contrast, holds Fair on a quiet Level 1 shop.
     const o = duel('orson');
@@ -491,8 +607,41 @@ describe('AI decisions in constructed situations', () => {
     expect(prices(aiDecide(o, 0))).toEqual({});
   });
 
-  it('Orson opens with a Tram Stop on the avenue, away from the stops that already exist', () => {
-    const s = duel('orson');
+  it('Aurelia stops at Level 2 before Era III, and banks her takings for the Boutique late in Era II', () => {
+    // Era I: two Level 2 shops are as finished as the era allows: no Level 3 refit is asked for.
+    const early = duel('aurelia');
+    const a = build(early, 0, 4, 6, 'bistro');
+    const b = build(early, 0, 5, 6, 'bistro');
+    expect(aiDecide(early, 0).filter((c) => c.c === 'upgrade')).toHaveLength(1);
+    a.level = 2;
+    b.level = 2;
+    expect(aiDecide(early, 0).some((c) => c.c === 'upgrade')).toBe(false);
+    // Late in Transit & Trade, with a modest purse, she spends nothing: the Boutique is next.
+    const banking = duel('aurelia', 'standard', 2);
+    build(banking, 0, 4, 6, 'bistro');
+    build(banking, 0, 5, 6, 'bistro');
+    banking.players[0].cash = 700;
+    banking.tick += Math.round(banking.quarterTicks * 0.8);
+    const held = aiDecide(banking, 0);
+    expect(held.some((c) => c.c === 'build' || c.c === 'upgrade')).toBe(false);
+    // The same purse early in the era is put to work.
+    const working = duel('aurelia', 'standard', 2);
+    build(working, 0, 4, 6, 'bistro');
+    build(working, 0, 5, 6, 'bistro');
+    working.players[0].cash = 700;
+    working.tick += Math.round(working.quarterTicks * 0.1);
+    expect(aiDecide(working, 0).some((c) => c.c === 'build' || c.c === 'upgrade')).toBe(true);
+  });
+
+  it('Orson opens Era I with a shop, and Era II with a Tram Stop on the avenue, away from the stops that already exist', () => {
+    // The Tram Stop is locked in the Founding era: he founds a shop like everyone else.
+    const founding = duel('orson');
+    founding.players[0].cash = 900;
+    const opening = aiDecide(founding, 0).find((c) => c.c === 'build') as Extract<Command, { c: 'build' }>;
+    expect(isShop(opening.kind)).toBe(true);
+    expect(isUnlocked(opening.kind, 1)).toBe(true);
+    // Transit & Trade: the stop comes first.
+    const s = duel('orson', 'standard', 2);
     s.players[0].cash = 900;
     const cmds = aiDecide(s, 0);
     const first = cmds.find((c) => c.c === 'build') as Extract<Command, { c: 'build' }>;
@@ -504,10 +653,27 @@ describe('AI decisions in constructed situations', () => {
     expect(buildingAt(s, first.tile)?.kind).toBe('tramstop');
     // Vesper and Aurelia, in the same seat, open a shop instead.
     for (const persona of ['vesper', 'aurelia'] as AiPersona[]) {
-      const other = duel(persona);
+      const other = duel(persona, 'standard', 2);
       other.players[0].cash = 900;
-      const opening = aiDecide(other, 0).find((c) => c.c === 'build') as Extract<Command, { c: 'build' }>;
-      expect(isShop(opening.kind)).toBe(true);
+      const shop = aiDecide(other, 0).find((c) => c.c === 'build') as Extract<Command, { c: 'build' }>;
+      expect(isShop(shop.kind)).toBe(true);
+    }
+  });
+
+  it('never proposes a locked trade, and saves toward the next era\u2019s trades once the current one is nearly spent', () => {
+    for (const persona of ['vesper', 'aurelia', 'orson'] as AiPersona[]) {
+      for (const era of [1, 2, 3, 4]) {
+        for (const phase of [0.05, 0.5, 0.95]) {
+          const s = duel(persona, 'standard', era);
+          build(s, 0, 3, 6, 'roastery');
+          build(s, 0, 4, 6, 'bistro');
+          s.tick += Math.round(s.quarterTicks * phase);
+          for (const cmd of aiDecide(s, 0)) {
+            if (cmd.c === 'build') expect(isUnlocked(cmd.kind, s.quarter), `${persona} era ${era}: ${cmd.kind}`).toBe(true);
+            expect(applyCommand(clone(s), 0, cmd).ok, `${persona} era ${era}: ${JSON.stringify(cmd)}`).toBe(true);
+          }
+        }
+      }
     }
   });
 
@@ -516,9 +682,9 @@ describe('AI decisions in constructed situations', () => {
       const out = new Set<string>();
       for (const kind of SHOP_KINDS) {
         for (let part = 0; part < 4; part++) {
-          const s = duel(persona);
+          const s = duel(persona, 'standard', 3); // every trade is unlocked by Era III
           const shop = build(s, 0, 3, 6, kind);
-          s.tick = Math.round((part + 0.4) * (s.quarterTicks / 4));
+          s.tick += Math.round((part + 0.4) * (s.quarterTicks / 4));
           const promo = aiDecide(s, 0).filter((c) => c.c === 'promo');
           expect(promo.length).toBeLessThanOrEqual(1); // one blitz per thought
           if (promo.length) {
@@ -538,9 +704,9 @@ describe('AI decisions in constructed situations', () => {
     expect(vesper.size).toBeGreaterThan(0);
     // Nobody advertises a trade in its dead hours, or with an empty till.
     expect(vesper.has('nightmarket@0')).toBe(false);
-    const broke = duel('vesper');
+    const broke = duel('vesper', 'standard', 3);
     build(broke, 0, 3, 6, 'cinema');
-    broke.tick = Math.round(3.4 * (broke.quarterTicks / 4));
+    broke.tick += Math.round(3.4 * (broke.quarterTicks / 4));
     broke.players[0].cash = 40;
     expect(aiDecide(broke, 0).some((c) => c.c === 'promo')).toBe(false);
   });
@@ -582,7 +748,7 @@ describe('AI decisions in constructed situations', () => {
 
   it('expects less from a trade the more shops already ply it', () => {
     for (const kind of SHOP_KINDS) {
-      const s = duel('vesper');
+      const s = duel('vesper', 'standard', 3);
       for (const p of s.players) p.cash = 1e6;
       const me = s.players[0];
       const outlook = [tradeOutlook(s, me, kind)];
@@ -603,13 +769,13 @@ describe('AI decisions in constructed situations', () => {
       }
       // Other trades are unaffected by this one filling up.
       const other = SHOP_KINDS.find((k) => k !== kind) as (typeof SHOP_KINDS)[number];
-      expect(tradeOutlook(s, me, other)).toBe(tradeOutlook(duel('vesper'), me, other));
+      expect(tradeOutlook(s, me, other)).toBe(tradeOutlook(duel('vesper', 'standard', 3), me, other));
     }
   });
 
-  it('Orson borrows to expand mid-match but not in the final quarter', () => {
+  it('Orson borrows to expand mid-match but not in the final era', () => {
     const setup = (mode: 'standard' | 'endless' = 'standard'): GameState => {
-      const s = duel('orson', mode);
+      const s = duel('orson', mode, 2); // Era II: the Tram Stop and the Arcade are unlocked
       build(s, 0, 2, 2, 'tramstop');
       build(s, 0, 3, 2, 'roastery');
       build(s, 0, 4, 2, 'arcade');
@@ -625,13 +791,11 @@ describe('AI decisions in constructed situations', () => {
     expect(aiDecide(early, 0)).not.toContainEqual({ c: 'borrow' });
     // The same books in the final quarter: no loan.
     const late = setup();
-    late.quarter = late.totalQuarters;
-    late.tick += (late.totalQuarters - 1) * late.quarterTicks;
+    atEra(late, late.totalQuarters);
     expect(aiDecide(late, 0)).not.toContainEqual({ c: 'borrow' });
     // It is the calendar that stops him: in an endless game the same day is business as usual.
     const endless = setup('endless');
-    endless.quarter = 4;
-    endless.tick += 3 * endless.quarterTicks;
+    atEra(endless, 4);
     expect(aiDecide(endless, 0)).toContainEqual({ c: 'borrow' });
   });
 

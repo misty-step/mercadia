@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CIVICS, PRESTIGE_TRAM, TRANSIT_RADIUS } from '../src/shared/constants';
 import { CITY, H, N, W, chebyshev, idx, inside, manhattan, pathTo, tx, ty, walkDist } from '../src/shared/map';
 import { canBuild, createGame, loopPoint, lotBonuses, stopTiles, trafficPips } from '../src/shared/sim';
 import { build, freeze, fxOf, humans, labGame, run } from './helpers';
+
+// Whole seeded matches are played in here: leave room for a busy machine.
+vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
 
 const NEIGH: [number, number][] = [
   [0, 1],
@@ -150,7 +153,7 @@ describe('Tram loop', () => {
     expect(fresh.trams.every((t) => !t.special)).toBe(true);
     expect(Math.abs(fresh.trams[0].pos - fresh.trams[1].pos)).toBeCloseTo(CITY.loop.length / 2, 10);
     expect(stopTiles(fresh)).toEqual(CITY.fixedStops);
-    const s = labGame({ seed: 5 });
+    const s = labGame({ era: 3, seed: 5 });
     const rung = new Set<number>();
     for (let i = 0; i < 1200; i++) {
       run(s, 1);
@@ -225,7 +228,7 @@ describe('Buildable-lot bonuses', () => {
     expect(CITY.corner[idx(3, 2)]).toBe(false);
     expect(CITY.corner[idx(3, 6)]).toBe(false);
     // A corner has a street both beside it and above or below it.
-    const s = labGame();
+    const s = labGame({ era: 3 });
     for (const t of CITY.lots) {
       const hor = neighbours(t).some((n) => isStreet(n) && ty(n) === ty(t));
       const ver = neighbours(t).some((n) => isStreet(n) && tx(n) === tx(t));
@@ -242,7 +245,7 @@ describe('Buildable-lot bonuses', () => {
     expect(CITY.canalFront[idx(6, 2)]).toBe(true);
     expect(CITY.canalFront[idx(2, 2)]).toBe(false);
     expect(CITY.canalFront[idx(8, 2)]).toBe(false);
-    const s = labGame();
+    const s = labGame({ era: 3 });
     for (const t of CITY.lots) {
       expect(CITY.canalFront[t]).toBe(neighbours(t).some(isWater));
       // An empty district reports the static bonuses and no civic aura.
@@ -254,7 +257,7 @@ describe('Buildable-lot bonuses', () => {
   });
 
   it('grants the transit bonus within walking reach of the fixed city stops only', () => {
-    const s = labGame();
+    const s = labGame({ era: 3 });
     expect(lotBonuses(s, idx(8, 2)).transit).toBe(true);
     expect(lotBonuses(s, idx(10, 0)).transit).toBe(true);
     expect(lotBonuses(s, idx(3, 6)).transit).toBe(false);
@@ -268,7 +271,7 @@ describe('Buildable-lot bonuses', () => {
   });
 
   it('extends the transit bonus and the stop list when a player builds a Tram Stop', () => {
-    const s = labGame({ cash: 5000 });
+    const s = labGame({ era: 3, cash: 5000 });
     const neighbour = idx(3, 2);
     expect(lotBonuses(s, neighbour).transit).toBe(false);
     expect(lotBonuses(s, idx(2, 2)).transit).toBe(false);
@@ -290,7 +293,7 @@ describe('Buildable-lot bonuses', () => {
   });
 
   it('only allows a Tram Stop on a lot that touches the avenue', () => {
-    const s = labGame({ cash: 5000 });
+    const s = labGame({ era: 3, cash: 5000 });
     const inner = CITY.lots.filter((t) => CITY.avenueAdj[t] < 0);
     const outer = CITY.lots.filter((t) => CITY.avenueAdj[t] >= 0);
     expect(inner.length).toBeGreaterThan(0);
@@ -306,7 +309,7 @@ describe('Buildable-lot bonuses', () => {
   });
 
   it('makes trams call at a player-built Tram Stop and pays its owner prestige', () => {
-    const s = labGame({ cash: 5000 });
+    const s = labGame({ era: 3, cash: 5000 });
     const stop = build(s, 1, 2, 2, 'tramstop');
     const tile = CITY.avenueAdj[stop.tile];
     expect(s.players[1].prestige).toBe(CIVICS.tramstop.prestige);
@@ -322,7 +325,7 @@ describe('Buildable-lot bonuses', () => {
   });
 
   it('counts adjacent Pocket Parks, capped at two, and ignores parks further away', () => {
-    const s = labGame({ cash: 5000 });
+    const s = labGame({ era: 3, cash: 5000 });
     const lot = idx(3, 6);
     build(s, 0, 9, 6, 'park'); // across the canal
     expect(lotBonuses(s, lot).parks).toBe(0);
@@ -339,7 +342,7 @@ describe('Buildable-lot bonuses', () => {
   });
 
   it('spreads the Festival Plaza aura over two tiles and no further', () => {
-    const s = labGame({ cash: 5000 });
+    const s = labGame({ era: 3, cash: 5000 });
     const plaza = build(s, 0, 4, 6, 'plaza');
     for (const t of CITY.lots) {
       if (t === plaza.tile) continue;
@@ -352,9 +355,9 @@ describe('Buildable-lot bonuses', () => {
   });
 
   it('rates live foot traffic past every lot between one and five pips', () => {
-    const cold = freeze(labGame());
+    const cold = freeze(labGame({ era: 3 }));
     cold.footfall = cold.footfall.map(() => 0);
-    const s = run(labGame({ seed: 9 }), 400);
+    const s = run(labGame({ era: 3, seed: 9 }), 400);
     for (const t of CITY.lots) {
       for (const g of [cold, s]) {
         const pips = trafficPips(g, t);

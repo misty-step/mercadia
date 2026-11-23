@@ -5,6 +5,14 @@ import {
   DAYPART_NAMES,
   DAY_DEMAND,
   EVENTS,
+  MILESTONES,
+  MILESTONE_CIVICS,
+  MILESTONE_PRESTIGE,
+  MILESTONE_PROPERTIES,
+  MILESTONE_SERVED,
+  MILESTONE_SHARE,
+  MILESTONE_SOVEREIGN_ERA,
+  MILESTONE_WORTH,
   PARK_AURA,
   PARK_RADIUS,
   PLAZA_AURA,
@@ -15,10 +23,11 @@ import {
   auraRadius,
   buildCost,
   buildName,
+  eraOf,
   isShop,
 } from './constants';
 import { CITY, chebyshev, manhattan } from './map';
-import { lotBonuses, priceOf } from './sim';
+import { hasEnclave, lotBonuses, priceOf, trafficPips } from './sim';
 import type { BuildKind, Building, CivicKind, Desire, EventKind, LostCustomers, ShopKind } from './types';
 
 type BuildingLike = Pick<Building, 'id' | 'tile' | 'kind' | 'owner'>;
@@ -245,6 +254,115 @@ export const eventEffect = (kind: EventKind): string => EVENTS[kind].effect;
 /** Price a rival would have to beat: used by the Inspector to name a stance in words. */
 export const stanceLabel = (b: Pick<Building, 'kind' | 'stance'>): string =>
   `${STANCES[b.stance].name} · ${money(priceOf(b))}`;
+
+// ───────────────────────────── Founding Guide ─────────────────────────────
+
+/** How many starter corners the Founding Guide marks on the map. */
+export const STARTER_LOTS = 4;
+
+/**
+ * The prime starter corners: the vacant lots with the most foot traffic past the door, corners
+ * first, spread out so the brass rings do not all land on one block.
+ */
+export function starterLots(world: { buildings: Pick<Building, 'kind' | 'tile'>[]; footfall: number[] }, n = STARTER_LOTS): number[] {
+  const taken = new Set(world.buildings.map((b) => b.tile));
+  const ranked = CITY.lots
+    .filter((t) => !taken.has(t))
+    .map((t) => {
+      const bon = lotBonuses(world, t);
+      return { t, score: trafficPips(world, t) + (bon.corner ? 1.5 : 0) + (bon.canal ? 0.4 : 0) + (bon.transit ? 0.3 : 0) };
+    })
+    .sort((a, b) => b.score - a.score || a.t - b.t);
+  const out: number[] = [];
+  for (const r of ranked) {
+    if (out.length >= n) break;
+    if (out.some((o) => chebyshev(o, r.t) <= 1)) continue; // keep the marks apart
+    out.push(r.t);
+  }
+  for (const r of ranked) {
+    if (out.length >= n) break;
+    if (!out.includes(r.t)) out.push(r.t);
+  }
+  return out;
+}
+
+export interface GuideFacts {
+  /** Buildings the player owns. */
+  owned: Pick<Building, 'kind' | 'tile'>[];
+  /** The player has opened the Inspector on one of their own shops at least once. */
+  inspected: boolean;
+  /** Dynasty Milestones earned so far. */
+  stars: number;
+  /** The player dismissed the guide. */
+  dismissed: boolean;
+}
+
+export interface GuideView {
+  /** 1..3 while the guide is showing, 0 once it has retired. */
+  step: 0 | 1 | 2 | 3;
+  title: string;
+  hint: string;
+  /** Steps done, for the three progress pips. */
+  done: [boolean, boolean, boolean];
+}
+
+export const GUIDE_STEPS: { title: string; hint: string }[] = [
+  { title: 'Claim a prime corner', hint: 'Pick Roastery or Bistro, then click a ringed lot.' },
+  { title: 'Inspect your opening street', hint: 'Click your shop for its live diagnosis and price stance.' },
+  { title: 'Shape your block or earn your first Milestone', hint: 'Place a Pocket Park or claim a second property.' },
+];
+
+/**
+ * The three-step Founding Guide. It advances on what the player has actually done and retires
+ * for good once the third step is complete, or the moment it is dismissed.
+ */
+export function guideState(f: GuideFacts): GuideView {
+  const shops = f.owned.filter((b) => isShop(b.kind)).length;
+  const one = shops >= 1;
+  const two = one && f.inspected;
+  const three = two && (f.owned.length >= 2 || f.owned.some((b) => b.kind === 'park') || f.stars >= 1);
+  const done: [boolean, boolean, boolean] = [one, two, three];
+  if (f.dismissed || three) return { step: 0, title: '', hint: '', done };
+  const step = !one ? 1 : !two ? 2 : 3;
+  return { step, title: GUIDE_STEPS[step - 1].title, hint: GUIDE_STEPS[step - 1].hint, done };
+}
+
+// ───────────────────────────── Dynasty ─────────────────────────────
+
+export interface MilestoneProgress {
+  name: string;
+  goal: string;
+  pill: string;
+  done: boolean;
+  /** 0..1 toward the nearer of the milestone's two thresholds. */
+  progress: number;
+  /** "18/25 served" */
+  detail: string;
+}
+
+/** Where a House stands on each Dynasty Milestone, for the leaderboard's progress pill. */
+export function milestoneProgress(
+  world: { buildings: Pick<Building, 'tile' | 'owner'>[]; quarter: number },
+  p: { id: number; milestones: number[]; served: number; civicBuilt: number; prestige: number; netWorth: number; share: number },
+): MilestoneProgress[] {
+  const owned = world.buildings.filter((b) => b.owner === p.id);
+  const enclave = hasEnclave(world, p.id);
+  const era = eraOf(world.quarter);
+  const frac = (v: number, of: number): number => Math.max(0, Math.min(1, v / of));
+  const rows: [number, string][] = [
+    [frac(p.served, MILESTONE_SERVED), `${Math.min(p.served, MILESTONE_SERVED)}/${MILESTONE_SERVED} served`],
+    [enclave ? 1 : frac(owned.length, MILESTONE_PROPERTIES), `${Math.min(owned.length, MILESTONE_PROPERTIES)}/${MILESTONE_PROPERTIES} properties`],
+    [Math.max(frac(p.civicBuilt, MILESTONE_CIVICS), frac(p.prestige, MILESTONE_PRESTIGE)), `${Math.min(p.civicBuilt, MILESTONE_CIVICS)}/${MILESTONE_CIVICS} civic · ${Math.floor(p.prestige)}/${MILESTONE_PRESTIGE} prestige`],
+    [
+      era < MILESTONE_SOVEREIGN_ERA ? Math.min(0.9, Math.max(frac(p.netWorth, MILESTONE_WORTH), frac(p.share, MILESTONE_SHARE))) : Math.max(frac(p.netWorth, MILESTONE_WORTH), frac(p.share, MILESTONE_SHARE)),
+      era < MILESTONE_SOVEREIGN_ERA ? 'Opens in Era III' : `§${Math.round(p.netWorth).toLocaleString('en-US')}/§1,200 · ${Math.round(p.share * 100)}%/40%`,
+    ],
+  ];
+  return MILESTONES.map((m, i) => {
+    const done = (p.milestones[i] ?? -1) >= 0;
+    return { name: m.name, goal: m.goal, pill: m.pill, done, progress: done ? 1 : rows[i][0], detail: done ? 'Earned' : rows[i][1] };
+  });
+}
 
 // ───────────────────────────── Names ─────────────────────────────
 
