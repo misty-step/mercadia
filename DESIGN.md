@@ -1,220 +1,183 @@
 # MERCADIA — Design
 
-This document describes how MERCADIA looks, sounds, and is put together. It is written in the
-present tense and is kept true to the code.
+This document describes how MERCADIA looks, feels, sounds, and is structured. It is written in
+the present tense as living truth for the product.
 
-## 1. Visual direction — a sunlit architectural diorama
+## 1. Visual direction — sunlit architectural diorama with unmistakable heraldry
 
-Warm print on travertine. The reference points are risograph posters, Monument Valley's
-tonal solids, and Mini Metro's restraint. The district sits on a stone slab like a model on a
-table, with harbor water along its near edge.
+Warm editorial print on travertine, inspired by architectural risograph posters, Monument
+Valley's tonal solids, and Mini Metro's legible restraint. The canal district rests on a sculpted
+stone slab bordered by harbor water.
 
 ### Palette
 
 | Token | Hex | Use |
 | --- | --- | --- |
-| Travertine | `#EFE9DC` | Page, paving, stone |
-| Terracotta | `#C86443` | Tiled roofs |
-| Sage | `#84A98C` | Park turf, vacant lots, trees |
-| Canal | `#3E8E9E` | Canal and harbor water |
-| Avenue slate | `#464B57` | Avenues and lanes |
-| Brass | `#D4A34A` | Tram rails, tram trim, coin pops |
-| Ink | `#1E1A16` | Text, hairlines |
-| Linen | `rgba(250, 247, 240, 0.93)` | HUD surfaces |
+| Travertine | `#EFE9DC` | Page canvas, paving, stone slab |
+| Terracotta | `#C86443` | Tiled roofs, warm civic accents |
+| Sage | `#84A98C` | Park turf, vacant lots, foliage |
+| Canal | `#3E8E9E` | Grand Canal and harbor water |
+| Avenue slate | `#464B57` | Streetcar Avenue and lanes |
+| Brass | `#D4A34A` | Tram rails, era unlocks, crests, milestones, coin pops |
+| Ink | `#1E1A16` | Primary text, crisp hairlines |
+| Linen | `rgba(250, 247, 240, 0.94)` | HUD surfaces and cards |
 
-House colors: Vermilion Guild `#D6453A`, Cobalt Syndicate `#2667B8`, Marigold House
-`#D48C1C`, Emerald Atelier `#248A63`. A House color appears on awnings, pennants, the lot
-kerb, and leaderboard chips — never as a panel background.
+### House palette and heraldry
 
-### Form
+| House | Primary | Deep Trim | Soft Wash | Crest Emblem |
+| --- | --- | --- | --- | --- |
+| Vermilion Guild | `#D6453A` | `#9F2B23` | `rgba(214, 69, 58, 0.16)` | Compass Shield |
+| Cobalt Syndicate | `#2667B8` | `#184785` | `rgba(38, 103, 184, 0.16)` | Harbor Anchor Shield |
+| Marigold House | `#D48C1C` | `#9C620D` | `rgba(212, 140, 28, 0.17)` | Sunburst Crown Shield |
+| Emerald Atelier | `#248A63` | `#156145` | `rgba(36, 138, 99, 0.16)` | Laurel Arch Shield |
 
-- Faces are flat tonal solids with no outlines: lit top, mid left face, shaded right face.
-- Every shop archetype has its own silhouette, and each level changes the architecture: an
-  extra floor at Level 2, a rooftop pergola or terrace and a gilded cornice at Level 3.
-- Ground shadows are a single multiply layer. They swing and stretch with the sun.
-- A faint paper grain lies over the whole canvas.
+House colors never flood full HUD panel backgrounds; they act as bold territorial borders,
+heraldic crests, fluttering banners, awnings, leaderboard badges, and Chronicle stripes. Every
+House pairs its color with a distinct geometric crest so ownership stays unambiguous even under
+color-vision deficiency or zoomed-out camera views.
 
-### Time-of-day lighting
+### Territorial ownership on the canvas
 
-Each quarter is one day. A colour grade multiplies over the diorama and moves through four
-keys: Morning Amber → Crisp Sunlit Noon → Golden Hour → Twilight Lantern Glow. The grade is
-full strength over the model and feathers out to nothing, so the page around it stays
-travertine. At twilight a second pass paints light after the grade: lit windows, street lamps,
-café string lights, the cinema marquee, tram headlamps, and nightmarket lanterns.
+Player ownership is readable in a single glance at every zoom level:
 
-### Weather and events on canvas
+- **Bold lot kerb:** Every owned lot frames its perimeter in a crisp, double-stroked House-colored
+  kerb (primary fill + deep trim outer edge) that cleanly separates owned blocks from vacant sage
+  lots.
+- **Contiguous enclave wash:** When a House owns two or more orthogonally adjacent lots, the
+  shared boundary softens into a warm translucent House wash and continuous outer district trim,
+  making emerging merchant quarters unmistakable.
+- **Tall House banner & crest medallion:** Every owned shop and civic landmark flies a crisp tall
+  standard with a gently waving House pennant and an inset white-and-brass heraldic emblem drawn
+  above the roofline (and rendered after the twilight color grade so crests stay bright at dusk).
+- **Milestone stars:** Each Dynasty Milestone earned by a House adds a brass star pip beside its
+  crest on the leaderboard and gilded trim on its flagship banners.
 
-Cloudburst: slanted rain streaks, ripples on the canal, a cooler grade. Lantern Festival:
-golden paper lanterns drift up over the district. Harbor Cruise: a white liner berths at the
-pier. Free-Ride Tram Day: a third tram joins the loop with a pennant.
+### Form, lighting, and era progression
+
+- Flat tonal isometric solids with distinct lit top, mid left, and shaded right faces.
+- Every shop archetype has a unique silhouette that grows across three levels (Level 2 adds an
+  upper story; Level 3 adds rooftop terraces/pergolas and brass cornices once unlocked in Era III).
+- Each Era sweeps through one full sunlit day: Morning Amber → Crisp Sunlit Noon → Golden Hour →
+  Twilight Lantern Glow, with additive warm lights at dusk (shop windows, streetlamps, café
+  string lights, cinema marquees, tram headlamps, and nightmarket lanterns).
+- As the city advances from Era I to Era IV, subtle environmental maturity appears on the slab:
+  canal-side pennant lines in Era II, grand brass boulevard lamps and denser tourist ferries in
+  Era III, and gilded civic garlands in Era IV.
+- Weather and city events transform the scene directly: slanted rain and canal ripples for
+  Cloudburst, a berthed liner at the Harbor Pier for Harbor Cruise, a third pennanted tram for
+  Free-Ride Tram Day, and drifting golden lanterns for the Street Lantern Festival.
 
 ### Typography
 
-- **Fraunces** — wordmark, quarter banners, headlines. Fallback `Georgia, serif`.
-- **DM Sans** — interface labels. Fallback `system-ui, sans-serif`.
-- **JetBrains Mono** — cash, prices, shares, room codes, always tabular. Fallback
-  `ui-monospace, monospace`.
-
-Fonts load from Google Fonts with `display=swap`; the fallbacks carry the layout offline.
+- **Fraunces** — wordmark, Era banners, Council headers, Chronicle headlines, Final Edition.
+  Fallback `Georgia, serif`.
+- **DM Sans** — interface labels, build dock, Inspector, onboarding steps. Fallback
+  `system-ui, sans-serif`.
+- **JetBrains Mono** — cash, Crown Index, percentages, countdowns, room codes (always
+  `tabular-nums`). Fallback `ui-monospace, monospace`.
 
 ### Anti-slop rules
 
-No dark purple neon. No Inter. No glowing calls to action. No emoji as interface. No bento
-grid over the canvas. No modal larger than the decision it carries. Surfaces are linen with a
-`1px solid rgba(30, 26, 22, 0.14)` hairline and a `6px` radius. Icons are bespoke inline SVG.
+No dark purple neon, no Inter, no glowing generic CTAs, no emoji-as-interface, no heavy drop
+shadows or glassmorphic clutter over the city. Surfaces use warm Linen with crisp ink hairlines
+(`1px solid rgba(30, 26, 22, 0.16)`) and tight `6px` corners. All icons and House crests are
+bespoke inline SVG.
 
-## 2. Layout
+## 2. Layout and interaction
 
-The canvas is `100vw × 100dvh`. HUD pieces dock to the edges:
+The isometric canvas fills `100vw × 100dvh`. Persistent HUD pieces hug the edges so 85% or more
+of the viewport remains uninterrupted city at 1440×900:
 
-| Piece | Dock | Content |
+| Surface | Dock | Role |
 | --- | --- | --- |
-| Clock chip | top left | Wordmark, quarter, daypart dial, speed controls, fit, sound, leave |
-| Gazette ticker | top, beside the clock | Current or forecast city event with a countdown bar |
-| Leaderboard | top right | Four Houses in rank order, Crown Index, Worth + Share + Prestige toggle, market-share bar in the same order |
-| Treasury chip | bottom left | Cash, debt, `Borrow §400 · 18%/qtr`, Ledger drawer toggle |
-| Build dock | bottom centre | Six shops, three civic projects, cost, unmet-demand pips, a tooltip per tool |
-| Inspector | right edge | Opens for a clicked shop, lot, or citizen; closes with Esc. Leads with the shop's diagnosis line |
-| Spectator notice | bottom centre | Ink `#1E1A16` on `rgba(250, 247, 240, 0.96)` with a hairline; shown instead of the dock |
+| **Era & Clock chip** | Top left | Wordmark, active Era name & progress bar (`Era I · Founding`), daypart dial, speed controls (`Pause`, `0.5×`, `1×`, `2×`, `3×` in solo; host pace in MP), Fit, Sound, Leave |
+| **Mercadia Chronicle** | Top center-left | Punchy live Event Stream: prominent active Dispatch Banner (crest/icon + bold headline + mechanical impact tag) plus a compact collapsible 3-line recent feed with category stripes and click-to-focus jumps |
+| **Leaderboard & Dynasty strip** | Top right | Four Houses in rank order with heraldic crests, Milestone stars, Crown Index, expandable `Worth + Share + Prestige` breakdown, market-share bar, and a compact Milestone progress pill |
+| **Founding Guide** | Upper-left below clock (self-retiring) | Three-step first-60-seconds guide that advances automatically as you build, inspect, and shape a block, with one-click dismiss; vanishes permanently once done |
+| **Treasury chip** | Bottom left | Cash, debt, `Borrow §400` with exact per-era rate, active Dynasty Charter badges, and Ledger drawer toggle |
+| **Build dock** | Bottom center | Six shops and three civic projects with Era lock badges (`Era II`, `Era III`) on future-era tools, cost, unmet-demand pips, and concise hover tooltips |
+| **Inspector** | Right edge (bottom sheet on mobile) | Opens on clicking a shop, lot, or citizen; leads with the one-line diagnosis and House crest; closes with `Esc` |
+| **Era Council modal** | Centered compact card between Eras | Appears at the close of Eras I, II, and III: celebrates newly unlocked builds with icons, shows Era standings deltas, and presents three **Dynasty Charters** to adopt before advancing |
+| **Spectator notice** | Bottom center | High-contrast ink on cream Linen (`≥ 10:1` contrast) replacing the dock for latecomers |
 
-At 1440×900 the persistent HUD covers about 14% of the viewport, leaving 86% to the city. At
-1024×768 the dock tightens and moves right of the treasury.
+### Mobile parity (`390×844`)
 
-At 390×844:
+- Single-row ranked score strip at top with House crests, short names, and Crown Index; tapping
+  expands the full `Worth + Share + Prestige` and Milestone breakdown.
+- Compact single-headline Chronicle bar beneath the strip showing the latest loud dispatch and
+  impact tag; tapping expands the recent Chronicle feed without obscuring the play area permanently.
+- Founding Guide collapses to a slim one-line prompt above the dock and retires automatically.
+- Build dock switches cleanly between `Shops (6)` and `Civic (3)` tabs with Era lock badges
+  clearly legible and zero horizontal clipping.
+- Fit view frames the entire island tip-to-tip; first tap previews a blueprint and civic reach,
+  second tap builds; Inspector opens as a bottom sheet (max 42% viewport height) and pans the
+  selected block into the open city strip above it.
+- Era Council modal stacks cleanly in a single scrollable column with large tap targets.
 
-- The score strip is one row in rank order: House chip, initials (`You`, `Ves`, `Aur`,
-  `Ors`), Crown. The share bar beneath it uses the same order. Tapping the strip expands the
-  Worth + Share + Prestige breakdown.
-- The Gazette ticker is a fixed 48 px: event title plus its modifier line
-  (`Cinema & Roastery +45% · Nightmarket −35%`), or two lines of news.
-- At 640 px and below the dock shows one palette at a time behind a `Shops (6)` /
-  `Civic (3)` tab switch, with a one-line hint beside it. Nothing scrolls off screen.
-- Fit view (and the opening view) fits the island from the harbor corner to the station
-  corner, centred on the slab, with a few pixels to spare.
-- The Inspector is a bottom sheet (at most 42% of the height) over the dock. It scrolls,
-  collapses to its summary, and pans the camera once so the selected block sits in the strip
-  of city above it. Building does not open it; a tap on the building does.
-- A blueprint has no hover on touch: the first tap on a lot shows the lot card and the reach
-  ring, the second tap on the same lot builds.
-- A citizen's speech card flips below the citizen when there is no room above, so it never
-  covers the clock, ticker or score strip (all viewports).
+### Controls and focus
 
-Input: drag to pan, WASD or arrows to pan, wheel or `+`/`-` to zoom about the cursor, click to
-inspect, `1`–`9` to pick a build tool, `Esc` to cancel, `Space` to pause in solo, `M` to mute,
-`F` to fit. The key policy is a pure function (`src/client/input.ts`): `1`–`9` and `Space` do
-nothing while the Title, the Lobby or the Victory modal is on screen, and the final bell, a
-Rematch and Continue in Endless each drop whatever tool was armed. The Sound button carries
-`aria-pressed` and a label that names the next press (`Mute sound (M)` / `Unmute sound (M)`).
-Leave arms on the first click (`Leave?`, four seconds) and leaves on the second.
+Drag or WASD/arrows to pan, wheel or `+`/`-` to zoom about the cursor, click to inspect, `1`–`9`
+for build tools (ignoring locked future-era tools with a clear unlock toast), `Esc` to cancel,
+`Space` to pause in solo, `M` to mute, `F` to fit. Build and speed hotkeys are cleanly disabled
+while Title, Lobby, Era Council, or Final Edition overlays are open.
 
-### The Final Edition
+## 3. Event stream & feedback craft
 
-The victory summary is a newspaper front page: a double-ruled masthead (*The Mercadia
-Gazette*, Final Edition), the winning House's crest (shield in the House colour, brass crown,
-laurel), a Fraunces headline with an italic deck, the winner's `Worth + Share + Prestige =
-Crown` equation, the standings table with each part and its source value, an inline SVG
-market-share chart, three honours, and two prominent buttons: Rematch and Continue in
-Endless. The chart follows the data-viz rules used here: 2 px lines in the House colours
-(validated for colour-vision separation), end dots with a surface ring, direct end labels in
-ink, hairline gridlines at each quarter's close, a legend, and a `<title>` on every line, dot
-and quarter band. The dialog takes focus itself, never a button.
+The **Mercadia Chronicle** makes every turning point loud, legible, and rewarding:
 
-## 3. Rendering
-
-Canvas 2D, isometric 2:1, tile 64×32 world units, device-pixel-ratio aware.
-
-Frame order:
-
-1. Slab, harbor, and ground tiles back to front (paving, avenue with crosswalks and brass
-   rails, lanes, animated canal shimmer).
-2. One merged shadow path.
-3. Depth-sorted actors: buildings, bridges, trees, lamps, trams, citizens, boats.
-4. Colour grade (multiply), then the light pass (additive), then weather.
-5. Overlays: build footprint, bonus tags, traffic pips, selection ring, civic reach (a
-   cream-backed dashed ring, a wash on each lot inside, a marker on each shop it lifts — filled
-   for yours, outlined for a rival's), the Tram Stop blueprint (marching brass dashes along the
-   tramway, green avenue-side lots, greyed and struck-through inland lots), event focus (a
-   brass outline and up-chevron on boosted shops, a slate down-chevron on dampened ones, slow
-   rings on the Harbor Pier or the tram platforms), Promo Blitz pills, floating feedback
-   (`+§24` coin pops, delight stars, queue and stockout badges), paper grain.
-
-Promo Blitz pills are ink on solid cream with an ink hairline and a House-colour dot. They are
-drawn after the colour grade, so they stay cream at twilight and over canal water, and they
-never render smaller than 8.5 px on screen.
-
-The simulation is authoritative at 10 Hz. The renderer keeps the previous and current
-positions of every citizen and tram and interpolates at display rate, so motion is smooth at
-60 FPS in solo and multiplayer alike.
-
-Buildings and the ground are cached as sprites at the current zoom and redrawn only when the
-zoom bucket or the set of buildings changes. Some machines expose a "GPU" that is a slow
-software emulation; the client times its first frames and, if they crawl, swaps to a CPU-backed
-canvas and remembers the choice. `?canvas=cpu` or `?canvas=gpu` pins it.
+- **Tier 1 — Major Dispatches (Headline Banner + Audio Sting):** Era transitions, Dynasty
+  Milestone unlocks, Crown Index lead changes, City Events (forecast, start, receipt), and
+  rivalry clashes (Promo Blitzes or direct same-trade undercuts). Each displays a crisp crest or
+  category badge, bold Fraunces/DM Sans headline, and a high-contrast mechanical impact pill
+  (e.g., `Cinema +45%`, `+§80 · ★1`, `New Leader`).
+- **Tier 2 — Chronicle Stream (Recent Feed):** Keeps the latest 3–4 dispatches scannable in a
+  tight Linen stack with 3 px colored left rules (Brass = Era/Milestone, Canal = City Event,
+  House color = Rivalry/Build). Dispatches tied to a lot include a subtle focus affordance that
+  smoothly pans the camera to the action.
+- **Canvas feedback:** Floating brass coin pops (`+§24`), delight stars, queue/stockout badges,
+  Era unlock shimmer rings, and bright Promo Blitz pills drawn after the color grade so they
+  remain sharp even at twilight.
 
 ## 4. Sound
 
-`src/client/audio.ts` synthesises every sound with Web Audio: a wooden build thud, a brass
-coin chime, a two-strike tram bell, a paper rustle for the Gazette, an upgrade fanfare, rain
-hiss. There are no audio files. The context starts on the first user gesture. The Sound toggle
-is always visible and persists in `localStorage`.
+Procedural Web Audio synthesis (zero audio file assets): wooden build thud, brass coin chime,
+two-strike tram bell, newspaper rustle for Gazette dispatches, warm chord fanfare for Era
+transitions and Milestone unlocks, subtle charter seal click, and soft rain hiss. Audio activates
+on first user gesture with a persistent mute toggle (`aria-pressed`).
 
-## 5. Architecture
+## 5. Architecture boundaries
 
-```
-src/shared/     pure TypeScript, no DOM or Worker globals, seeded PRNG
-  types.ts        state and command types
-  constants.ts    tuning tables
-  map.ts          the district, pathfinding, lot bonuses
-  sim.ts          createGame, tick, applyCommand, scoring, events, ledger
-  ai.ts           Vesper, Aurelia, Orson; advance() = AI + tick
-  insight.ts      explanations: shop diagnosis, lot synergy, civic reach, event focus
-  room.ts         RoomCore: lobby, seats, reconnect, host migration, rematch
-  protocol.ts     wire messages, snapshot encoder, client view store
-src/client/     Vite app: renderer, HUD, input, audio, solo and network sessions
-src/worker.ts   Worker: /api/health, /api/rooms, /ws/rooms/:code, static assets
-src/room-do.ts  MercadiaRoom Durable Object (SQLite-backed)
-```
+- **Pure shared simulation core:** Zero DOM or Worker globals; seeded deterministic PRNG; owns
+  district map, pathfinding, citizens, trams, four-era progression, Dynasty Charters, Milestones,
+  AI Houses, scoring, Chronicle generation, lobby/room state machine, and compact snapshot wire
+  protocol.
+- **Single simulation, dual host:** Solo runs the shared simulation loop in the browser;
+  multiplayer runs the exact same simulation inside a Cloudflare Worker + SQLite-backed Durable
+  Object using WebSocket Hibernation and 10 Hz authoritative snapshots (full snapshot on join or
+  reconnect, compact delta snapshots during play).
+- **Resilient sessions:** Seat tokens persist across reloads and closed tabs with heartbeat-based
+  tab protection so a returning player reclaims their exact seat rather than becoming a spectator.
+  Host migration promotes the next connected human automatically. Checkpoints upgrade cleanly
+  across schema versions.
+- **Renderer and HUD:** Canvas 2D 2:1 isometric renderer with 60 FPS interpolation between 10 Hz
+  ticks, zoom-bucketed sprite caching, automatic GPU/CPU canvas fallback, and declarative HUD
+  binding over the shared view store.
+- **Verification hook:** Read-only client inspection window exposing live state, era, unlocks,
+  milestones, chronicle lines, and tile projection, with deterministic time-warp gated strictly to
+  localhost or `?dev=1`.
 
-**One simulation, two hosts.** Solo runs `advance()` in the browser. Multiplayer runs the same
-function inside the Durable Object. Both feed the client through the same snapshot encoder and
-view store, so the solo path exercises the multiplayer path on every tick.
+## 6. Pacing and tuning principles
 
-**The room.** `MercadiaRoom` extends `DurableObject` from `cloudflare:workers` and uses the
-WebSocket Hibernation API. Lobby state and match checkpoints live in the object's SQLite
-storage. A 100 ms interval steps the simulation only while a match is running and at least one
-human is connected; otherwise no timer exists and the object can hibernate. Players reconnect
-with a `playerId` token (`src/client/seat-token.ts`). It is kept in `localStorage`, with
-`sessionStorage` as the tab's own copy and the fallback, so a closed tab or an evicted mobile
-page reclaims its seat from the invite link. The tab holding a seat writes a heartbeat beside
-the token every two seconds; a second tab in the same browser adopts the token only once that
-heartbeat has been quiet for six, so it cannot steal a seat that is still being played. If the
-host disconnects, the next connected human becomes host. A checkpoint written by an older
-build is brought up to the current shape on restore (`upgradeState`).
-
-**Dev hook.** `window.__mercadia` is a read-only window for smoke checks. Its one mutating
-method, `warp(n)`, works on `localhost` / `127.0.0.1` and elsewhere only with `?dev=1`.
-
-**Snapshots.** Each 100 ms the room broadcasts one compact snapshot: tick, quarter clock,
-per-player numbers, a flat citizen array, tram positions, changed buildings only, new Gazette
-lines, and feedback events. A joining or reconnecting socket receives one full snapshot first.
-
-## 6. Tuning reference
-
-- Tick: 100 ms. Quarter: 600 ticks (Blitz) or 1500 ticks (Standard, Endless).
-- Dayparts: morning, noon, golden hour, twilight — a quarter of the quarter each.
-- Shop choice: `score = distancePull × priceValue × quality × queueFactor × promo`, where
-  price value is `(basePrice ÷ price) ^ archetype price-sensitivity` and quality folds in
-  level, price-stance cachet, park and plaza aura, site affinity, and the shop's rating.
-- A full queue turns citizens away. A queue whose estimated wait exceeds a citizen's patience
-  makes them peel off to a rival.
-- Payroll every 100 ticks: wages + rent (+25% during a Rent Hike) + 1.2% interest on debt
-  (18% a quarter in Standard, 7.2% in Blitz).
-- Crown Index: `netWorth ÷ 10 + marketShare% × 3 + prestige × 4`.
-- Lost customers: each shop counts recent losses by reason (`tooPricey`, `queueFull`,
-  `outOfStock`), decaying with a half-life of about 45 s. A price or stock loss is counted
-  only for a shop that would otherwise have won the customer.
-- Market share is sampled once per daypart for the Final Edition's chart.
-- Blitz opening: first AI move at tick 90, +30 per further AI seat, thinking at half pace
-  until tick 450.
-
-All numbers live in `src/shared/constants.ts`.
+- **Deliberate Dynasty Civ cadence:** Standard matches run four Eras (~150–180 seconds per Era at
+  1×, ~10 minutes total including brief Era Councils); Blitz runs four brisk Eras (~60–75 seconds
+  per Era, ~4–5 minutes total) so every mode experiences the full Era I → IV arc, Charter choices,
+  and unlock curve.
+- **Breathable opening:** In Era I, AI Houses stagger their opening claims thoughtfully and
+  expand at a measured pace so human players have time to read the street, complete the Founding
+  Guide, and claim prime corners without feeling ambushed in the first ten seconds.
+- **Compounding progression:** Early shops fund Era II transit corridors and Era III prestige
+  flagships; Dynasty Charters and Milestones reward coherent specialization (craft quality,
+  transit patronage, financial discipline, or canal prestige) while keeping multiple paths to
+  the Crown competitive.
+- **Fair scoring:** `Crown Index = Net Worth ÷ 10 + Market Share % × 3 + Civic Prestige × 4`,
+  sampled every daypart across all four Eras for the Final Edition's chart.
