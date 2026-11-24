@@ -268,17 +268,19 @@ never on a timer. Audio starts on the first user gesture; mute is a persistent t
   seat; an accepted Ready or Cancel Ready writes the new flag and epoch in one transaction. The
   Durable Object handles readiness messages one at a time, and resolution is guarded by the stored
   last resolved turn, so concurrent, repeated, or racing Ready and Cancel Ready messages resolve a
-  turn exactly once.
-- **Wire protocol.** Client → authority: `hello` (room code, seat token, last seen turn),
-  `draft` (turn, revision, orders), `ready` (turn, revision, epoch), `cancelReady` (turn, epoch),
-  `ping`. Authority → client: `state` (sent on every join and reconnect: turn, phase, full state
-  and its hash, the receiving seat's own draft with its acknowledged revision, Ready flag, and
-  readiness epoch, every seat's Ready and presence, latest summary), `draftAck` (turn,
-  acknowledged revision; to the drafting seat only), `readyAck` (turn, Ready flag, current
-  readiness epoch; to that seat only), `seats` (Ready and presence changes), `resolved` (see
-  below), `error` (code, message, and the current turn, acknowledged revision, and readiness epoch
-  where relevant), `pong`. `ping` and `pong` never reach the core. There is no polling and no
-  snapshot interpolation.
+  turn exactly once. An off-turn `ready` or `cancelReady` is answered from the current stored
+  state alone; the authority never reads a past turn's stored summary to answer a message.
+- **Wire protocol.** Client → authority: `hello` (room code, seat token, last seen turn), `draft`
+  (turn, revision, orders), `ready` (turn, revision, epoch), `cancelReady` (turn, epoch), `ping`.
+  Authority → client: `state` (sent on every join and reconnect, and to one seat as the only reply
+  to its off-turn `ready` or `cancelReady`: current turn, phase, full state and its hash, the
+  receiving seat's own current-turn draft with its acknowledged revision, Ready flag, and readiness
+  epoch, every seat's Ready and presence, and that state's own most recent summary, the one that
+  produced its turn), `draftAck` (turn, acknowledged revision; to the drafting seat only),
+  `readyAck` (turn, Ready flag, current readiness epoch; to that seat only), `seats` (Ready and
+  presence changes), `resolved` (see below), `error` (code, message, and the current turn,
+  acknowledged revision, and readiness epoch where relevant), `pong`. `ping` and `pong` never reach
+  the core. There is no polling and no snapshot interpolation.
 - **Resolution broadcast carries the N+1 state.** When Turn N resolves and its transaction has
   committed, the authority sends every connected client one `resolved` message containing, together,
   the authoritative Turn N+1 state (versioned by its turn number N+1 and its full state hash), the
@@ -286,8 +288,10 @@ never on a timer. Audio starts on the first user gesture; mute is a persistent t
   applies that state and summary as one atomic swap: it never recomputes N+1 locally in a room,
   never shows a summary without its matching state (or the reverse), ignores a `resolved` whose turn
   is not newer than the one it holds, and never replaces its world with an older turn's state. A
-  client that misses the broadcast receives the same N+1 state and N→N+1 summary in the `state`
-  message on reconnect.
+  newer-turn `resolved` also resets the seat's readiness to Planning at epoch 0 for Turn N+1 and
+  discards all Turn N work (see *Client sessions*). A client that misses the broadcast receives
+  the same N+1 state and N→N+1 summary in the `state` message on reconnect, or in the `state`
+  that answers its next off-turn `ready` or `cancelReady`.
 - **Drafts and epochs stay private.** A seat's draft, its revision, and its readiness epoch are
   sent only back to that seat (in `draftAck`, `readyAck`, `error`, and its own `state`). `seats`,
   `resolved`, spectator `state`, and every other seat's `state` carry only public information:
@@ -299,7 +303,8 @@ never on a timer. Audio starts on the first user gesture; mute is a persistent t
   duplicate revision is never applied and is answered with a `draftAck` of the current revision. A
   `draft` for any turn other than the current one is rejected with
   `error { code: "offTurnDraft" }` (carrying the current turn) and never stored, whatever its
-  revision. A `ready` must carry the current turn and exactly the stored acknowledged revision. If
+  revision. A `ready` for the current turn must carry exactly the stored acknowledged revision (a
+  `ready` for any other turn is off-turn and is answered as described under readiness epochs). If
   the revision is older, newer, or not yet acknowledged (for example after a dropped or reordered
   `draft`), the authority rejects it with `error { code: "staleDraft" }`, records nothing, leaves
   the readiness epoch unchanged, and the seat stays Planning. The client shows
@@ -320,32 +325,54 @@ never on a timer. Audio starts on the first user gesture; mute is a persistent t
   with a `readyAck` of the seat's current flag and epoch. So a replayed Ready cannot re-ready a
   seat that cancelled, a duplicate Cancel Ready cannot cancel a fresh Ready, and a fresh,
   deliberate Ready on an unchanged draft after Cancel Ready succeeds because it carries the new
-  epoch. Readiness messages for an already-resolved turn change nothing and are answered as
-  described in PRODUCT.md (*No double advance*). In the final readiness race the first message
-  processed wins: if the Ready that completes the human seats is processed first, the turn starts
-  resolving and a later Cancel Ready for it changes nothing; if a Cancel Ready is processed first,
-  that seat is Planning and the other Ready resolves nothing.
-  A client holds the epoch from its latest `state`, `readyAck`, or `error`, sends it with every
-  Ready and Cancel Ready, and shows its seat as Ready (`Cancel Ready`, `Waiting for opponent…`)
-  only after the authority acknowledges it. If a `ready` or `cancelReady` or its acknowledgment is
-  lost, the seat shows its last acknowledged state and pressing the button again is safe: it
-  resends the same epoch, so at most one transition is recorded and the reply carries the seat's
-  true state.
+  epoch. These epoch rules apply only to messages naming the current planning turn.
+  A `ready` or `cancelReady` naming any other turn (already resolved, however old, or not yet
+  started) is off-turn: it records nothing, consumes no epoch, starts or repeats no resolution,
+  and is answered to that seat only with one `state` for the current turn, carrying that state's
+  own most recent summary and the seat's current-turn Ready flag and epoch. No `readyAck`,
+  `error`, or historical summary is sent for it, and the client applies that `state` like any
+  other. In the final readiness race the first message processed wins: if the Ready that
+  completes the human seats is processed first, the turn resolves and a later Cancel Ready for it
+  is off-turn; if a Cancel Ready is processed first, that seat is Planning and the other Ready
+  resolves nothing.
+  A client sends its held epoch for the turn it holds with every Ready and Cancel Ready, and
+  shows its seat as Ready (`Cancel Ready`, `Waiting for opponent…`) only after the authority
+  acknowledges it. If a `ready` or `cancelReady` or its acknowledgment is lost, the seat shows
+  its last acknowledged state and pressing the button again is safe: it resends the same epoch,
+  so at most one transition is recorded and the reply carries the seat's true state.
 - **Client sessions.** Seat tokens persist in `localStorage` per room, and the client caches its
   local draft keyed by turn and revision; reconnect uses exponential backoff and shows
-  `Reconnecting…` until a fresh `state` arrives. The client then reconciles by turn first:
-  - **Same turn.** Only when the cached draft's turn equals the `state` turn does the client
-    compare revisions: if the authority's acknowledged revision is older than the local one and the
-    seat is not Ready, it resends the local draft and waits for `draftAck` before enabling Ready;
-    in every other case it adopts the authority's draft and revision. It adopts the `state`
-    message's Ready flag and epoch.
-  - **Off turn.** If the cached draft names any other turn (normally because that turn resolved
-    while the seat was away), the client never compares or resends it. It discards the cached
-    draft and every pending `draft`, `ready`, or `cancelReady` and its awaited acknowledgment from
-    that turn, so none of those orders is ever queued or sent for Turn N+1, starts Turn N+1 from
-    the authority's draft, Ready flag, and epoch, and shows
-    `Turn 12 resolved while you were offline — unsent edits discarded`. Any acknowledgment or
-    error that later arrives for an earlier turn is ignored.
+  `Reconnecting…` until a fresh `state` arrives. The client holds one readiness value (turn,
+  Ready flag, epoch) for its seat and reconciles every incoming message by turn first:
+  - **Newer turn.** Only a `resolved` or a `state` whose turn is newer than the held turn is
+    authoritative newer-turn state; the client applies its world and summary as one swap, once.
+    It never compares or resends the cached draft: it discards the cached draft and every
+    pending `draft`, `ready`, or `cancelReady` and its awaited acknowledgment from earlier turns,
+    so none of those orders is ever queued or sent for Turn N+1. After a `resolved` the seat
+    starts Turn N+1 Planning at epoch 0 with the empty revision-0 draft (exactly the authority's
+    start state; `resolved` carries no private data). After a `state` it adopts that message's
+    draft, revision, Ready flag, and epoch, which may already be above 0 when join or reconnect
+    carries a newer authoritative private epoch (for example, the seat readied that turn on
+    another device). A join or reconnect `state` that moves the client forward shows
+    `Turn 12 resolved while you were offline — unsent edits discarded`; one that arrives on a
+    live connection as an off-turn reply shows `Turn 12 already resolved — showing Turn 13`.
+  - **Older turn.** Any `resolved`, `state`, `draftAck`, `readyAck`, or `error` naming a turn
+    older than the held turn is ignored: it never changes the world, summary, draft, Ready flag,
+    or epoch. A `draftAck`, `readyAck`, or `error` naming a newer turn is ignored too; only
+    `resolved` or `state` moves the client forward.
+  - **Same turn.** For the held turn, readiness data from a `state`, `readyAck`, or `error` is
+    accepted only when its epoch is at least the most recently acknowledged epoch for that turn; a
+    lower epoch is a late, superseded reply and is ignored. So a held `readyAck` (Ready, epoch 1)
+    delivered after `readyAck` (Planning, epoch 2) leaves the seat Planning at epoch 2 with End
+    Turn showing, and the next Ready is sent at epoch 2. A same-turn `resolved` is ignored entirely
+    (it never resets readiness the client already holds for that turn), and a same-turn `state`
+    never re-applies the world or reopens the Turn Delta. Its draft is reconciled by revision: if
+    the authority's acknowledged revision is older than the local one and the seat is not Ready,
+    the client resends the local draft and waits for `draftAck` before enabling Ready; in every
+    other case it adopts the authority's draft and revision.
+  Because readiness is reset on every newer turn, the first Ready of Turn N+1 after
+  uninterrupted play carries epoch 0 and is recorded on the first press, never rejected or
+  answered as a duplicate because of a Turn N epoch.
   The room URL is `/?room=ABCD`; the socket is `/ws/rooms/ABCD`.
 - **Renderer and HUD.** Canvas 2D 2:1 isometric renderer with zoom-bucketed sprite caching and
   on-demand redraw; the declarative HUD binds to a view store derived from the current state and
