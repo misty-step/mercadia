@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "repo": "misty-step/mercadia",
+  "intentRange": "7d1d9e06..b1bab784",
+  "verifiedSha": "08910265f7fe703b8cc5196bbc21b23187e524ef",
+  "verifiedAt": "2026-11-24T22:14:17Z",
+  "criticVerdict": "pending (Cold Critic runs after builder exit)",
+  "artifactUrl": null,
+  "localPath": "~/chief-evidence/media/",
+  "mediaType": "video/webm,image/png",
+  "requirements": [
+    {
+      "id": "PRODUCT::Product contract",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::Clean-room replacement of the v2 simulation",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::The turn state machine",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::PLANNING \u2014 the frozen board",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::RESOLVE_TURN",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::TURN_SUMMARY",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::Four Eras / Turns, dayparts, and Eras",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::Dynasty Charters (Council turns)",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::Match start",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::Citizens and footfall",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    },
+    {
+      "id": "PRODUCT::Multiplayer sync and session rules",
+      "status": "partially-verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass",
+      "note": "acceptance 10-repeat and 16 browser flows not green; covered by unit/DST tests"
+    },
+    {
+      "id": "DESIGN::1 Visual direction \u2014 Architectural Monograph board",
+      "status": "verified",
+      "localPath": "~/chief-evidence/media/",
+      "mediaType": "video/webm,image/png",
+      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+    }
+  ]
+}
