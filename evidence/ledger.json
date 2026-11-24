@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "repo": "misty-step/mercadia",
   "intentRange": "7d1d9e06..b1bab784",
-  "verifiedSha": "8ebefc2365dea07955beacc89ad3d71235a8e69b",
-  "verifiedAt": "2026-11-24T22:50:00Z",
-  "criticVerdict": "pending (Cold Critic re-reviews the pushed HEAD after Pass 2 repair)",
+  "verifiedSha": "3971ef9d8e195604a413f0d7915a369a4d9d73da",
+  "verifiedAt": "2026-11-24T23:25:00Z",
+  "criticVerdict": "pending (Cold Critic re-reviews the pushed HEAD after Pass 3 repair)",
   "artifactUrl": null,
   "localPath": "~/chief-evidence/media/",
   "mediaType": "video/webm,image/png",
@@ -14,84 +14,84 @@
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::Clean-room replacement of the v2 simulation",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::The turn state machine",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
-      "id": "PRODUCT::PLANNING \u2014 the frozen board",
+      "id": "PRODUCT::PLANNING — the frozen board",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::RESOLVE_TURN",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::TURN_SUMMARY",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::Four Eras / Turns, dayparts, and Eras",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::Dynasty Charters (Council turns)",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::Match start",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::Citizens and footfall",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
       "id": "PRODUCT::Multiplayer sync and session rules",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     },
     {
-      "id": "DESIGN::1 Visual direction \u2014 Architectural Monograph board",
+      "id": "DESIGN::1 Visual direction — Architectural Monograph board",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
     }
   ],
   "passTwoRepairs": [
