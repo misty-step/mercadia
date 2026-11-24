@@ -33,6 +33,7 @@ const OWN: Record<string, string> = {
   promo: sh('heralds'),
   clear: svg('<path d="M5 6.5h14M9 6.5V4.5h6v2M7 6.5l.8 13h8.4l.8-13M10.2 10v6.5M13.8 10v6.5"/>'),
   delta: sh('ledger'),
+  export: svg('<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/>'),
   orders: svg('<path d="M9 6.5h10.5M9 12h10.5M9 17.5h10.5"/><path d="M4.5 6.5h.01M4.5 12h.01M4.5 17.5h.01" stroke-width="2.6" stroke-linecap="round"/>'),
   jump: svg('<circle cx="12" cy="12" r="4.2"/><path d="M12 3.5v3.3M12 17.2v3.3M3.5 12h3.3M17.2 12h3.3"/>'),
   eye: svg('<path d="M2.8 12S6.2 6.2 12 6.2 21.2 12 21.2 12 17.8 17.8 12 17.8 2.8 12 2.8 12z"/><circle cx="12" cy="12" r="2.6"/>'),

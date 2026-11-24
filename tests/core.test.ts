@@ -87,7 +87,7 @@ describe('state hash', () => {
 
   it('is bit-for-bit the same on every host (pinned values for a fixed string and a fresh world)', () => {
     expect(hashString('mercadia')).toBe('3d0c6d788fae767c');
-    expect(stateHash(newGame(7, 'standard', ['human', 'ai', 'ai', 'ai']))).toBe('22021d59a8258ac6');
+    expect(stateHash(newGame(7, 'standard', ['human', 'ai', 'ai', 'ai']))).toBe('34928f5d384bd1a0');
   });
 
   it('changes when anything in the world changes', () => {
@@ -217,9 +217,9 @@ describe('match start (PRODUCT.md "Match start")', () => {
           expect(CITY.walk[u.tile]).toBe(true); // a legal street tile
           expect(seen.has(u.tile)).toBe(false); // no two units share a tile
           seen.add(u.tile);
-          // beside Grand Station: on the avenue frontage, within five steps of the station door
+          // beside Grand Station: on the street frontage, within six walking steps of the station door
           expect(CITY.dist[u.tile * 144 + CITY.stationDoor]).toBeGreaterThanOrEqual(0);
-          expect(CITY.dist[u.tile * 144 + CITY.stationDoor]).toBeLessThanOrEqual(5);
+          expect(CITY.dist[u.tile * 144 + CITY.stationDoor]).toBeLessThanOrEqual(6);
           expect(Math.min(...CITY.station.map((s) => Math.max(Math.abs((s % 12) - (u.tile % 12)), Math.abs(Math.floor(s / 12) - Math.floor(u.tile / 12)))))).toBeLessThanOrEqual(5);
         }
       });
@@ -229,6 +229,6 @@ describe('match start (PRODUCT.md "Match start")', () => {
 
   it('no House starts on the Harbor Pier side of the board', () => {
     const g = newGame(11, 'standard', ['human', 'ai', 'ai', 'ai']);
-    for (const u of g.units) expect(Math.floor(u.tile / 12)).toBeLessThanOrEqual(2);
+    for (const u of g.units) expect(Math.floor(u.tile / 12)).toBeLessThanOrEqual(3);
   });
 });

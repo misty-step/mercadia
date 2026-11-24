@@ -238,7 +238,8 @@
 #hud .d-close { display: inline-flex; align-items: center; gap: 5px; height: 36px; padding: 0 10px; border: 1px solid var(--hairline); border-radius: var(--radius); font-size: 13px; font-weight: 500; flex: none; background: var(--alabaster); }
 #hud .d-close:hover { background: var(--travertine); }
 #hud .d-close .hi { width: 15px; height: 15px; }
-#hud .d-nav { display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 14px; flex: none; }
+#hud .d-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; padding: 0 10px 0 14px; flex: none; }
+#hud .d-nav .d-export { flex: 1 0 100%; margin: 0 0 4px; }
 #hud .d-nav:empty { display: none; }
 #hud .d-nav .nav { display: inline-flex; align-items: center; gap: 4px; height: 32px; padding: 0 6px; font-size: 12.5px; font-weight: 500; border-radius: var(--radius); }
 #hud .d-nav .nav:hover:not(:disabled) { background: var(--travertine); }

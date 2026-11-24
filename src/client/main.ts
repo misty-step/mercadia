@@ -266,7 +266,7 @@ function boot(): void {
       screens.hideMenu();
       menuKey = '';
       hudRoot.hidden = false;
-      hud = createHud({ root: hudRoot, session: s, board, sound, canvas, onLeave: () => void requestLeave() });
+      hud = createHud({ root: hudRoot, session: s, board, sound, canvas, onLeave: () => void requestLeave(), onExport: () => exportMatch() });
     }
     handoff.sync(v);
     if (handoff.open) council.close();

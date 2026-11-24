@@ -2,7 +2,7 @@
 // Replays the canonical action log (including recorded Endless continuations) through the real resolver
 // and compares every turn's full state hash with the export. Prints one JSON line; exits 1 on mismatch.
 import { readFileSync } from 'node:fs';
-import { replayMatch, type MatchExport } from '../src/shared/replay';
+import { replayMatchExport, type MatchExport } from '../src/shared/replay';
 
 const file = process.argv[2];
 if (!file) {
@@ -12,7 +12,7 @@ if (!file) {
 const exp = JSON.parse(readFileSync(file, 'utf8')) as MatchExport;
 let out: Record<string, unknown>;
 try {
-  const rep = replayMatch(exp.config, exp.log, exp.endlessAt ?? []);
+  const rep = replayMatchExport(exp);
   const mismatches = exp.hashes.flatMap((h, i) => (rep.hashes[i] === h ? [] : [i + 1]));
   out = {
     ok: mismatches.length === 0 && rep.hashes.length === exp.hashes.length,
@@ -25,7 +25,7 @@ try {
     endless: rep.game.endless,
   };
 } catch (e) {
-  out = { ok: false, error: (e as Error).message, turnsLogged: exp.log.length, endlessAt: exp.endlessAt ?? [] };
+  out = { ok: false, error: (e as Error).message, version: exp.version, turnsLogged: exp.log?.length ?? 0, endlessAt: exp.endlessAt ?? [] };
 }
 console.log(JSON.stringify(out));
 process.exit(out.ok ? 0 : 1);

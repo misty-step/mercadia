@@ -2,7 +2,7 @@
 // authority runs, so identical inputs give identical state hashes on every host.
 import { SUMMARY_KEEP } from './constants';
 import { createGame, stateHash } from './game';
-import type { MatchExport } from './replay';
+import { MATCH_EXPORT_VERSION, type MatchExport } from './replay';
 import { canonicalOrders, continueEndless, resolveTurn } from './resolve';
 import type { ActionLog, Game, MatchConfig, Order, TurnSummary } from './types';
 
@@ -57,7 +57,7 @@ export class LocalMatch {
   }
 
   export(): MatchExport {
-    const out: MatchExport = { version: 3, config: this.config, log: this.log, hashes: this.hashes };
+    const out: MatchExport = { version: MATCH_EXPORT_VERSION, config: this.config, log: this.log, hashes: this.hashes };
     if (this.endlessAt.length > 0) out.endlessAt = [...this.endlessAt];
     return out;
   }

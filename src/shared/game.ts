@@ -23,7 +23,7 @@ import {
   isShop,
   type CharterDef,
 } from './constants';
-import { CITY, N } from './map';
+import { CITY, N, idx } from './map';
 import { hashOf, shortHash } from './hash';
 import type {
   Building,
@@ -176,14 +176,16 @@ export function computeStandings(g: Game): Standing[] {
 
 /**
  * Start tiles by player index: [Factor, Watch Company]. PRODUCT.md "Match start": every House
- * begins with one Factor and one Watch Company beside Grand Station — eight distinct tiles of the
- * Streetcar Avenue frontage within five steps of the station door, (6,1) and (5,1) left open as seat 1's approach.
+ * begins with one Factor and one Watch Company beside Grand Station — eight distinct street tiles
+ * (y <= 3), each with at least one open neighbouring street tile so no unit is boxed in on Turn 1:
+ * seat 1 (7,1)(8,1) opens (6,1)(9,1); seat 2 (10,1)(11,1) opens (9,1)(11,2); seat 3 (10,3)(11,3)
+ * opens (9,3)(11,2)(11,4); seat 4 (4,1)(3,1) opens (5,1)(2,1).
  */
 export const START_TILES: readonly (readonly [number, number])[] = [
-  [7 + 12, 8 + 12], // (7,1) (8,1)
-  [10 + 12, 9 + 12], // (10,1) (9,1)
-  [11 + 12, 11 + 24], // (11,1) (11,2)
-  [4 + 12, 3 + 12], // (4,1) (3,1)
+  [idx(7, 1), idx(8, 1)],
+  [idx(10, 1), idx(11, 1)],
+  [idx(10, 3), idx(11, 3)],
+  [idx(4, 1), idx(3, 1)],
 ];
 
 export function createGame(cfg: MatchConfig): Game {

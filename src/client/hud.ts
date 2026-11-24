@@ -23,6 +23,8 @@ import {
   leaderboardHtml,
   ordersHtml,
   plateHtml,
+  exportBtnHtml,
+  exportable,
   railHtml,
   spectatorHtml,
   statusHtml,
@@ -50,6 +52,8 @@ export interface HudOptions {
   canvas: HTMLCanvasElement;
   /** Called when the player presses Leave (the caller shows its confirmation); defaults to `session.leave()`. */
   onLeave?: () => void;
+  /** Called when the player presses Export match (downloads the canonical MatchExport JSON). */
+  onExport?: () => void;
 }
 
 export interface Hud {
@@ -330,7 +334,7 @@ export function createHud(opts: HudOptions): Hud {
         patch(elDTitle, `<div class="dt-row"><div><h2 class="serif" id="h-dh" tabindex="-1">${esc(m.heading)}</h2><p class="sub mono" aria-label="State hash ${esc(m.hash)}">${esc(m.hash)}</p></div></div>`);
         patch(
           elDNav,
-          `<button type="button" class="nav" data-act="dprev" aria-label="Previous Turn Delta"${m.index <= 0 ? ' disabled' : ''}>${ic('prev')}<span>Earlier</span></button><span class="count mono" aria-hidden="true">${m.index + 1} / ${m.count}</span><button type="button" class="nav" data-act="dnext" aria-label="Next Turn Delta"${m.index >= m.count - 1 ? ' disabled' : ''}><span>Later</span>${ic('next')}</button>`,
+          `${exportable(v) ? exportBtnHtml('d-export') : ''}<button type="button" class="nav" data-act="dprev" aria-label="Previous Turn Delta"${m.index <= 0 ? ' disabled' : ''}>${ic('prev')}<span>Earlier</span></button><span class="count mono" aria-hidden="true">${m.index + 1} / ${m.count}</span><button type="button" class="nav" data-act="dnext" aria-label="Next Turn Delta"${m.index >= m.count - 1 ? ' disabled' : ''}><span>Later</span>${ic('next')}</button>`,
         );
         patch(elDBody, m.body);
       }
@@ -669,6 +673,9 @@ export function createHud(opts: HudOptions): Hud {
         sound.toggleMute();
         render();
         break;
+      case 'export':
+        if (opts.onExport) opts.onExport();
+        break;
       case 'leave':
         if (opts.onLeave) opts.onLeave();
         else session.leave();
@@ -961,7 +968,7 @@ export function createHud(opts: HudOptions): Hud {
     guide = guideModel();
     const spectator = v.seat < 0;
 
-    patch(elPlate, plateHtml(v, { deltaOpen: ui.drawer === 'delta', muted: sound.muted, hasDelta: v.summaries.length > 0 || !!v.summary }));
+    patch(elPlate, plateHtml(v, { deltaOpen: ui.drawer === 'delta', muted: sound.muted, hasDelta: v.summaries.length > 0 || !!v.summary, canExport: exportable(v) && v.game.endless }));
     patch(elStatus, statusHtml(v));
     patch(elLb, leaderboardHtml(v, { open: ui.lbOpen, detail: ui.lbDetail }));
     patch(elChron, chronicleHtml(v, ui.chronOpen));

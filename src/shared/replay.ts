@@ -4,8 +4,14 @@ import { createGame, stateHash } from './game';
 import { continueEndless, resolveTurn } from './resolve';
 import type { ActionLog, Game, MatchConfig, TurnSummary } from './types';
 
+/**
+ * Export/ruleset version. Bumped to 4 when the Turn 1 start tiles changed: a version 3 export's state
+ * hashes cannot be reproduced by the current rules, so it is rejected up front instead of replayed.
+ */
+export const MATCH_EXPORT_VERSION = 4;
+
 export interface MatchExport {
-  version: 3;
+  version: typeof MATCH_EXPORT_VERSION;
   config: MatchConfig;
   log: ActionLog;
   /** Full state hash after each resolved turn. */
@@ -50,4 +56,20 @@ export function replayMatch(config: MatchConfig, log: ActionLog, endlessAt: read
   }
   g = continueDue(g, endlessAt, log.length);
   return { game: g, hashes, summaries };
+}
+
+/** Throws a clear error unless `exp` is an export this build's rules can replay bit-for-bit. */
+export function assertExportVersion(exp: { version?: unknown }): void {
+  if (exp.version !== MATCH_EXPORT_VERSION) {
+    const got = exp.version === undefined ? 'missing' : String(exp.version);
+    throw new Error(
+      `Incompatible match export version ${got}: this build replays version ${MATCH_EXPORT_VERSION} exports only (ruleset changed; older exports cannot be replayed)`,
+    );
+  }
+}
+
+/** Replay a full export after checking its version. */
+export function replayMatchExport(exp: MatchExport): ReplayResult {
+  assertExportVersion(exp);
+  return replayMatch(exp.config, exp.log, exp.endlessAt ?? []);
 }

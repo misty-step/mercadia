@@ -20,7 +20,8 @@ The folio owns the rules; this file records the implementation decisions it leav
 - Footfall: sources (homes, Station, Pier, city and owned Tram Stops) emit citizens per Era/daypart/event; each is allocated to the
   best-scoring reachable shop; losses are attributed to the top-ranked shop with a reason (too pricey / queue full / out of stock / blockaded).
 - Treasury: `Opening + Income − Costs − Upkeep + Financing = Closing`; forced sale, disband and `Forgiven` follow PRODUCT.md.
-- Start tiles: all four Houses begin beside Grand Station (PRODUCT.md "Match start"): eight distinct Streetcar Avenue tiles within five steps of the station door, (7,1)(8,1), (10,1)(9,1), (11,1)(11,2), (4,1)(3,1) as Factor/Watch Company.
+- Start tiles (`START_TILES`, Factor/Watch Company): all four Houses begin beside Grand Station (PRODUCT.md "Match start") on eight distinct street tiles with y ≤ 3, and no unit is boxed in on Turn 1: seat 1 (7,1)(8,1) opens (6,1)(9,1); seat 2 (10,1)(11,1) opens (9,1)(11,2); seat 3 (10,3)(11,3) opens (9,3)(11,2)(11,4); seat 4 (4,1)(3,1) opens (5,1)(2,1). Every Factor starts orthogonally adjacent to a vacant buildable lot.
+- Export format: `MATCH_EXPORT_VERSION = 4` (`src/shared/replay.ts`). Version 3 exports predate the current start tiles and are rejected with an explicit incompatible-version error; they are never replayed.
 - Council turns: `game.council.offers[player]`; End Turn is blocked (`readyBlock`) until a `charter` order is in the draft.
 
 ## Room authority (`src/shared/room.ts`)
