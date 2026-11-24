@@ -2,51 +2,24 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-    <meta name="theme-color" content="#EFE9DC" />
-    <meta name="description" content="MERCADIA — rival merchant dynasties reshape a sunlit canal-and-tramway city era by era. A deliberate four-era isometric dynasty city tycoon for 1–4 players." />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#F7F4EE" />
+    <meta name="description" content="MERCADIA — rival merchant dynasties reshape a canal-and-tramway city, one deliberate turn at a time. A strict turn-based dynasty civ for 1–4 players." />
     <title>MERCADIA</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,500&family=JetBrains+Mono:wght@400;500;700&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/src/client/styles.css" />
+    <link rel="stylesheet" href="/fonts/fonts.css" />
+    <link rel="stylesheet" href="/src/client/tokens.css" />
+    <link rel="stylesheet" href="/src/client/hud.css" />
+    <link rel="stylesheet" href="/src/client/screens.css" />
   </head>
   <body>
-    <div id="stage"><canvas id="city" aria-label="The Mercadia district"></canvas></div>
-
-    <div id="hud" class="hud" hidden>
-      <div class="topbar">
-        <header id="clock" class="panel clock"></header>
-        <section id="chronicle" class="panel chronicle" aria-label="The Mercadia Chronicle" role="status" aria-live="polite"></section>
-        <i class="brk" aria-hidden="true"></i>
-        <aside id="guide" class="panel guide" aria-label="Founding Guide" hidden></aside>
-      </div>
-      <div class="rightcol">
-        <aside id="board" class="panel board" aria-label="Rival leaderboard"></aside>
-        <aside id="inspector" class="panel inspector" hidden></aside>
-      </div>
-      <div class="leftcol">
-        <div id="treasury" class="panel treasury"></div>
-        <div id="ledger" class="panel ledger" hidden></div>
-      </div>
-      <div id="docktabs" class="docktabs" hidden></div>
-      <nav id="dock" class="panel dock" aria-label="Build"></nav>
-      <div id="spectator" class="spectator" role="status" hidden></div>
-      <div id="lotcard" class="panel lotcard" hidden></div>
-      <div id="speech" class="speech" hidden></div>
-      <div id="banner" class="banner" aria-hidden="true"></div>
-    </div>
-
-    <section id="title" class="panel title" hidden></section>
-    <section id="lobby" class="panel title lobby" hidden></section>
-    <div id="council" class="scrim councilscrim" hidden></div>
-    <div id="victory" class="scrim" hidden></div>
-    <div id="toasts" class="toasts" aria-live="polite"></div>
-
+    <!-- The board fills the viewport. -->
+    <div id="stage"><canvas id="board" class="board-canvas" tabindex="0" aria-label="The Mercadia district. Arrow keys move the tile cursor; Enter selects."></canvas></div>
+    <!-- HUD (hud.ts) mounts here. -->
+    <div id="hud" hidden></div>
+    <!-- Title, hotseat setup, lobby, Council card, handoff, Final Edition, confirmations (screens.ts) mount here. -->
+    <div id="screens"></div>
+    <div id="toasts" role="status" aria-live="polite"></div>
     <script type="module" src="/src/client/main.ts"></script>
   </body>
 </html>
