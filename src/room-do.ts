@@ -1,20 +1,19 @@
 // MercadiaRoom — the authoritative multiplayer room. One SQLite-backed Durable Object per code.
 //
-// Sockets use the Hibernation API. While players sit in the lobby there is no timer, so the
-// object can sleep and costs nothing. A 100 ms interval exists only while a match is running
-// and at least one human is connected; it is cleared the moment that stops being true.
+// Sockets use the Hibernation API. There is no tick, no interval and no alarm-driven simulation:
+// the world changes only inside a resolution, which runs when the last human seat's Ready is
+// recorded. Messages are handled one at a time; the state, the canonical action log and the
+// summary are persisted in a single synchronous transaction before anything is sent.
 import { DurableObject } from 'cloudflare:workers';
-import { TICK_MS } from './shared/constants';
 import { parseClientMsg, type ServerMsg } from './shared/protocol';
 import { RoomCore, isRoomCode, type Outbound, type RoomState } from './shared/room';
-import type { GameState } from './shared/types';
+import type { Game } from './shared/types';
 import type { Env } from './worker';
 
 interface Attachment {
   playerId: string | null;
 }
 
-const CHECKPOINT_EVERY = 50; // beats (5 s)
 const IDLE_PURGE_MS = 6 * 60 * 60 * 1000;
 
 const json = (body: unknown, status = 200): Response =>
@@ -25,8 +24,6 @@ const json = (body: unknown, status = 200): Response =>
 
 export class MercadiaRoom extends DurableObject<Env> {
   private core: RoomCore | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private beats = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -51,7 +48,7 @@ export class MercadiaRoom extends DurableObject<Env> {
     try {
       const room = JSON.parse(roomRaw) as RoomState;
       const gameRaw = this.read('game');
-      const game = gameRaw ? (JSON.parse(gameRaw) as GameState) : null;
+      const game = gameRaw ? (JSON.parse(gameRaw) as Game) : null;
       this.core = new RoomCore(room.code, room.seed, { room, game });
       // Connection flags come from the sockets that actually survived.
       const live = new Set<string>();
@@ -60,49 +57,19 @@ export class MercadiaRoom extends DurableObject<Env> {
         if (id) live.add(id);
       }
       for (const seat of this.core.room.seats) seat.connected = !!seat.playerId && live.has(seat.playerId);
-      this.syncTimer();
     } catch {
       this.core = null;
     }
   }
 
-  private saveRoom(): void {
-    if (this.core) this.write('room', JSON.stringify(this.core.room));
-  }
-
-  private saveGame(): void {
-    if (this.core?.game) this.write('game', JSON.stringify(this.core.game));
-  }
-
-  // ── Simulation loop ──
-
-  private syncTimer(): void {
-    const want = !!this.core?.running;
-    if (want && this.timer === null) {
-      this.timer = setInterval(() => this.beat(), TICK_MS);
-    } else if (!want && this.timer !== null) {
-      clearInterval(this.timer);
-      this.timer = null;
-      this.saveRoom();
-      this.saveGame(); // checkpoint on the way to idle
-    }
-  }
-
-  private beat(): void {
+  /** One transaction: room (drafts, Ready flags, epochs, log, summary, last resolved turn) and the world. */
+  private persist(): void {
     const core = this.core;
     if (!core) return;
-    try {
-      const before = core.room.status;
-      this.dispatch(core.step());
-      if (++this.beats % CHECKPOINT_EVERY === 0) this.saveGame();
-      if (core.room.status !== before) {
-        this.saveRoom();
-        this.saveGame();
-      }
-    } catch (err) {
-      console.error('room beat failed', err);
-    }
-    this.syncTimer();
+    this.ctx.storage.transactionSync(() => {
+      this.write('room', JSON.stringify(core.room));
+      if (core.game) this.write('game', JSON.stringify(core.game));
+    });
   }
 
   // ── Sockets ──
@@ -141,7 +108,7 @@ export class MercadiaRoom extends DurableObject<Env> {
       if (this.core) return json({ ok: false, error: 'Room exists' }, 409);
       const seed = crypto.getRandomValues(new Uint32Array(1))[0];
       this.core = new RoomCore(code, seed);
-      this.saveRoom();
+      this.persist();
       await this.ctx.storage.setAlarm(Date.now() + IDLE_PURGE_MS);
       return json({ ok: true, code }, 201);
     }
@@ -172,7 +139,12 @@ export class MercadiaRoom extends DurableObject<Env> {
     }
     const msg = parseClientMsg(typeof data === 'string' ? data : null);
     if (!msg) {
-      this.sendTo(ws, { t: 'error', err: 'Malformed message' });
+      this.sendTo(ws, { t: 'error', code: 'malformed', message: 'Malformed message' });
+      return;
+    }
+    // Heartbeats are transport only: they never reach the core.
+    if (msg.t === 'ping') {
+      this.sendTo(ws, { t: 'pong', at: msg.at });
       return;
     }
     const att = (ws.deserializeAttachment() as Attachment | null) ?? { playerId: null };
@@ -193,21 +165,18 @@ export class MercadiaRoom extends DurableObject<Env> {
         }
       }
       ws.serializeAttachment({ playerId: res.playerId } satisfies Attachment);
+      this.persist();
       this.dispatch(res.out);
-      this.saveRoom();
-      this.syncTimer();
       return;
     }
 
     if (!att.playerId) {
-      this.sendTo(ws, { t: 'error', err: 'Say hello first' });
+      this.sendTo(ws, { t: 'error', code: 'hello', message: 'Say hello first' });
       return;
     }
-    const before = core.room.status + core.room.matchNo;
-    this.dispatch(core.handle(att.playerId, msg));
-    if (msg.t !== 'cmd' && msg.t !== 'ping') this.saveRoom();
-    if (core.room.status + core.room.matchNo !== before) this.saveGame();
-    this.syncTimer();
+    const out = core.handle(att.playerId, msg);
+    this.persist();
+    this.dispatch(out);
   }
 
   private drop(ws: WebSocket): void {
@@ -218,9 +187,9 @@ export class MercadiaRoom extends DurableObject<Env> {
     for (const other of this.ctx.getWebSockets()) {
       if (other !== ws && (other.deserializeAttachment() as Attachment | null)?.playerId === att.playerId) return;
     }
-    this.dispatch(this.core.disconnect(att.playerId));
-    this.saveRoom();
-    this.syncTimer();
+    const out = this.core.disconnect(att.playerId);
+    this.persist();
+    this.dispatch(out);
   }
 
   override async webSocketClose(ws: WebSocket, code: number, _reason: string, _wasClean: boolean): Promise<void> {
@@ -242,8 +211,6 @@ export class MercadiaRoom extends DurableObject<Env> {
       await this.ctx.storage.setAlarm(Date.now() + IDLE_PURGE_MS);
       return;
     }
-    if (this.timer !== null) clearInterval(this.timer);
-    this.timer = null;
     this.core = null;
     await this.ctx.storage.deleteAll();
   }
