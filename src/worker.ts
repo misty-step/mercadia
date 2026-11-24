@@ -49,6 +49,12 @@ export default {
       return roomStub(env, code).fetch('https://room/summary');
     }
 
+    const exportApi = path.match(/^\/api\/rooms\/([A-Za-z]{4})\/export$/);
+    if (exportApi) {
+      if (request.method !== 'GET') return json({ ok: false, error: 'Use GET' }, 405);
+      return roomStub(env, exportApi[1].toUpperCase()).fetch('https://room/export');
+    }
+
     const ws = path.match(/^\/ws\/rooms\/([A-Za-z]{4})$/);
     if (ws) {
       const code = ws[1].toUpperCase();

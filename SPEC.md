@@ -20,7 +20,7 @@ The folio owns the rules; this file records the implementation decisions it leav
 - Footfall: sources (homes, Station, Pier, city and owned Tram Stops) emit citizens per Era/daypart/event; each is allocated to the
   best-scoring reachable shop; losses are attributed to the top-ranked shop with a reason (too pricey / queue full / out of stock / blockaded).
 - Treasury: `Opening + Income − Costs − Upkeep + Financing = Closing`; forced sale, disband and `Forgiven` follow PRODUCT.md.
-- Start tiles (`START_TILES`, Factor/Watch Company): all four Houses begin beside Grand Station (PRODUCT.md "Match start") on eight distinct street tiles with y ≤ 3, and no unit is boxed in on Turn 1: seat 1 (7,1)(8,1) opens (6,1)(9,1); seat 2 (10,1)(11,1) opens (9,1)(11,2); seat 3 (10,3)(11,3) opens (9,3)(11,2)(11,4); seat 4 (4,1)(3,1) opens (5,1)(2,1). Every Factor starts orthogonally adjacent to a vacant buildable lot.
+- Start tiles (`START_TILES`, Factor/Watch Company): all four Houses begin beside Grand Station (PRODUCT.md "Match start") on eight distinct street tiles with y ≤ 3, and no unit is boxed in on Turn 1: Vermilion (7,1)(8,1) opens (6,1)(9,1); Cobalt (10,1)(11,1) opens (9,1)(11,2); Marigold (4,1)(3,1) opens (5,1)(2,1); Emerald (10,3)(11,3) opens (9,3)(11,2)(11,4). `START_TILES` is indexed by House (PRODUCT.md "Houses and heraldry" order), and the default seats take Houses in that order (seat 1 Vermilion, seat 2 Cobalt, seat 3 Marigold, seat 4 Emerald: solo, hotseat and room lobbies alike), so each House keeps its own start whichever seat it sits in (seats fall back to seat-indexed tiles only if a config repeats a House). Every Factor starts orthogonally adjacent to a vacant buildable lot.
 - Export format: `MATCH_EXPORT_VERSION = 4` (`src/shared/replay.ts`). Version 3 exports predate the current start tiles and are rejected with an explicit incompatible-version error; they are never replayed.
 - Council turns: `game.council.offers[player]`; End Turn is blocked (`readyBlock`) until a `charter` order is in the draft.
 
@@ -35,6 +35,6 @@ The Durable Object persists room + game in one `transactionSync` per handled mes
 `HUD`, `screens`. `window.__mercadia` is a read-only inspector on localhost / `?dev=1`.
 
 ## Known limits
-- Balance is workable, not tuned: all four Houses open on the same station frontage, but seats 3 and 4 start further from the Station door than seats 1 and 2.
+- Balance is workable, not tuned: all four Houses open on the same station frontage, but Marigold and Emerald start further from the Station door than Vermilion and Cobalt.
 - Acceptance 10-repeat and 16 (dropped readyAck+resolution; pending work across resolution) are covered by session/DST unit tests but their browser flows are not green in `scripts/smoke.mjs`.
 - Acceptance 14b–e and 12/13 in a browser are not scripted (replay and AI determinism are unit-tested; replay of an exported browser match is verified in node).

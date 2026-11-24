@@ -70,6 +70,7 @@ abstract class Base implements Session {
   abstract rematch(): void;
   abstract leave(): void;
   abstract exportMatch(): MatchExport | null;
+  abstract exportMatchAsync(): Promise<MatchExport | null>;
   abstract lobby: Session['lobby'];
 }
 
@@ -302,6 +303,10 @@ class LocalSession extends Base {
   exportMatch(): MatchExport | null {
     return this.match.log.length > 0 ? this.match.export() : null;
   }
+
+  async exportMatchAsync(): Promise<MatchExport | null> {
+    return this.exportMatch();
+  }
 }
 
 // ───────────────────────────── Network room ─────────────────────────────
@@ -336,6 +341,8 @@ class RoomSession extends Base {
   private stopped = false;
   private attempts = 0;
   private playerId: string | null = null;
+  /** True only while this session holds an actual player seat; a spectator never owns the seat token. */
+  private seated = false;
   private lastRx = 0;
   private pingSeq = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -466,6 +473,7 @@ class RoomSession extends Base {
     this.core.close();
     if (this.stopped) return;
     if (code === 4004) {
+      this.token.forget(); // the authority says the room is gone: drop only this room's token
       this.core.fail('Room not found');
     } else if (code === 4001) {
       this.core.fail('This seat is open in another tab');
@@ -489,6 +497,8 @@ class RoomSession extends Base {
     }
     if (this.stopped) return;
     if (missing) {
+      // A confirmed 404: the room is gone, so its (now useless) seat token goes too. Other rooms' tokens stay.
+      this.token.forget();
       this.core.fail('Room not found');
       this.emit();
       return;
@@ -511,8 +521,15 @@ class RoomSession extends Base {
       this.welcomed = true;
       this.attempts = 0;
       this.playerId = msg.playerId;
-      this.token.save(msg.playerId, Date.now());
-      if (!this.beatTimer) this.beatTimer = setInterval(() => this.token.beat(msg.playerId, Date.now()), HEARTBEAT_MS);
+      this.seated = msg.seat >= 0;
+      if (this.seated) {
+        this.token.save(msg.playerId, Date.now());
+        if (!this.beatTimer) this.beatTimer = setInterval(() => this.token.beat(msg.playerId, Date.now()), HEARTBEAT_MS);
+      } else {
+        // A spectator (a second tab, or a full room) never saves, beats or releases a seat token.
+        if (this.beatTimer) clearInterval(this.beatTimer);
+        this.beatTimer = null;
+      }
     }
     this.core.receive(msg);
     this.emit();
@@ -614,7 +631,7 @@ class RoomSession extends Base {
     for (const t of this.noticeTimers.values()) clearTimeout(t);
     this.noticeTimers.clear();
     // The seat stays reserved for its token: only the heartbeat is released.
-    if (this.playerId) this.token.release(this.playerId);
+    if (this.seated && this.playerId) this.token.release(this.playerId);
     const ws = this.ws;
     this.ws = null;
     this.opened = false;
@@ -627,7 +644,20 @@ class RoomSession extends Base {
   }
 
   exportMatch(): MatchExport | null {
-    return null; // a room keeps the canonical log on the authority
+    return null; // a room keeps the canonical log on the authority: see exportMatchAsync
+  }
+
+  /** The authority's canonical public export (GET /api/rooms/:code/export), or null if there is none yet. */
+  async exportMatchAsync(): Promise<MatchExport | null> {
+    try {
+      const f = (globalThis as { fetch?: typeof fetch }).fetch;
+      if (!f) return null;
+      const res = await f(`/api/rooms/${this.code}/export`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      return (await res.json()) as MatchExport;
+    } catch {
+      return null;
+    }
   }
 
   lobby: Session['lobby'] = {

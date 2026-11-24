@@ -91,6 +91,8 @@ export interface Session {
   leave(): void;
   /** Seed + canonical action log for replay (null before any turn resolves). */
   exportMatch(): MatchExport | null;
+  /** Same export, but also works for rooms: a room fetches the authority's canonical public export. */
+  exportMatchAsync(): Promise<MatchExport | null>;
 
   // Rooms: lobby controls (host only where noted).
   lobby: {

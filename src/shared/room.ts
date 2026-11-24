@@ -8,6 +8,7 @@ import { readyBlock } from './orders';
 import type { ClientMsg, LobbyView, OwnSeat, SeatStatus, ServerMsg } from './protocol';
 import { canonicalOrders, continueEndless, resolveTurn } from './resolve';
 import { shortHash } from './hash';
+import { MATCH_EXPORT_VERSION, type MatchExport } from './replay';
 import type { ActionLog, AiPersona, Game, MatchMode, Order, TurnSummary } from './types';
 
 export interface Seat {
@@ -154,6 +155,28 @@ export class RoomCore {
       turn: this.game ? this.game.turn : 0,
       seats: this.lobby().seats,
     };
+  }
+
+  /**
+   * The canonical public MatchExport: config, the authority-committed resolved log, hashes and Endless
+   * markers. Built field by field so no playerId, seat token, current-turn draft, Ready flag or epoch can leak.
+   * Null until the match has started.
+   */
+  exportMatch(): MatchExport | null {
+    const r = this.room;
+    if (!r.config || r.status === 'lobby') return null;
+    const exp: MatchExport = {
+      version: MATCH_EXPORT_VERSION,
+      config: {
+        seed: r.config.seed,
+        mode: r.config.mode,
+        players: r.config.players.map((p) => ({ name: p.name, house: p.house, kind: p.kind, persona: p.persona })),
+      },
+      log: r.log.map((turn) => turn.map((list) => list.map((o) => ({ ...o })))),
+      hashes: r.hashes.slice(),
+    };
+    if (r.endlessAt && r.endlessAt.length > 0) exp.endlessAt = r.endlessAt.slice();
+    return exp;
   }
 
   serialize(): { room: RoomState; game: Game | null } {

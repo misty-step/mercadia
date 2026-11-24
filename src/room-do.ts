@@ -117,6 +117,20 @@ export class MercadiaRoom extends DurableObject<Env> {
       return json({ ok: true, ...this.core.summary() });
     }
 
+    if (url.pathname === '/export') {
+      if (!this.core) return json({ ok: false, error: 'No such room' }, 404);
+      const exp = this.core.exportMatch();
+      if (!exp) return json({ ok: false, error: 'The match has not started yet' }, 409);
+      return new Response(JSON.stringify(exp, null, 2), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'content-disposition': `attachment; filename="mercadia-${this.core.room.code}-${exp.config.seed}.json"`,
+        },
+      });
+    }
+
     if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
       if (!this.core) return json({ ok: false, error: 'No such room' }, 404);
       const pair = new WebSocketPair();

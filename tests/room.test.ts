@@ -742,3 +742,101 @@ describe('room retention alarm (PRODUCT.md "Seat reclaim")', () => {
     expect(roomAlarmAction({ status: 'ended' }, 0, IDLE_PURGE_MS)).toBe('purge');
   });
 });
+
+describe('authority-scoped public export (GET /api/rooms/:code/export)', () => {
+  /** Play a started room to its final turn (the host readies every turn, adopting a Charter when a Council is due). */
+  function playToEnd(h: RoomHarness, id: string): void {
+    for (let guard = 0; h.core.room.status === 'playing' && guard < 80; guard++) {
+      const g = h.core.game!;
+      const orders: Order[] = g.council ? [{ t: 'charter', key: g.council.offers[0][0] }] : [];
+      if (orders.length) h.send(id, { t: 'draft', turn: g.turn, revision: 1, orders });
+      ready(h, id, orders.length ? 1 : 0, 0);
+    }
+  }
+  const PUBLIC_KEYS = ['config', 'hashes', 'log', 'version'];
+
+  it('is null before the match starts (the room answers 409) and for an unstarted lobby', () => {
+    const h = new RoomHarness(3);
+    h.join('Host');
+    expect(h.core.exportMatch()).toBeNull();
+  });
+
+  it('carries only version, config, log and hashes: no playerIds, tokens, drafts, Ready flags or epochs', () => {
+    const { h, ids } = startedRoom(2, 'standard');
+    // Resolve Turn 1, then leave private, unapplied Turn 2 state behind: a draft with a distinctive order and one Ready seat.
+    ready(h, ids[0]);
+    ready(h, ids[1]);
+    expect(turnOf(h)).toBe(2);
+    h.send(ids[0], { t: 'draft', turn: 2, revision: 1, orders: [{ t: 'recruit', kind: 'watch' }, { t: 'borrow' }] });
+    ready(h, ids[0], 1, 0);
+    const exp = h.core.exportMatch()!;
+    expect(Object.keys(exp).sort()).toEqual(PUBLIC_KEYS);
+    expect(exp.version).toBe(4);
+    expect(exp.log).toHaveLength(1);
+    expect(exp.hashes).toHaveLength(1);
+    expect(Object.keys(exp.config).sort()).toEqual(['mode', 'players', 'seed']);
+    for (const p of exp.config.players) expect(Object.keys(p).sort()).toEqual(['house', 'kind', 'name', 'persona']);
+    const wire = JSON.stringify(exp);
+    for (const id of ids) expect(wire).not.toContain(id);
+    for (const word of ['playerId', 'epoch', 'ready', 'draft', 'revision', 'token', 'borrow']) expect(wire.toLowerCase()).not.toContain(word.toLowerCase());
+    expect(JSON.parse(wire)).toEqual(exp); // plain JSON, nothing lost or aliased
+    // Exporting never mutates the room.
+    const before = snap(h);
+    h.core.exportMatch();
+    expect(snap(h)).toBe(before);
+  });
+
+  it('a finished Standard room export replays bit-for-bit through replayMatch', () => {
+    const { h, ids } = startedRoom(1, 'standard');
+    playToEnd(h, ids[0]);
+    expect(h.core.room.status).toBe('ended');
+    const exp = h.core.exportMatch()!;
+    expect(exp.log).toHaveLength(h.core.game!.turn - 1);
+    expect(exp.endlessAt).toBeUndefined();
+    const rep = replayMatch(exp.config, exp.log, exp.endlessAt ?? []);
+    expect(rep.hashes).toEqual(exp.hashes);
+    expect(rep.hashes).toEqual(h.core.room.hashes);
+    expect(stateHash(rep.game)).toBe(hashNow(h));
+  });
+
+  it('a room that continued in Endless exports endlessAt and the Endless turns, and replays bit-for-bit', () => {
+    const { h, ids } = startedRoom(2, 'standard');
+    const [a, b] = ids;
+    for (let guard = 0; h.core.room.status === 'playing' && guard < 80; guard++) {
+      const g = h.core.game!;
+      for (const id of [a, b]) {
+        const orders: Order[] = g.council ? [{ t: 'charter', key: g.council.offers[playerOf(h, id)][0] }] : [];
+        if (orders.length) h.send(id, { t: 'draft', turn: g.turn, revision: 1, orders });
+        ready(h, id, orders.length ? 1 : 0, 0);
+      }
+    }
+    expect(h.core.room.status).toBe('ended');
+    const finished = h.core.exportMatch()!;
+    h.send(a, { t: 'endless' });
+    for (let i = 0; i < 2; i++) {
+      h.send(a, { t: 'draft', turn: turnOf(h), revision: 1, orders: [{ t: 'borrow' }] });
+      ready(h, a, 1, 0);
+      ready(h, b);
+    }
+    h.send(a, { t: 'draft', turn: turnOf(h), revision: 1, orders: [{ t: 'borrow' }] }); // an unapplied private draft
+    const exp = h.core.exportMatch()!;
+    expect(Object.keys(exp).sort()).toEqual(['config', 'endlessAt', 'hashes', 'log', 'version']);
+    expect(exp.endlessAt).toEqual([finished.log.length]);
+    expect(exp.log).toHaveLength(finished.log.length + 2);
+    expect(exp.log.slice(0, finished.log.length)).toEqual(finished.log);
+    const rep = replayMatch(exp.config, exp.log, exp.endlessAt);
+    expect(rep.hashes).toEqual(exp.hashes);
+    expect(stateHash(rep.game)).toBe(hashNow(h));
+    // The unapplied Turn N draft and the player ids stay out of the download.
+    const wire = JSON.stringify(exp);
+    for (const id of ids) expect(wire).not.toContain(id);
+    expect(exp.log.length).toBe(h.core.room.log.length);
+  });
+
+  it('survives the Durable Object storage round-trip identically (restore, then export)', () => {
+    const { h, ids } = startedRoom(1, 'standard');
+    ready(h, ids[0]);
+    const restored = new RoomCore('ABCD', 5, { room: JSON.parse(JSON.stringify(h.core.room)), game: JSON.parse(JSON.stringify(h.core.game)) });
+    expect(restored.exportMatch()).toEqual(h.core.exportMatch());
+  });
+});

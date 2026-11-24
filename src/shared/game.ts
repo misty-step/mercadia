@@ -175,18 +175,27 @@ export function computeStandings(g: Game): Standing[] {
 // ── Creation ──
 
 /**
- * Start tiles by player index: [Factor, Watch Company]. PRODUCT.md "Match start": every House
- * begins with one Factor and one Watch Company beside Grand Station — eight distinct street tiles
- * (y <= 3), each with at least one open neighbouring street tile so no unit is boxed in on Turn 1:
- * seat 1 (7,1)(8,1) opens (6,1)(9,1); seat 2 (10,1)(11,1) opens (9,1)(11,2); seat 3 (10,3)(11,3)
- * opens (9,3)(11,2)(11,4); seat 4 (4,1)(3,1) opens (5,1)(2,1).
+ * Start tiles by HOUSE (the order of PRODUCT.md "Houses and heraldry": Vermilion, Cobalt, Marigold,
+ * Emerald): [Factor, Watch Company]. PRODUCT.md "Match start": every House begins with one Factor and
+ * one Watch Company beside Grand Station — eight distinct street tiles (y <= 3), each with at least one
+ * open neighbouring street tile so no unit is boxed in on Turn 1:
+ * Vermilion (7,1)(8,1) opens (6,1)(9,1); Cobalt (10,1)(11,1) opens (9,1)(11,2);
+ * Marigold (4,1)(3,1) opens (5,1)(2,1); Emerald (10,3)(11,3) opens (9,3)(11,2)(11,4).
+ * The default seats take Houses in that same order (seat 1 Vermilion, 2 Cobalt, 3 Marigold, 4 Emerald),
+ * so a House keeps its own start whichever seat it sits in.
  */
 export const START_TILES: readonly (readonly [number, number])[] = [
   [idx(7, 1), idx(8, 1)],
   [idx(10, 1), idx(11, 1)],
-  [idx(10, 3), idx(11, 3)],
   [idx(4, 1), idx(3, 1)],
+  [idx(10, 3), idx(11, 3)],
 ];
+
+/** Each player's start tiles: keyed by House, or by seat when Houses repeat (so no two units ever share a tile). */
+export function startTilesFor(players: readonly { house: number }[]): (readonly [number, number])[] {
+  const byHouse = players.every((p) => Number.isInteger(p.house) && p.house >= 0 && p.house < START_TILES.length) && new Set(players.map((p) => p.house)).size === players.length;
+  return players.map((p, i) => START_TILES[byHouse ? p.house : i]);
+}
 
 export function createGame(cfg: MatchConfig): Game {
   const players: Player[] = cfg.players.slice(0, 4).map((s, i) => ({
@@ -209,8 +218,9 @@ export function createGame(cfg: MatchConfig): Game {
   }));
   const units: Unit[] = [];
   let nextId = 1;
+  const starts = startTilesFor(players);
   players.forEach((p, i) => {
-    const [f, w] = START_TILES[i];
+    const [f, w] = starts[i];
     units.push({ id: nextId++, owner: p.id, kind: 'factor', tile: f, cohesion: 1, route: 0, fought: false });
     units.push({ id: nextId++, owner: p.id, kind: 'watch', tile: w, cohesion: 3, route: 0, fought: false });
   });

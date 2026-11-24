@@ -19,9 +19,9 @@ import { esc, money } from './hud-dom';
 import { ic } from './hud-icons';
 import { TABS, type TabKey, type Tool } from './hud-tools';
 
-/** Solo and hotseat matches hold the canonical log locally; a room keeps it on the authority. */
+/** Solo and hotseat hold the canonical log locally; a room downloads it from the authority. Spectators may export too (it is public). */
 export function exportable(v: SessionView): boolean {
-  return v.mode !== 'room' && (v.summaries.length > 0 || !!v.summary);
+  return v.summaries.length > 0 || !!v.summary;
 }
 
 export function exportBtnHtml(cls: string): string {

@@ -150,8 +150,8 @@ function boot(): void {
     leave: () => leaveToTitle(),
   });
 
-  function exportMatch(): void {
-    const exp = session?.exportMatch();
+  async function exportMatch(): Promise<void> {
+    const exp = await session?.exportMatchAsync();
     if (!exp) {
       screens.toast('There is no match log to export yet.', 'error');
       return;

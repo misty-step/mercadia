@@ -1,12 +1,15 @@
 // Turn 1: all eight starting units (four Houses) can move, and every Factor has a vacant lot to build on,
 // when every other seat holds position. Drives the real queueOrder + resolveTurn path.
 import { describe, expect, it } from 'vitest';
-import { START_TILES } from '../src/shared/game';
+import { HOUSES } from '../src/shared/constants';
+import { buildSoloConfig, defaultHotseatSeats } from '../src/client/screens';
+import { START_TILES, createGame } from '../src/shared/game';
+import { RoomCore } from '../src/shared/room';
 import { CITY, idx, tx, ty } from '../src/shared/map';
 import { queueOrder, reachFrom } from '../src/shared/orders';
 import { canonicalOrders, resolveTurn } from '../src/shared/resolve';
 import type { Order } from '../src/shared/types';
-import { newGame } from './helpers';
+import { config, newGame } from './helpers';
 
 const kinds = ['human', 'human', 'human', 'human'] as const;
 const at = (x: number, y: number) => idx(x, y);
@@ -16,9 +19,38 @@ describe('Turn 1 start tiles (SPEC.md / PRODUCT.md "Match start")', () => {
     expect(START_TILES).toEqual([
       [at(7, 1), at(8, 1)],
       [at(10, 1), at(11, 1)],
-      [at(10, 3), at(11, 3)],
       [at(4, 1), at(3, 1)],
+      [at(10, 3), at(11, 3)],
     ]);
+  });
+
+  it('are keyed by House exactly as PRODUCT.md lists them: Vermilion, Cobalt, Emerald (10,3)/(11,3), Marigold (4,1)/(3,1)', () => {
+    const g = newGame(31, 'standard', [...kinds]);
+    const startOf = (house: number) => g.units.filter((u) => g.players[u.owner].house === house).map((u) => u.tile);
+    expect(HOUSES.map((h) => h.key)).toEqual(['vermilion', 'cobalt', 'marigold', 'emerald']);
+    expect(startOf(0)).toEqual([at(7, 1), at(8, 1)]); // Vermilion
+    expect(startOf(1)).toEqual([at(10, 1), at(11, 1)]); // Cobalt
+    expect(startOf(3)).toEqual([at(10, 3), at(11, 3)]); // Emerald
+    expect(startOf(2)).toEqual([at(4, 1), at(3, 1)]); // Marigold
+  });
+
+  it('a House keeps its own start in any seat; a repeated House falls back to seat-indexed tiles (no shared tiles)', () => {
+    const cfg = config(5, 'standard', ['human', 'human', 'human', 'human']);
+    const swapped = createGame({ ...cfg, players: [cfg.players[0], cfg.players[1], { ...cfg.players[2], house: 3 }, { ...cfg.players[3], house: 2 }] });
+    expect(swapped.units.filter((u) => u.owner === 2).map((u) => u.tile)).toEqual([at(10, 3), at(11, 3)]); // Emerald in seat 3
+    expect(swapped.units.filter((u) => u.owner === 3).map((u) => u.tile)).toEqual([at(4, 1), at(3, 1)]); // Marigold in seat 4
+    const dup = createGame({ ...cfg, players: cfg.players.map((p) => ({ ...p, house: 0 })) });
+    expect(new Set(dup.units.map((u) => u.tile)).size).toBe(8);
+  });
+
+  it('the default solo, hotseat and room seats take Vermilion, Cobalt, Marigold, Emerald in seat order', () => {
+    const order = ['vermilion', 'cobalt', 'marigold', 'emerald'];
+    const key = (h: number) => HOUSES[h].key;
+    expect(buildSoloConfig('Ada', 3).players.map((p) => key(p.house))).toEqual(order);
+    expect(defaultHotseatSeats().map((s) => key(s.house))).toEqual(order);
+    const room = new RoomCore('ABCD', 9);
+    expect(room.lobby().seats.map((s) => key(s.house))).toEqual(order);
+    expect(room.lobby().seats.map((s) => HOUSES[s.house].name)).toEqual(['Vermilion Guild', 'Cobalt Syndicate', 'Marigold House', 'Emerald Atelier']);
   });
 
   it('are eight distinct walkable street tiles beside Grand Station (y <= 3)', () => {

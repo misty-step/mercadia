@@ -814,3 +814,154 @@ describe('RoomClient', () => {
     expect(c.turn).toBe(1);
   });
 });
+
+// ───────────────────────────── Seat token ownership, 404 cleanup, room export ─────────────────────────────
+
+const PID = (code: string) => `mercadia:pid:${code}`;
+const stored = (store: ReturnType<typeof kv>, code = 'ABCD') => JSON.parse(store.map.get(PID(code)) ?? 'null') as { id: string; beat: number; tab: string } | null;
+const HOUR = 3600 * 1000;
+
+describe('spectator tabs never own the seat token', () => {
+  it('a same-profile spectator tab does not save, beat or release over the seated tab, and the seat is reclaimed +26h later', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_700_000_000_000);
+    const auth = new Authority();
+    const shared = kv(); // one browser profile: both tabs share localStorage, each has its own sessionStorage
+    const a = client(auth, 'Ann', shared);
+    client(auth, 'Bea'); // a second human in another profile keeps the turn open while Ann is Ready
+    a.s.lobby.start();
+    expect(a.s.view.seat).toBe(0);
+    a.s.queue({ t: 'borrow' });
+    a.s.endTurn();
+    expect(a.s.view.ready).toBe(true);
+    const draft = a.s.view.draft;
+    const hash = a.s.view.hash;
+    const idA = stored(shared)!.id;
+    expect(idA).toBe('p1');
+    // Tab B (a spectator) opens the room in the SAME profile while A still beats.
+    const b = client(auth, 'Spec', shared);
+    expect(b.s.view.seat).toBe(-1);
+    expect(b.s.view.status.text).toMatch(/spectat/i);
+    const afterJoin = stored(shared)!;
+    expect(afterJoin.id).toBe(idA);
+    expect(afterJoin.tab).not.toBe(''); // still the seated tab's record
+    // Stay open across several heartbeats: the record still belongs to the seated tab.
+    vi.advanceTimersByTime(30_000);
+    expect(stored(shared)!.id).toBe(idA);
+    expect(b.sock.sentOf('hello')[0].playerId).toBeUndefined();
+    // Close the seated tab, then the spectator.
+    a.s.leave();
+    expect(stored(shared)!.beat).toBe(0); // released by the seated tab only
+    b.s.leave();
+    expect(stored(shared)!.id).toBe(idA); // the spectator's leave neither released nor replaced it
+    expect(stored(shared)!.beat).toBe(0);
+    // +26 hours later a fresh tab reclaims exactly seat 0, Ready, the same draft and the same state hash.
+    vi.setSystemTime(1_700_000_000_000 + 26 * HOUR);
+    const c = client(auth, 'Ann', shared);
+    expect(c.sock.sentOf('hello')[0].playerId).toBe(idA);
+    expect(c.s.view.seat).toBe(0);
+    expect(c.s.view.ready).toBe(true);
+    expect(c.s.view.draft).toEqual(draft);
+    expect(c.s.view.hash).toBe(hash);
+  });
+
+  it('a spectator with no seat never writes a token record at all', () => {
+    const auth = new Authority();
+    const store = kv();
+    // Four players fill every seat; a fifth browser profile is a spectator.
+    for (const n of ['A', 'B', 'C', 'D']) client(auth, n);
+    const spectator = client(auth, 'E', store);
+    expect(spectator.s.view.seat).toBe(-1);
+    expect(store.map.has(PID('ABCD'))).toBe(false);
+    spectator.s.leave();
+    expect(store.map.has(PID('ABCD'))).toBe(false);
+  });
+});
+
+describe('confirmed 404 and Leave', () => {
+  const sessionKv = () => {
+    const s = kv();
+    (globalThis as { sessionStorage?: unknown }).sessionStorage = s;
+    return s;
+  };
+
+  it('a confirmed 404 removes only that room\'s token from localStorage and sessionStorage', async () => {
+    (globalThis as { fetch?: unknown }).fetch = vi.fn(async () => ({ status: 404 }));
+    const local = kv();
+    local.map.set(PID('ZZZZ'), JSON.stringify({ id: 'gone', at: 1, beat: 1, tab: 't' }));
+    local.map.set(PID('WXYZ'), JSON.stringify({ id: 'keep', at: 1, beat: 1, tab: 't' }));
+    (globalThis as { localStorage?: unknown }).localStorage = local;
+    const auth = new Authority();
+    const sess = {
+      ...kv(),
+    };
+    (globalThis as { sessionStorage?: unknown }).sessionStorage = sess;
+    sess.map.set(PID('ZZZZ'), 'gone');
+    sess.map.set(PID('WXYZ'), 'keep');
+    const s = createSession({ mode: 'room', roomCode: 'ZZZZ', socketFactory: auth.factory });
+    sessions.push(s);
+    auth.last().drop(1006);
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    expect(s.view.status).toEqual({ text: 'Room not found', tone: 'error' });
+    expect(local.map.has(PID('ZZZZ'))).toBe(false);
+    expect(sess.map.has(PID('ZZZZ'))).toBe(false);
+    expect(local.map.has(PID('WXYZ'))).toBe(true);
+    expect(sess.map.has(PID('WXYZ'))).toBe(true);
+  });
+
+  it('a non-404 (offline or 5xx) check keeps the token and retries', async () => {
+    vi.useFakeTimers();
+    (globalThis as { fetch?: unknown }).fetch = vi.fn(async () => ({ status: 503 }));
+    const local = kv();
+    local.map.set(PID('ZZZZ'), JSON.stringify({ id: 'mine', at: 1, beat: 0, tab: 't' }));
+    (globalThis as { localStorage?: unknown }).localStorage = local;
+    sessionKv();
+    const auth = new Authority();
+    const s = createSession({ mode: 'room', roomCode: 'ZZZZ', socketFactory: auth.factory });
+    sessions.push(s);
+    auth.last().drop(1006);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(local.map.has(PID('ZZZZ'))).toBe(true);
+    expect(auth.sockets.length).toBeGreaterThan(1); // reconnect scheduled
+  });
+
+  it('explicit Leave keeps the token (only the heartbeat is released) and a return reclaims the seat', () => {
+    const auth = new Authority();
+    const shared = kv();
+    const a = client(auth, 'Ann', shared);
+    client(auth, 'Bea');
+    a.s.lobby.start();
+    const id = stored(shared)!.id;
+    a.s.leave();
+    expect(shared.map.has(PID('ABCD'))).toBe(true);
+    expect(stored(shared)).toMatchObject({ id, beat: 0 });
+    const again = client(auth, 'Ann', shared);
+    expect(again.sock.sentOf('hello')[0].playerId).toBe(id);
+    expect(again.s.view.seat).toBe(0);
+  });
+});
+
+describe('room export from the authority', () => {
+  it('fetches /api/rooms/:code/export and returns the public export; null on 404/409 or offline', async () => {
+    const auth = new Authority();
+    const a = client(auth, 'Ann');
+    const exp = { version: 4, config: { seed: 1, mode: 'standard', players: [] }, log: [], hashes: [] };
+    const f = vi.fn(async (url: string) => (url === '/api/rooms/ABCD/export' ? { ok: true, status: 200, json: async () => exp } : { ok: false, status: 404, json: async () => ({}) }));
+    (globalThis as { fetch?: unknown }).fetch = f;
+    expect(await a.s.exportMatchAsync()).toEqual(exp);
+    expect(f).toHaveBeenCalledWith('/api/rooms/ABCD/export', expect.anything());
+    (globalThis as { fetch?: unknown }).fetch = vi.fn(async () => ({ ok: false, status: 409, json: async () => ({}) }));
+    expect(await a.s.exportMatchAsync()).toBeNull();
+    (globalThis as { fetch?: unknown }).fetch = vi.fn(async () => {
+      throw new Error('offline');
+    });
+    expect(await a.s.exportMatchAsync()).toBeNull();
+  });
+
+  it('local sessions resolve exportMatchAsync to the same export as exportMatch', async () => {
+    const s = createSession({ mode: 'solo', config: soloConfig() });
+    expect(await s.exportMatchAsync()).toBeNull();
+    s.endTurn();
+    expect(await s.exportMatchAsync()).toEqual(s.exportMatch());
+  });
+});

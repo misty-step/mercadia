@@ -453,7 +453,7 @@ export class FinalEdition {
     const rematch = h('button', { class: 'btn btn-primary', type: 'button', onclick: () => this.on.rematch() }, 'Rematch');
     const endless = h('button', { class: 'btn', type: 'button', onclick: () => this.on.endless() }, 'Continue in Endless');
     const note = h('p', { class: 'final-note', text: 'Waiting for the host to choose Rematch or Continue in Endless.' });
-    const exportBtn = v.mode === 'room' ? null : h('button', { class: 'btn', type: 'button', onclick: () => this.on.exportMatch() }, 'Export match');
+    const exportBtn = h('button', { class: 'btn', type: 'button', onclick: () => this.on.exportMatch() }, 'Export match');
     const leave = h('button', { class: 'btn btn-quiet', type: 'button', onclick: () => this.on.leave() }, v.mode === 'room' ? 'Leave room' : 'Back to title');
 
     const sheet = h('article', { class: 'gazette', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'gazette-h' },

@@ -87,7 +87,7 @@ describe('state hash', () => {
 
   it('is bit-for-bit the same on every host (pinned values for a fixed string and a fresh world)', () => {
     expect(hashString('mercadia')).toBe('3d0c6d788fae767c');
-    expect(stateHash(newGame(7, 'standard', ['human', 'ai', 'ai', 'ai']))).toBe('34928f5d384bd1a0');
+    expect(stateHash(newGame(7, 'standard', ['human', 'ai', 'ai', 'ai']))).toBe('8a4285b833b624d9');
   });
 
   it('changes when anything in the world changes', () => {
