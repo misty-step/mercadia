@@ -1,26 +1,43 @@
 # MERCADIA — Design
 
-This document describes how MERCADIA looks, feels, sounds, and is structured. It is written in
-the present tense as living truth for the product.
+This document describes how MERCADIA looks, feels, sounds, and is built. It is written in the
+present tense as living truth for the product. [PRODUCT.md](PRODUCT.md) owns the rules, and
+nothing here overrides its turn contract: the world is frozen during planning and changes only
+when a turn resolves.
 
-## 1. Visual direction — sunlit architectural diorama with unmistakable heraldry
+## 1. Visual direction — the Architectural Monograph board
 
-Warm editorial print on travertine, inspired by architectural risograph posters, Monument
-Valley's tonal solids, and Mini Metro's legible restraint. The canal district rests on a sculpted
-stone slab bordered by harbor water.
+MERCADIA reads as a plate from a fine architectural monograph laid flat on a table: a carved
+travertine slab printed with the canal district in precise ink linework, flat tonal stone and
+House color, and quiet hairline annotation. It is tactile and still. Pieces sit on the board the
+way tokens sit on a printed map; they move only when a turn resolves.
+
+- **Stillness is the default.** The board has no ambient animation: no walking crowds, drifting
+  boats, waving banners, or day-night sweep. A static board makes the frozen world obvious.
+- **Printed, not glowing.** Light comes from paper and stone. No bloom, neon, glassmorphism,
+  heavy drop shadows, or gradients over the board.
+- **Annotation over chrome.** Labels, leader lines, and dimension-style callouts in ink do the
+  work that panels and badges do elsewhere.
 
 ### Palette
 
 | Token | Hex | Use |
 | --- | --- | --- |
-| Travertine | `#EFE9DC` | Page canvas, paving, stone slab |
-| Terracotta | `#C86443` | Tiled roofs, warm civic accents |
-| Sage | `#84A98C` | Park turf, vacant lots, foliage |
-| Canal | `#3E8E9E` | Grand Canal and harbor water |
-| Avenue slate | `#464B57` | Streetcar Avenue and lanes |
-| Brass | `#D4A34A` | Tram rails, era unlocks, crests, milestones, coin pops |
-| Ink | `#1E1A16` | Primary text, crisp hairlines |
-| Linen | `rgba(250, 247, 240, 0.94)` | HUD surfaces and cards |
+| Alabaster | `#F7F4EE` | Page canvas, HUD surfaces, drawers, cards |
+| Travertine | `#E8E0CF` | Board slab, paving, plate mat |
+| Travertine deep | `#D6CBB4` | Slab edge, shaded faces, inactive fills |
+| Ink | `#16130F` | Primary text, linework, primary button fill |
+| Graphite | `#4A443C` | Secondary text (≥ 7:1 on Alabaster) |
+| Hairline | `rgba(22, 19, 15, 0.18)` | 1px rules, panel borders, grid lines |
+| Canal | `#3E7F8C` | Grand Canal and harbor water, hatched |
+| Sage | `#8FA58E` | Parks, vacant lots, foliage |
+| Terracotta | `#B65A3C` | Roofs, civic accents, `Reconnecting…` rule |
+| Brass | `#B8893A` | Era marks, Milestone stars, `Waiting…` rule; never small text |
+| Alert | `#8B241D` | Error rule and error text (8.1:1 on Alabaster; meets ≥ 7:1) |
+
+High contrast is mandatory: body text is Ink on Alabaster (≥ 15:1); secondary text is Graphite or
+darker; no text sits on a House color or on the board without an Alabaster backing. Focus rings
+are a 2px Ink outline with a 2px Alabaster offset, visible on every surface.
 
 ### House palette and heraldry
 
@@ -31,153 +48,379 @@ stone slab bordered by harbor water.
 | Marigold House | `#D48C1C` | `#9C620D` | `rgba(212, 140, 28, 0.17)` | Sunburst Crown Shield |
 | Emerald Atelier | `#248A63` | `#156145` | `rgba(36, 138, 99, 0.16)` | Laurel Arch Shield |
 
-House colors never flood full HUD panel backgrounds; they act as bold territorial borders,
-heraldic crests, fluttering banners, awnings, leaderboard badges, and Chronicle stripes. Every
-House pairs its color with a distinct geometric crest so ownership stays unambiguous even under
-color-vision deficiency or zoomed-out camera views.
+House colors never fill HUD panels. They appear as lot kerbs, territory washes, banners, unit
+tokens, crest badges, a 3px rule on ledger and leaderboard rows, and the handoff screen's crest.
+Every House pairs its color with a distinct geometric crest, so ownership stays unambiguous under
+color-vision deficiency and at any zoom.
 
-### Territorial ownership on the canvas
+### The board
 
-Player ownership is readable in a single glance at every zoom level:
+- **Isometric plate:** a 12×12 isometric district on a travertine slab, flat tonal solids with lit
+  top, mid left, and shaded right faces, outlined in 1px ink. Water is Canal with fine engraved
+  hatching; streets carry a quiet hairline grid so tiles and movement ranges read clearly.
+- **Ownership:** every owned lot has a double-stroked kerb (primary fill, deep-trim outer edge).
+  Two or more orthogonally adjacent owned lots share one continuous outer trim and soft House
+  wash. Each owned shop and civic landmark carries a still banner with an inset crest medallion.
+- **Units:** House units are upright tokens with a travertine base disc, House-colored body, and
+  crest: Factor (slim column), Watch Company (shield-faced block with Cohesion pips), Barge (low
+  hull on water). Tokens are at least 28px tall at default zoom.
+- **Citizens:** last turn's footfall stands as small ink-and-wash figures at the shops they used,
+  grouped by archetype silhouette; lost demand shows as a short hairline tally beside the door.
+- **Era maturity:** each Era adds still detail to the plate (canal pennant lines in Era II, brass
+  boulevard lamps and ferries in Era III, gilded civic garlands in Era IV).
+- **Daypart:** each turn's daypart (Morning, Noon, Golden Hour, Twilight) is a gentle print-tone
+  shift applied once when the turn resolves, never a continuous sweep. Contrast of linework and
+  crests is preserved at Twilight.
+- **Events:** active city events print on the board (rain hatching for Cloudburst, a berthed liner
+  at the Pier for Harbor Cruise, lantern marks for the Lantern Festival), with a callout naming
+  the turns remaining.
 
-- **Bold lot kerb:** Every owned lot frames its perimeter in a crisp, double-stroked House-colored
-  kerb (primary fill + deep trim outer edge) that cleanly separates owned blocks from vacant sage
-  lots.
-- **Contiguous enclave wash:** When a House owns two or more orthogonally adjacent lots, the
-  shared boundary softens into a warm translucent House wash and continuous outer district trim,
-  making emerging merchant quarters unmistakable.
-- **Tall House banner & crest medallion:** Every owned shop and civic landmark flies a crisp tall
-  standard with a gently waving House pennant and an inset white-and-brass heraldic emblem drawn
-  above the roofline (and rendered after the twilight color grade so crests stay bright at dusk).
-- **Milestone stars:** Each Dynasty Milestone earned by a House adds a brass star pip beside its
-  crest on the leaderboard and gilded trim on its flagship banners.
+### Planning overlays (drawn from the draft, never from the world)
 
-### Form, lighting, and era progression
-
-- Flat tonal isometric solids with distinct lit top, mid left, and shaded right faces.
-- Every shop archetype has a unique silhouette that grows across three levels (Level 2 adds an
-  upper story; Level 3 adds rooftop terraces/pergolas and brass cornices once unlocked in Era III).
-- Each Era sweeps through one full sunlit day: Morning Amber → Crisp Sunlit Noon → Golden Hour →
-  Twilight Lantern Glow, with additive warm lights at dusk (shop windows, streetlamps, café
-  string lights, cinema marquees, tram headlamps, and nightmarket lanterns).
-- As the city advances from Era I to Era IV, subtle environmental maturity appears on the slab:
-  canal-side pennant lines in Era II, grand brass boulevard lamps and denser tourist ferries in
-  Era III, and gilded civic garlands in Era IV.
-- Weather and city events transform the scene directly: slanted rain and canal ripples for
-  Cloudburst, a berthed liner at the Harbor Pier for Harbor Cruise, a third pennanted tram for
-  Free-Ride Tram Day, and drifting golden lanterns for the Street Lantern Festival.
+- **Movement range:** selecting a unit shades reachable tiles with a dotted hairline boundary;
+  blocked tiles are hatched.
+- **Planned path:** a dashed ink line with a numbered endpoint (the order's queue number).
+- **Planned building:** a ghost outline of the building on its lot, labelled with cost.
+- **Contest:** a short double-headed ink arrow between the two units, labelled with expected
+  damage from the deterministic formula.
+- **Change markers:** after resolution, every tile that changed carries a small numbered ink
+  marker keyed to its line in the Turn Delta. Markers clear when the player queues the next
+  order or dismisses them.
 
 ### Typography
 
-- **Fraunces** — wordmark, Era banners, Council headers, Chronicle headlines, Final Edition.
-  Fallback `Georgia, serif`.
-- **DM Sans** — interface labels, build dock, Inspector, onboarding steps. Fallback
-  `system-ui, sans-serif`.
-- **JetBrains Mono** — cash, Crown Index, percentages, countdowns, room codes (always
-  `tabular-nums`). Fallback `ui-monospace, monospace`.
+- **Instrument Serif** — wordmark, Turn number, Era titles, drawer headings, Council and Final
+  Edition headlines, handoff screen House name. Regular and italic only. Fallback
+  `"Iowan Old Style", Georgia, serif`.
+- **IBM Plex Sans** — all interface labels, buttons, Inspector, ledger descriptions, guide text.
+  400, 500, 600. Fallback `"Helvetica Neue", Arial, sans-serif`.
+- **IBM Plex Mono** — every number: §, Actions, Turn #, Crown Index, percentages, state hash, room
+  codes. 400 and 500, `font-variant-numeric: tabular-nums`. Fallback
+  `ui-monospace, Menlo, monospace`.
+- All three families are self-hosted `woff2` files served from the app's own origin with
+  `font-display: swap`. No third-party font CDN. **Inter is never used**, including in fallback
+  stacks.
 
 ### Anti-slop rules
 
-No dark purple neon, no Inter, no glowing generic CTAs, no emoji-as-interface, no heavy drop
-shadows or glassmorphic clutter over the city. Surfaces use warm Linen with crisp ink hairlines
-(`1px solid rgba(30, 26, 22, 0.16)`) and tight `6px` corners. All icons and House crests are
-bespoke inline SVG.
+- No Inter, no dark purple or neon, no emoji as interface, no glowing CTAs, no heavy shadows, no
+  glassmorphism over the board.
+- **No dense dark panels.** Surfaces are Alabaster with a 1px Hairline border and `4px` corners.
+  The only large Ink-filled element is the End Turn button.
+- **No pill clutter.** Status, impact, and tags are plain text with a mono value and, at most, one
+  small glyph or a 3px colored rule. Capsule badges are not used for Chronicle lines, ledger
+  rows, lot bonuses, or House status. At most one badge (Era lock) per tool.
+- All icons and House crests are bespoke inline SVG.
 
 ## 2. Layout and interaction
 
-The isometric canvas fills `100vw × 100dvh`. Persistent HUD pieces hug the edges so 85% or more
-of the viewport remains uninterrupted city at 1440×900:
+The board fills `100vw × 100dvh`. The HUD hugs the edges; at least 75% of the viewport at 1440×900
+stays open board with drawers closed.
 
 | Surface | Dock | Role |
 | --- | --- | --- |
-| **Era & Clock chip** | Top left | Wordmark, active Era name & progress bar (`Era I · Founding`), daypart dial, speed controls (`Pause`, `0.5×`, `1×`, `2×`, `3×` in solo; host pace in MP), Fit, Sound, Leave |
-| **Mercadia Chronicle** | Top center-left | Punchy live Event Stream: prominent active Dispatch Banner (crest/icon + bold headline + mechanical impact tag) plus a compact collapsible 3-line recent feed with category stripes and click-to-focus jumps |
-| **Leaderboard & Dynasty strip** | Top right | Four Houses in rank order with heraldic crests, Milestone stars, Crown Index, expandable `Worth + Share + Prestige` breakdown, market-share bar, and a compact Milestone progress pill |
-| **Founding Guide** | Upper-left below clock (self-retiring) | Three-step first-60-seconds guide that advances automatically as you build, inspect, and shape a block, with one-click dismiss; vanishes permanently once done |
-| **Treasury chip** | Bottom left | Cash, debt, `Borrow §400` with exact per-era rate, active Dynasty Charter badges, and Ledger drawer toggle |
-| **Build dock** | Bottom center | Six shops and three civic projects with Era lock badges (`Era II`, `Era III`) on future-era tools, cost, unmet-demand pips, and concise hover tooltips |
-| **Inspector** | Right edge (bottom sheet on mobile) | Opens on clicking a shop, lot, or citizen; leads with the one-line diagnosis and House crest; closes with `Esc` |
-| **Era Council modal** | Centered compact card between Eras | Appears at the close of Eras I, II, and III: celebrates newly unlocked builds with icons, shows Era standings deltas, and presents three **Dynasty Charters** to adopt before advancing |
-| **Spectator notice** | Bottom center | High-contrast ink on cream Linen (`≥ 10:1` contrast) replacing the dock for latecomers |
+| **Turn plate** | Top left | Wordmark; `Turn 12` in Instrument Serif; `Era II · Transit & Trade · Noon` and `Turn 4 of 8 in Era`; Turn Delta button; Fit, Sound, Leave |
+| **Status line** | Top center | One line of connection and turn state: `Your turn`, `Waiting for opponent…`, `Resolving Turn 12…`, `Reconnecting…`, or an error; `role="status"` (errors `role="alert"`) |
+| **Leaderboard** | Top right | Houses in rank order with crest, Milestone stars, Crown Index, expandable `Worth + Share + Prestige`; in rooms and hotseat, each human row shows `Ready` or `Planning` and presence (`Connected`, `Offline`) in text |
+| **Chronicle** | Below Turn plate | The latest dispatch on one line with its mono impact and a jump-to-tile link; expands to the last eight lines |
+| **Founding Guide** | Below Chronicle, self-retiring | Three steps (move your Factor, found a shop, end your turn); one-click dismiss; never returns once done |
+| **Command rail** | Bottom, full width | Left: Treasury (cash, projected cash after queued orders, debt, Borrow). Center: Order dock with text tabs `Build · Units · Trade · Pacts · Study`. Right: `Actions 3 of 6`, `Orders (3)` queue toggle, and the **End Turn** button |
+| **Orders queue** | Right drawer | Numbered list of queued orders with cost, Action, and an Undo control per row; `Undo last` and `Clear all` |
+| **Inspector** | Right drawer (bottom sheet on mobile) | Lot, shop, unit, or citizen detail; leads with a one-line diagnosis and House crest; issues orders for the selection |
+| **Turn Delta drawer** | Right drawer (bottom sheet on mobile) | The exact Turn N→N+1 ledger; opens automatically after every resolution |
+| **Council turn card** | Centered card on the first turn of Eras II–IV | New unlocks, Era standings, three Charter choices; stays until a Charter is chosen; no countdown |
+| **Handoff screen** | Full screen (hotseat) | Alabaster field, large crest, `Pass to Cobalt Syndicate`, and one `Begin Cobalt's turn` button; hides the previous draft |
+| **Spectator line** | Replaces Command rail | `Watching as spectator — Turn 12` in Ink on Alabaster |
 
-### Mobile parity (`390×844`)
+Only one right drawer is open at a time; opening another replaces it. Drawers never cover the
+Command rail or the Turn plate.
 
-- Single-row ranked score strip at top with House crests, short names, and Crown Index; tapping
-  expands the full `Worth + Share + Prestige` and Milestone breakdown.
-- Compact single-headline Chronicle bar beneath the strip showing the latest loud dispatch and
-  impact tag; tapping expands the recent Chronicle feed without obscuring the play area permanently.
-- Founding Guide collapses to a slim one-line prompt above the dock and retires automatically.
-- Build dock switches cleanly between `Shops (6)` and `Civic (3)` tabs with Era lock badges
-  clearly legible and zero horizontal clipping.
-- Fit view frames the entire island tip-to-tip; first tap previews a blueprint and civic reach,
-  second tap builds; Inspector opens as a bottom sheet (max 42% viewport height) and pans the
-  selected block into the open city strip above it.
-- Era Council modal stacks cleanly in a single scrollable column with large tap targets.
+### Turn controls
+
+- **End Turn** is the single primary button: Ink fill, Alabaster IBM Plex Sans 600 label, at least
+  56px tall and 168px wide on desktop, with a mono `Enter` hint. It is always visible during
+  play.
+- In a room, End Turn marks the seat Ready for the current turn. Once the authority acknowledges
+  it, the button becomes an outlined `Cancel Ready` and the Status line reads `Waiting for opponent…` (or
+  `Waiting for 2 opponents…`), naming who is still planning; once a Cancel Ready is acknowledged,
+  the button returns to End Turn. The button always reflects the last acknowledged readiness,
+  never an unacknowledged press. When the last seat is Ready, both read `Resolving Turn 12…` until
+  the authority's result arrives.
+- When End Turn is unavailable, it stays visible, disabled, and labelled with the reason:
+  `Choose a Charter`, `Saving draft…` (in a room, until the latest draft revision is
+  acknowledged), `Reconnecting…`, `Resolving Turn 12…`, or `Spectating`.
+- **Actions remaining** sits beside End Turn as `Actions 3 of 6` in mono; it turns to Graphite
+  `Actions 0 of 6` when spent and the dock disables Action-costing tools with the reason.
+- After each resolution End Turn ignores the remainder of the activating gesture (a held key,
+  key auto-repeat, or a double-click or double-tap), so one deliberate press advances one turn.
+
+### Turn Delta drawer
+
+- Heading in Instrument Serif: `Turn 11 → 12`, with the short state hash in mono (`#4f1a·c9e2`).
+- Sections separated by hairline rules, in resolution order: **Movement**, **Combat**,
+  **Production & buildings**, **Treasury**, **Events & score**. Empty sections are omitted.
+- Each line is one sentence fragment plus a right-aligned mono value (`Roastery C4 sales · 18
+  citizens  +§212`). Numbered lines match the board's change markers; selecting a line pans to
+  the tile.
+- The Treasury section ends with a ruled reconciliation: `Opening §640 + Income §512 − Costs §390 −
+  Upkeep §118 + Financing §0 = Closing §644`.
+- Rival activity appears under each section with that House's crest and 3px rule, public
+  information only.
+- Compact by default (top eight lines per section, `Show all` to expand). Opens automatically
+  after resolution; closes with its Close button, `Esc`, or `T`; reopens from the Turn plate. The
+  latest four Turn Deltas are browsable with previous and next controls.
 
 ### Controls and focus
 
-Drag or WASD/arrows to pan, wheel or `+`/`-` to zoom about the cursor, click to inspect, `1`–`9`
-for build tools (ignoring locked future-era tools with a clear unlock toast), `Esc` to cancel,
-`Space` to pause in solo, `M` to mute, `F` to fit. Build and speed hotkeys are cleanly disabled
-while Title, Lobby, Era Council, or Final Edition overlays are open.
+- **Pointer and touch:** drag to pan, wheel or pinch to zoom, click or tap to select; with a tool
+  armed, the first tap previews and the second tap queues.
+- **Keyboard:** `WASD` or arrow keys pan when the board is not focused; `+`/`-` zoom; `1`–`9`
+  arm order tools (locked tools show an unlock toast); `Esc` cancels the armed tool, closes the
+  open drawer, or returns focus to the page; `Ctrl+Z` or `Backspace` undoes the last queued order;
+  `O` toggles the Orders queue; `T` toggles the Turn Delta; `F` fits the board; `M` mutes.
+- Single-key shortcuts (including `Backspace`) never fire while a text field has focus.
+- **Board focus:** `Tab` reaches the board like any control. While the board has focus, arrow keys
+  move a visible tile cursor and `Enter` or `Space` select or act on that tile.
+- **The global `Enter`/`Space` shortcut fires only when no control has focus.** When focus is on
+  the page body (no focused button, link, input, select, textarea, contenteditable, or the
+  board), `Enter` or `Space` activates End Turn. When any control is focused, the global shortcut
+  is suppressed and `Enter` and `Space` do exactly what they normally do for that control
+  (activate the focused button, type a space, toggle the checkbox); a focused control other than
+  End Turn therefore never ends the turn. The global shortcut also never fires while the Council
+  card, handoff screen, a confirmation, or the Final Edition is open, with a modifier key held,
+  during IME composition, or on key auto-repeat.
+- **A focused End Turn button activates once by native keyboard semantics.** The End Turn button
+  is itself a focusable control, so when it has focus, `Enter` (on keydown) or `Space` (on keyup)
+  activates it by ordinary button activation and ends the turn (or marks Ready) exactly once, the
+  same as a click; auto-repeat of a held key is ignored as described under *Turn controls*. This
+  is the button doing its own job, not the global shortcut, which stays suppressed because a
+  control has focus, so a single key press can never both activate a focused control and fire the
+  global shortcut. A focused `Cancel Ready` likewise activates once, and a disabled End Turn does
+  nothing.
+- Every action available by pointer is available by keyboard, and vice versa; a full turn can be
+  planned and ended keyboard-only.
 
-## 3. Event stream & feedback craft
+### Mobile parity (`390×844`)
 
-The **Mercadia Chronicle** makes every turning point loud, legible, and rewarding:
+- **Top strip:** Turn number, Era and daypart, and a compact ranked crest row with Crown Index;
+  tapping the row expands the full leaderboard and Ready states.
+- **Status line** sits directly beneath the top strip, always one line, never covered.
+- **Bottom Command rail** in the thumb zone: Treasury and `Actions 3 of 6` on the left, a
+  full-height **End Turn** on the right at least 56px tall and 140px wide; the Order dock sits
+  above it as five text tabs with tools in a single scrollable row. No horizontal clipping.
+- Every tap target is at least 48×48px with at least 8px spacing; tile selection snaps to the
+  nearest lot so small tiles stay easy to hit.
+- Inspector, Orders queue, and Turn Delta open as bottom sheets (Inspector up to 50% height, Turn
+  Delta up to 70%) with a 48px Close button and a drag handle, and pan the selected tile into the
+  visible board above.
+- The Council card and handoff screen stack in one scrollable column with full-width buttons.
+- Layout respects `env(safe-area-inset-*)`; nothing important sits under the home indicator.
+- Mobile has full parity: every order, undo, End Turn, Ready, Cancel Ready, and the Turn Delta are
+  reachable by touch.
 
-- **Tier 1 — Major Dispatches (Headline Banner + Audio Sting):** Era transitions, Dynasty
-  Milestone unlocks, Crown Index lead changes, City Events (forecast, start, receipt), and
-  rivalry clashes (Promo Blitzes or direct same-trade undercuts). Each displays a crisp crest or
-  category badge, bold Fraunces/DM Sans headline, and a high-contrast mechanical impact pill
-  (e.g., `Cinema +45%`, `+§80 · ★1`, `New Leader`).
-- **Tier 2 — Chronicle Stream (Recent Feed):** Keeps the latest 3–4 dispatches scannable in a
-  tight Linen stack with 3 px colored left rules (Brass = Era/Milestone, Canal = City Event,
-  House color = Rivalry/Build). Dispatches tied to a lot include a subtle focus affordance that
-  smoothly pans the camera to the action.
-- **Canvas feedback:** Floating brass coin pops (`+§24`), delight stars, queue/stockout badges,
-  Era unlock shimmer rings, and bright Promo Blitz pills drawn after the color grade so they
-  remain sharp even at twilight.
+### Motion
+
+Motion is restrained and never represents time passing in the world. Drawer and sheet transitions
+are at most 180ms (opacity and translate). After resolution the board switches from Turn N to
+Turn N+1 in one step and change markers appear; there is no tweening of units or citizens and no
+interpolation between states. With `prefers-reduced-motion: reduce`, all transitions are instant.
+The canvas redraws only on state change, input, or resize; there is no continuous animation loop.
+
+## 3. Chronicle and feedback craft
+
+- **Chronicle lines** are ledger-style: crest or category glyph, a plain IBM Plex Sans phrase, and
+  a mono impact (`Cinema demand +45%`, `+§80 · ★1`, `New leader`). A 3px left rule encodes
+  category (Brass = Era or Milestone, Canal = city event, House color = rivalry, build, or pact).
+  Lines tied to a tile have a jump-to-tile control.
+- **Major moments** (Era transition, Milestone, lead change, Final Edition) get an Instrument
+  Serif headline at the top of the Turn Delta and a sound cue, not a banner over the board.
+- **Planning feedback** is immediate and local: queuing an order adds its numbered overlay and
+  updates Actions and projected cash; an illegal order shows its reason inline (`Not enough § —
+  needs §280, have §190 projected`).
+- **Connection and error states** use the Status line with a 2px left rule: Brass for waiting,
+  Terracotta for reconnecting, Alert for errors, always with plain text. Errors never disappear on
+  their own while still true.
 
 ## 4. Sound
 
-Procedural Web Audio synthesis (zero audio file assets): wooden build thud, brass coin chime,
-two-strike tram bell, newspaper rustle for Gazette dispatches, warm chord fanfare for Era
-transitions and Milestone unlocks, subtle charter seal click, and soft rain hiss. Audio activates
-on first user gesture with a persistent mute toggle (`aria-pressed`).
+Procedural Web Audio synthesis, no audio files: a soft paper tap when an order is queued, a
+reverse tap on undo, a wax-seal stamp on End Turn or Ready, a two-strike tram bell when a turn
+resolves, a warm chord for Era transitions and Milestones, a charter seal click, and a newspaper
+rustle for the Final Edition. Sounds play only in response to player actions or resolutions,
+never on a timer. Audio starts on the first user gesture; mute is a persistent toggle with
+`aria-pressed`.
 
 ## 5. Architecture boundaries
 
-- **Pure shared simulation core:** Zero DOM or Worker globals; seeded deterministic PRNG; owns
-  district map, pathfinding, citizens, trams, four-era progression, Dynasty Charters, Milestones,
-  AI Houses, scoring, Chronicle generation, lobby/room state machine, and compact snapshot wire
-  protocol.
-- **Single simulation, dual host:** Solo runs the shared simulation loop in the browser;
-  multiplayer runs the exact same simulation inside a Cloudflare Worker + SQLite-backed Durable
-  Object using WebSocket Hibernation and 10 Hz authoritative snapshots (full snapshot on join or
-  reconnect, compact delta snapshots during play).
-- **Resilient sessions:** Seat tokens persist across reloads and closed tabs with heartbeat-based
-  tab protection so a returning player reclaims their exact seat rather than becoming a spectator.
-  Host migration promotes the next connected human automatically. Checkpoints upgrade cleanly
-  across schema versions.
-- **Renderer and HUD:** Canvas 2D 2:1 isometric renderer with 60 FPS interpolation between 10 Hz
-  ticks, zoom-bucketed sprite caching, automatic GPU/CPU canvas fallback, and declarative HUD
-  binding over the shared view store.
-- **Verification hook:** Read-only client inspection window exposing live state, era, unlocks,
-  milestones, chronicle lines, and tile projection, with deterministic time-warp gated strictly to
-  localhost or `?dev=1`.
+- **Pure deterministic core (`src/shared`).** No DOM, Worker, network, `Date`, `Math.random`, or
+  timer use. The core exposes match creation from a seed and config; draft validation; AI order
+  generation as a pure function of state and seat; `resolveTurn(state, orders) → { state,
+  summary }` running the five steps in order; canonical order sorting; and a stable state hash.
+  Randomness comes from a seeded PRNG whose stream is derived from the match seed, turn number,
+  and purpose (events, AI per seat), so results never depend on call order elsewhere.
+- **One core, three hosts.** Solo and hotseat run the core in the browser. Network rooms run the
+  same core inside one Cloudflare Worker and a SQLite-backed Durable Object per room using
+  WebSocket Hibernation. The Durable Object has no tick, alarm-driven simulation, or interval
+  loop; it changes world state only inside a resolution.
+- **Room authority.** The Durable Object persists, in one transaction per resolution: the state,
+  the canonical action log, the turn summary, and the last resolved turn. Drafts (each with its
+  acknowledged revision) and each seat's Ready flag and readiness epoch are stored per turn and
+  seat; an accepted Ready or Cancel Ready writes the new flag and epoch in one transaction. The
+  Durable Object handles readiness messages one at a time, and resolution is guarded by the stored
+  last resolved turn, so concurrent, repeated, or racing Ready and Cancel Ready messages resolve a
+  turn exactly once. An off-turn `ready` or `cancelReady` is answered from the current stored
+  state alone; the authority never reads a past turn's stored summary to answer a message.
+- **Wire protocol.** Client → authority: `hello` (room code, seat token, last seen turn), `draft`
+  (turn, revision, orders), `ready` (turn, revision, epoch), `cancelReady` (turn, epoch), `ping`.
+  Authority → client: `state` (sent on every join and reconnect, and to one seat as the only reply
+  to its off-turn `ready` or `cancelReady`: current turn, phase, full state and its hash, the
+  receiving seat's own current-turn draft with its acknowledged revision, Ready flag, and readiness
+  epoch, every seat's Ready and presence, and that state's own most recent summary, the one that
+  produced its turn), `draftAck` (turn, acknowledged revision; to the drafting seat only),
+  `readyAck` (turn, Ready flag, current readiness epoch; to that seat only), `seats` (Ready and
+  presence changes), `resolved` (see below), `error` (code, message, and the current turn,
+  acknowledged revision, and readiness epoch where relevant), `pong`. `ping` and `pong` never reach
+  the core. There is no polling and no snapshot interpolation.
+- **Resolution broadcast carries the N+1 state.** When Turn N resolves and its transaction has
+  committed, the authority sends every connected client one `resolved` message containing, together,
+  the authoritative Turn N+1 state (versioned by its turn number N+1 and its full state hash), the
+  immutable N→N+1 summary, and the resulting phase and seats' Ready flags (all cleared). A client
+  applies that state and summary as one atomic swap: it never recomputes N+1 locally in a room,
+  never shows a summary without its matching state (or the reverse), ignores a `resolved` whose turn
+  is not newer than the one it holds, and never replaces its world with an older turn's state. A
+  newer-turn `resolved` also resets the seat's readiness to Planning at epoch 0 for Turn N+1 and
+  discards all Turn N work (see *Client sessions*). A client that misses the broadcast receives,
+  in the `state` on reconnect or in the `state` that answers its next off-turn `ready` or
+  `cancelReady`, the current authoritative state with its own attached latest summary, selected
+  from that state and never by the turn the client or its message names: the N+1 state and
+  N→N+1 summary while Turn N+1 is current, or the N+2 state and N+1→N+2 summary once Turn N+1 has
+  also resolved. It never applies a summary apart from its matching newer world.
+- **Drafts and epochs stay private.** A seat's draft, its revision, and its readiness epoch are
+  sent only back to that seat (in `draftAck`, `readyAck`, `error`, and its own `state`). `seats`,
+  `resolved`, spectator `state`, and every other seat's `state` carry only public information:
+  Ready flags, presence, and the resolved world.
+  Drafts become visible to others only as committed orders in the resolved summary.
+- **Ready binds to an acknowledged draft revision.** The authority stores, per seat and turn, the
+  latest acknowledged draft revision; each turn starts at revision 0 (the empty draft). A `draft`
+  with a revision higher than the stored one is stored and answered with `draftAck`; an older or
+  duplicate revision is never applied and is answered with a `draftAck` of the current revision. A
+  `draft` for any turn other than the current one is rejected with
+  `error { code: "offTurnDraft" }` (carrying the current turn) and never stored, whatever its
+  revision. A `ready` for the current turn must carry exactly the stored acknowledged revision (a
+  `ready` for any other turn is off-turn and is answered as described under readiness epochs). If
+  the revision is older, newer, or not yet acknowledged (for example after a dropped or reordered
+  `draft`), the authority rejects it with `error { code: "staleDraft" }`, records nothing, leaves
+  the readiness epoch unchanged, and the seat stays Planning. The client shows
+  `Draft not saved yet — Ready not recorded`, resends its latest draft, never retries Ready on its
+  own, and re-enables Ready only after the matching `draftAck`, so the player marks Ready again
+  deliberately. A `draft` received while the seat is Ready is rejected with
+  `error { code: "readyLocked" }` and does not change the stored draft, so the turn always resolves
+  with exactly the revision each seat had acknowledged when it was recorded Ready.
+- **Readiness epochs make Ready and Cancel Ready exactly-once.** Per seat and turn the authority
+  stores a readiness epoch, 0 at the start of the turn's planning with the seat Planning. A
+  `ready` or `cancelReady` must name the current turn and exactly the stored epoch, and must change
+  the seat's state (Ready from Planning, Cancel Ready from Ready) while the turn is still planning;
+  a `ready` at the current epoch whose revision fails the check above is rejected with
+  `staleDraft` and consumes nothing. An accepted transition consumes that epoch:
+  the authority stores the new Ready flag with epoch + 1, answers the seat with `readyAck`, and
+  broadcasts the new Ready flag in `seats`. Any readiness message with a stale or future epoch, or
+  one that would not change the seat's state, is a duplicate: it changes nothing and is answered
+  with a `readyAck` of the seat's current flag and epoch. So a replayed Ready cannot re-ready a
+  seat that cancelled, a duplicate Cancel Ready cannot cancel a fresh Ready, and a fresh,
+  deliberate Ready on an unchanged draft after Cancel Ready succeeds because it carries the new
+  epoch. These epoch rules apply only to messages naming the current planning turn.
+  A `ready` or `cancelReady` naming any other turn (already resolved, however old, or not yet
+  started) is off-turn: it records nothing, consumes no epoch, starts or repeats no resolution,
+  and is answered to that seat only with one `state` for the current turn, carrying that state's
+  own most recent summary and the seat's current-turn Ready flag and epoch. No `readyAck`,
+  `error`, or historical summary is sent for it, and the client applies that `state` like any
+  other. In the final readiness race the first message processed wins: if the Ready that
+  completes the human seats is processed first, the turn resolves and a later Cancel Ready for it
+  is off-turn; if a Cancel Ready is processed first, that seat is Planning and the other Ready
+  resolves nothing.
+  A client sends its held epoch for the turn it holds with every Ready and Cancel Ready, and
+  shows its seat as Ready (`Cancel Ready`, `Waiting for opponent…`) only after the authority
+  acknowledges it. If a `ready` or `cancelReady` or its acknowledgment is lost, the seat shows
+  its last acknowledged state and pressing the button again is safe: it resends the same epoch,
+  so at most one transition is recorded and the reply carries the seat's true state.
+- **Client sessions.** Seat tokens persist in `localStorage` per room, and the client caches its
+  local draft keyed by turn and revision; reconnect uses exponential backoff and shows
+  `Reconnecting…` until a fresh `state` arrives. The client holds one readiness value (turn,
+  Ready flag, epoch) for its seat and reconciles every incoming message by turn first:
+  - **Newer turn.** Only a `resolved` or a `state` whose turn is newer than the held turn is
+    authoritative newer-turn state; the client applies its world and summary as one swap, once.
+    It never compares or resends the cached draft: it discards the cached draft and every
+    pending `draft`, `ready`, or `cancelReady` and its awaited acknowledgment from earlier turns,
+    so none of those orders is ever queued or sent for Turn N+1. After a `resolved` the seat
+    starts Turn N+1 Planning at epoch 0 with the empty revision-0 draft (exactly the authority's
+    start state; `resolved` carries no private data). After a `state` it adopts that message's
+    draft, revision, Ready flag, and epoch, which may already be above 0 when join or reconnect
+    carries a newer authoritative private epoch (for example, the seat readied that turn on
+    another device). A join or reconnect `state` that moves the client forward shows
+    `Turn 12 resolved while you were offline — unsent edits discarded`; one that arrives on a
+    live connection as an off-turn reply shows `Turn 12 already resolved — showing Turn 13`.
+  - **Older turn.** Any `resolved`, `state`, `draftAck`, `readyAck`, or `error` naming a turn
+    older than the held turn is ignored: it never changes the world, summary, draft, Ready flag,
+    or epoch. A `draftAck`, `readyAck`, or `error` naming a newer turn is ignored too; only
+    `resolved` or `state` moves the client forward.
+  - **Same turn.** For the held turn, readiness data from a `state`, `readyAck`, or `error` is
+    accepted only when its epoch is at least the most recently acknowledged epoch for that turn; a
+    lower epoch is a late, superseded reply and is ignored. So a held `readyAck` (Ready, epoch 1)
+    delivered after `readyAck` (Planning, epoch 2) leaves the seat Planning at epoch 2 with End
+    Turn showing, and the next Ready is sent at epoch 2. A same-turn `resolved` is ignored entirely
+    (it never resets readiness the client already holds for that turn), and a same-turn `state`
+    never re-applies the world or reopens the Turn Delta. Its draft is reconciled by revision: if
+    the authority's acknowledged revision is older than the local one and the seat is not Ready,
+    the client resends the local draft and waits for `draftAck` before enabling Ready; in every
+    other case it adopts the authority's draft and revision.
+  Because readiness is reset on every newer turn, the first Ready of Turn N+1 after
+  uninterrupted play carries epoch 0 and is recorded on the first press, never rejected or
+  answered as a duplicate because of a Turn N epoch.
+  The room URL is `/?room=ABCD`; the socket is `/ws/rooms/ABCD`.
+- **Renderer and HUD.** Canvas 2D 2:1 isometric renderer with zoom-bucketed sprite caching and
+  on-demand redraw; the declarative HUD binds to a view store derived from the current state and
+  the local draft.
+- **Verification hook.** A read-only `window.__mercadia` inspector (localhost or `?dev=1` only)
+  exposes phase, turn, state hash, the latest summary, the local draft, and seed plus action log
+  export for replay. It cannot mutate state, skip turns, or warp time.
+- **Content Security Policy.** Served with `default-src 'self'; script-src 'self'; style-src
+  'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none';
+  base-uri 'none'; frame-ancestors 'none'`. No inline scripts, inline event handlers, or
+  third-party origins.
 
-## 6. Pacing and tuning principles
+## 6. Turn tuning principles
 
-- **Deliberate Dynasty Civ cadence:** Standard matches run four Eras (~150–180 seconds per Era at
-  1×, ~10 minutes total including brief Era Councils); Blitz runs four brisk Eras (~60–75 seconds
-  per Era, ~4–5 minutes total) so every mode experiences the full Era I → IV arc, Charter choices,
-  and unlock curve.
-- **Breathable opening:** In Era I, AI Houses stagger their opening claims thoughtfully and
-  expand at a measured pace so human players have time to read the street, complete the Founding
-  Guide, and claim prime corners without feeling ambushed in the first ten seconds.
-- **Compounding progression:** Early shops fund Era II transit corridors and Era III prestige
-  flagships; Dynasty Charters and Milestones reward coherent specialization (craft quality,
-  transit patronage, financial discipline, or canal prestige) while keeping multiple paths to
-  the Crown competitive.
-- **Fair scoring:** `Crown Index = Net Worth ÷ 10 + Market Share % × 3 + Civic Prestige × 4`,
-  sampled every daypart across all four Eras for the Final Edition's chart.
+- **Decision weight over speed.** A Standard match is 32 turns, Blitz is 16. Each turn should offer
+  two or three meaningful choices; Actions are tight enough that every order matters.
+- **Breathable opening.** In Era I, AI Houses expand at a measured rate (at most one new property
+  each per turn) so new players can claim prime corners without being ambushed on Turn 1.
+- **Compounding progression.** Early shops fund Era II corridors and Barges, then Era III prestige
+  flagships; Charters, Milestones, and Guild Studies reward coherent specialization while keeping
+  several paths to the Crown competitive across seeded matches.
+- **Readable conflict.** Contests are deterministic and previewed with expected damage, so combat
+  is a planning decision, never a dexterity test.
+- **Fair scoring.** `Crown Index = Net Worth ÷ 10 + Market Share % × 3 + Civic Prestige × 4`,
+  recomputed once per resolved turn and sampled every turn for the Final Edition chart.
+
+## 7. QA
+
+Every visual and interaction change is checked in real browsers at **1440×900** (desktop),
+**1024×768**, and **390×844** (portrait, touch emulation):
+
+- Title, solo planning with queued orders and overlays, End Turn by click, `Enter`, `Space`, and
+  tap, the Turn Delta drawer or sheet open and closed, a Council turn, the hotseat handoff screen,
+  a room in `Waiting for opponent…`, `Reconnecting…` after a dropped connection, an error state,
+  and the Final Edition.
+- Turn #, `Actions n of m`, treasury, and End Turn are visible and unclipped at every size; no
+  text overlaps; drawers never cover the Command rail.
+- With a button other than End Turn, an input, or the board focused, `Enter` and `Space` perform
+  that control's normal action and do not end the turn; with End Turn itself focused they
+  activate it exactly once as a normal button press; with nothing focused they end it exactly
+  once.
+- A full turn can be completed keyboard-only on desktop and touch-only at 390×844; mobile tap
+  targets are at least 48×48px; focus rings are visible on every control.
+- Text contrast meets the ratios in the palette; ownership is distinguishable in grayscale.
+- **Console and CSP cleanliness:** across solo, hotseat, and two-browser room sessions including a
+  reload and an offline/online reconnect: zero console errors or warnings, zero uncaught page
+  errors, zero `securitypolicyviolation` events, and zero failed network or WebSocket requests.
+- The served pages load no fonts or scripts from third-party origins, and no element uses Inter.
