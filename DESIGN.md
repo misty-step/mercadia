@@ -289,9 +289,12 @@ never on a timer. Audio starts on the first user gesture; mute is a persistent t
   never shows a summary without its matching state (or the reverse), ignores a `resolved` whose turn
   is not newer than the one it holds, and never replaces its world with an older turn's state. A
   newer-turn `resolved` also resets the seat's readiness to Planning at epoch 0 for Turn N+1 and
-  discards all Turn N work (see *Client sessions*). A client that misses the broadcast receives
-  the same N+1 state and N→N+1 summary in the `state` message on reconnect, or in the `state`
-  that answers its next off-turn `ready` or `cancelReady`.
+  discards all Turn N work (see *Client sessions*). A client that misses the broadcast receives,
+  in the `state` on reconnect or in the `state` that answers its next off-turn `ready` or
+  `cancelReady`, the current authoritative state with its own attached latest summary, selected
+  from that state and never by the turn the client or its message names: the N+1 state and
+  N→N+1 summary while Turn N+1 is current, or the N+2 state and N+1→N+2 summary once Turn N+1 has
+  also resolved. It never applies a summary apart from its matching newer world.
 - **Drafts and epochs stay private.** A seat's draft, its revision, and its readiness epoch are
   sent only back to that seat (in `draftAck`, `readyAck`, `error`, and its own `state`). `seats`,
   `resolved`, spectator `state`, and every other seat's `state` carry only public information:

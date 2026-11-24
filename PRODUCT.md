@@ -474,11 +474,15 @@ orders. AI orders are computed instantly at the start of PLANNING and are never 
     that seat only, with one ordinary full state message for the **current** turn: the current
     turn, phase, world and state hash, the seat's own current-turn draft (with its acknowledged
     revision), Ready flag, and readiness epoch, every seat's Ready and presence status, and that
-    state's own most recent Turn Delta (the summary that produced the current turn). It never
-    looks up, returns, or applies the summary of the turn the message named. The client treats
-    this reply exactly like any other state message (see *Client readiness across turns*). This
-    is the only reply to an off-turn readiness message, whether it is a retry, a duplicate, a
-    delayed message, or a replay.
+    state's own most recent Turn Delta (the summary that produced the current turn). The
+    authority selects the current authoritative world first and returns the summary attached to
+    it, even when that summary happens to cover the turn the message named; it never selects a
+    summary by the message's turn. A message naming Turn N while Turn N+1 is current is answered
+    with the Turn N+1 world and its N→N+1 summary; while Turn N+2 is current, with the Turn N+2
+    world and its N+1→N+2 summary. The client never applies a summary apart from its matching
+    newer world, and treats this reply exactly like any other state message (see *Client
+    readiness across turns*). This is the only reply to an off-turn readiness message, whether it
+    is a retry, a duplicate, a delayed message, or a replay.
   - A seat may withdraw Ready until the last human seat is Ready. The authority handles
     readiness messages one at a time: the Ready that completes the set of human seats is recorded
     and resolves Turn N at once, so any Cancel Ready for Turn N processed after it is off-turn
@@ -488,9 +492,9 @@ orders. AI orders are computed instantly at the start of PLANNING and are never 
     with exactly the draft revision each seat had acknowledged when it was recorded Ready.
 - **No double advance.** The authority stores the last resolved turn and never resolves a turn
   twice. Any Ready, Cancel Ready, retry, or duplicate referring to an already-resolved turn
-  changes nothing and gets the off-turn reply above: the current state with its own most recent
-  Turn Delta, never the stored summary of the turn it named. A draft for an already-resolved turn
-  is rejected as off-turn and never stored.
+  changes nothing and gets the off-turn reply above: the current state with its own attached most
+  recent Turn Delta, never a summary selected by the turn it named. A draft for an
+  already-resolved turn is rejected as off-turn and never stored.
 - **Seat reclaim.** Each seat has a seat token persisted in the browser. Reload, a closed tab, or a
   network drop returns the player to the exact same seat with their draft and Ready state. Seats
   are never auto-readied, timed out, or handed to AI mid-match; the room simply waits.
@@ -537,8 +541,11 @@ orders. AI orders are computed instantly at the start of PLANNING and are never 
     resets readiness for a turn the client already holds (for example, a late resolution message
     after a join state that showed the seat Ready).
   - So each turn's world is applied once on every client, no Turn N reply can mark a Turn N+1
-    seat Ready or Planning, and a Turn N+1 Ready is never sent with a Turn N epoch: the first
-    Ready of every turn carries epoch 0 and is recorded on the first press.
+    seat Ready or Planning, and a Turn N+1 Ready is never sent with a Turn N epoch. In
+    uninterrupted play from the new-turn reset, with no intervening Ready or Cancel Ready by the
+    same seat for that turn, the seat's first Ready of the turn carries epoch 0 and is recorded on
+    the first press. After any catch-up from a full state message, the client uses that message's
+    authoritative epoch.
 - **User-visible states.** The HUD always shows which state the client is in: `Your turn`,
   `Waiting for opponent…` (with who is not yet Ready), `Resolving Turn N…`, `Reconnecting…`
   (draft kept locally, Ready unavailable until synced), and clear errors such as `Room not found`,
@@ -589,9 +596,10 @@ heartbeats. After every step it checks:
   current planning turn (replayed, duplicated, delayed past resolution, retried after
   reconnect, or naming a future turn) leaves every Ready flag, epoch, the turn number, and the
   state hash unchanged, starts no resolution, and is answered to that seat only with a state
-  message for the current turn whose Turn Delta is that state's own most recent summary and whose
-  readiness is the seat's current-turn Ready flag and epoch. No reply ever carries, and no client
-  ever applies, the summary of an earlier turn.
+  message for the current turn whose Turn Delta is that state's own attached most recent summary
+  (even when it covers the named turn) and whose readiness is the seat's current-turn Ready flag
+  and epoch. No reply ever carries a summary selected by the named turn, and no client ever
+  applies a summary apart from its matching newer world.
 - **Client readiness across turns:** the harness holds, drops, and reorders acknowledgments and
   resolution messages within and across turns. After every newer-turn resolution message the
   client's seat is Planning at epoch 0 with no earlier-turn draft, Ready, or Cancel Ready pending;
@@ -638,15 +646,17 @@ Each check runs against the real app (Worker dev server and real browsers), not 
     the relay re-sends A's `ready { turn: N, revision: r, epoch: e }` and a Turn N `cancelReady`
     (as a duplicate, delayed, and after a reconnect). Each is answered to A only with a state
     message for Turn N+1 carrying the Turn N+1 world and hash, the N→N+1 Turn Delta as that state's
-    own most recent summary, and A's Turn N+1 Ready flag and epoch. Turn #, the state hash, both
-    seats' Ready flags, and A's epoch do not change, no resolution occurs, B receives nothing for
-    it, and A does not reopen the Turn Delta. After Turn N+1 also resolves, the same replay is
-    answered with the Turn N+2 state and its N+1→N+2 Turn Delta, never the N→N+1 summary. In a
-    repeat run the relay drops A's Turn N `readyAck`, B marks Ready so Turn N resolves, the relay
-    drops A's resolution message, and A, still showing Turn N, presses End Turn again, resending
+    own attached most recent summary (selected from the current state, not from the named Turn N),
+    and A's Turn N+1 Ready flag and epoch. Turn #, the state hash, both seats' Ready flags, and
+    A's epoch do not change, no resolution occurs, B receives nothing for it, and A does not
+    reopen the Turn Delta. After Turn N+1 also resolves, the same replay is answered with the
+    Turn N+2 state and its attached N+1→N+2 Turn Delta, never the N→N+1 summary. In a repeat run
+    the relay drops A's Turn N `readyAck`, B marks Ready so Turn N resolves, the relay drops A's
+    resolution message, and A, still showing Turn N, presses End Turn again, resending
     its Turn N `ready`: A receives the Turn N+1 state, shows Turn N+1 with B's hash and the N→N+1
-    Turn Delta and the notice `Turn N already resolved — showing Turn N+1`, and is Planning at
-    epoch 0 (B shows A as Planning); no second resolution occurs.
+    Turn Delta and the notice `Turn N already resolved — showing Turn N+1`, and adopts that state's
+    authoritative Turn N+1 Ready flag and epoch: Planning at epoch 0, since A has recorded no
+    Turn N+1 Ready or Cancel Ready (B shows A as Planning); no second resolution occurs.
 11. **Heartbeats.** With both seats connected and idle for five minutes of heartbeats, the turn,
     world, and Ready states are unchanged.
 12. **Replay.** Exporting a finished match's seed and action log and replaying it headlessly
