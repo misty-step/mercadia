@@ -760,7 +760,7 @@ export function createHud(opts: HudOptions): Hud {
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (destroyed || v.lobby) return;
+    if (destroyed || inLobby()) return;
     const active = document.activeElement;
     const focus = classifyFocus(active, canvas);
     const isAct = e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar';
@@ -889,10 +889,15 @@ export function createHud(opts: HudOptions): Hud {
     target?.focus({ preventScroll: true });
   }
 
+  /** In a room the lobby view stays attached after the match starts; only the pre-match lobby hides the HUD. */
+  function inLobby(): boolean {
+    return !!v.lobby && v.lobby.status === 'lobby';
+  }
+
   function render(): void {
     if (destroyed) return;
     v = session.view;
-    if (v.lobby) return;
+    if (inLobby()) return;
 
     const handoff = !!v.handoff;
     root.classList.toggle('is-handoff', handoff);
@@ -1002,7 +1007,7 @@ export function createHud(opts: HudOptions): Hud {
   root.addEventListener('click', onClick);
   document.addEventListener('keydown', onKeyDown);
   board.onPick((hit, e) => {
-    if (destroyed || v.handoff || v.lobby) return;
+    if (destroyed || v.handoff || inLobby()) return;
     if (e.right) {
       if (ui.armed) disarm();
       else if (ui.drawer === 'inspector') {

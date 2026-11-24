@@ -1,9 +1,9 @@
 {
   "name": "mercadia",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "MERCADIA \u2014 rival merchant dynasties reshape a sunlit canal-and-tramway city era by era.",
+  "description": "MERCADIA v3 \u2014 rival merchant dynasties reshape a canal-and-tramway city, one deliberate turn at a time.",
   "scripts": {
     "dev": "wrangler dev --port 8787 --ip 127.0.0.1",
     "dev:client": "vite",
@@ -11,7 +11,6 @@
     "build": "npm run typecheck && vite build",
     "test": "vitest run",
     "smoke": "node scripts/smoke.mjs",
-    "evidence": "node scripts/evidence.mjs",
     "balance": "npx tsx scripts/balance.ts",
     "deploy": "npm run build && wrangler deploy"
   },

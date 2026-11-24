@@ -80,7 +80,7 @@ function boot(): void {
   let demoSel: { tile: number; unit: number } = { tile: -1, unit: 0 };
   let demoHover = -1;
 
-  installDevHook(() => session);
+  installDevHook(() => session, (t) => board.tileScreenPos(t));
 
   // ── The demo plate behind the menus ──
 

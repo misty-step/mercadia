@@ -21,6 +21,8 @@ export interface MercadiaInspector {
   readonly mode: string;
   /** Seed + canonical action log for replay, or null before the first resolution (and in rooms). */
   exportMatch(): MatchExport | null;
+  /** Where a tile's centre is on screen (read-only layout query used by the acceptance harness). */
+  tileScreenPos(tile: number): { x: number; y: number } | null;
   /** A frozen deep copy of the whole session view. */
   readonly view: Readonly<SessionView> | null;
 }
@@ -47,7 +49,7 @@ function deepFreeze<T>(v: T): T {
 const copy = <T>(v: T): T => (v === null || v === undefined ? v : (JSON.parse(JSON.stringify(v)) as T));
 
 /** Install the inspector. `current` returns the live session (or null on the title screen). */
-export function installDevHook(current: () => Session | null): void {
+export function installDevHook(current: () => Session | null, tileScreen: (tile: number) => { x: number; y: number } | null = () => null): void {
   if (!devHookEnabled()) return;
   const view = (): SessionView | null => current()?.view ?? null;
   const api: MercadiaInspector = {
@@ -75,6 +77,9 @@ export function installDevHook(current: () => Session | null): void {
     },
     get mode() {
       return view()?.game.mode ?? '';
+    },
+    tileScreenPos(tile: number) {
+      return tileScreen(tile);
     },
     exportMatch() {
       return copy(current()?.exportMatch() ?? null);

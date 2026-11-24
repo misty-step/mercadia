@@ -9,10 +9,6 @@ export interface Env {
   GAME_ROOMS: DurableObjectNamespace;
 }
 
-/** No inline scripts, inline styles or event handlers, and no third-party origins. */
-export const CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
     status,
@@ -64,11 +60,6 @@ export default {
 
     if (path.startsWith('/api/') || path.startsWith('/ws/')) return json({ ok: false, error: 'Not found' }, 404);
 
-    const res = await env.ASSETS.fetch(request);
-    const headers = new Headers(res.headers);
-    headers.set('content-security-policy', CSP);
-    headers.set('x-content-type-options', 'nosniff');
-    headers.set('referrer-policy', 'no-referrer');
-    return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+    return env.ASSETS.fetch(request);
   },
 } satisfies ExportedHandler<Env>;
