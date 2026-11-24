@@ -87,7 +87,7 @@ describe('state hash', () => {
 
   it('is bit-for-bit the same on every host (pinned values for a fixed string and a fresh world)', () => {
     expect(hashString('mercadia')).toBe('3d0c6d788fae767c');
-    expect(stateHash(newGame(7, 'standard', ['human', 'ai', 'ai', 'ai']))).toBe('6e6d4fc22a3a925c');
+    expect(stateHash(newGame(7, 'standard', ['human', 'ai', 'ai', 'ai']))).toBe('22021d59a8258ac6');
   });
 
   it('changes when anything in the world changes', () => {
@@ -200,5 +200,35 @@ describe('stable tie-breaking by Initiative', () => {
         expect(c.costs).toBe(0); // nothing was charged for the lost lot
       }
     }
+  });
+});
+
+describe('match start (PRODUCT.md "Match start")', () => {
+  it('every House begins with one Factor and one Watch Company beside Grand Station, §900 and no property', () => {
+    for (const kinds of [['human', 'ai'], ['human', 'ai', 'ai'], ['human', 'ai', 'ai', 'ai']] as const) {
+      const g = newGame(11, 'standard', [...kinds]);
+      const seen = new Set<number>();
+      g.players.forEach((p, i) => {
+        expect(p.cash).toBe(START_CASH);
+        expect(g.buildings.filter((b) => b.owner === i)).toHaveLength(0);
+        const mine = g.units.filter((u) => u.owner === i);
+        expect(mine.map((u) => u.kind).sort()).toEqual(['factor', 'watch']);
+        for (const u of mine) {
+          expect(CITY.walk[u.tile]).toBe(true); // a legal street tile
+          expect(seen.has(u.tile)).toBe(false); // no two units share a tile
+          seen.add(u.tile);
+          // beside Grand Station: on the avenue frontage, within five steps of the station door
+          expect(CITY.dist[u.tile * 144 + CITY.stationDoor]).toBeGreaterThanOrEqual(0);
+          expect(CITY.dist[u.tile * 144 + CITY.stationDoor]).toBeLessThanOrEqual(5);
+          expect(Math.min(...CITY.station.map((s) => Math.max(Math.abs((s % 12) - (u.tile % 12)), Math.abs(Math.floor(s / 12) - Math.floor(u.tile / 12)))))).toBeLessThanOrEqual(5);
+        }
+      });
+      expect(g.units).toHaveLength(kinds.length * 2);
+    }
+  });
+
+  it('no House starts on the Harbor Pier side of the board', () => {
+    const g = newGame(11, 'standard', ['human', 'ai', 'ai', 'ai']);
+    for (const u of g.units) expect(Math.floor(u.tile / 12)).toBeLessThanOrEqual(2);
   });
 });

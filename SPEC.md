@@ -20,7 +20,7 @@ The folio owns the rules; this file records the implementation decisions it leav
 - Footfall: sources (homes, Station, Pier, city and owned Tram Stops) emit citizens per Era/daypart/event; each is allocated to the
   best-scoring reachable shop; losses are attributed to the top-ranked shop with a reason (too pricey / queue full / out of stock / blockaded).
 - Treasury: `Opening + Income − Costs − Upkeep + Financing = Closing`; forced sale, disband and `Forgiven` follow PRODUCT.md.
-- Start tiles: two Houses begin beside Grand Station, two beside the Harbor Pier (a single corridor deadlocks four Houses).
+- Start tiles: all four Houses begin beside Grand Station (PRODUCT.md "Match start"): eight distinct Streetcar Avenue tiles within five steps of the station door, (7,1)(8,1), (10,1)(9,1), (11,1)(11,2), (4,1)(3,1) as Factor/Watch Company.
 - Council turns: `game.council.offers[player]`; End Turn is blocked (`readyBlock`) until a `charter` order is in the draft.
 
 ## Room authority (`src/shared/room.ts`)
@@ -34,6 +34,6 @@ The Durable Object persists room + game in one `transactionSync` per handled mes
 `HUD`, `screens`. `window.__mercadia` is a read-only inspector on localhost / `?dev=1`.
 
 ## Known limits
-- Balance is workable, not tuned: the two Pier-start Houses are weaker for AI personas.
+- Balance is workable, not tuned: all four Houses open on the same station frontage, but seats 3 and 4 start further from the Station door than seats 1 and 2.
 - Acceptance 10-repeat and 16 (dropped readyAck+resolution; pending work across resolution) are covered by session/DST unit tests but their browser flows are not green in `scripts/smoke.mjs`.
 - Acceptance 14b–e and 12/13 in a browser are not scripted (replay and AI determinism are unit-tested; replay of an exported browser match is verified in node).

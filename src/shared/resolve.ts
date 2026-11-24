@@ -120,6 +120,7 @@ import type {
   Player,
   SummaryLine,
   SummarySection,
+  ScoreDelta,
   TurnSummary,
   Unit,
 } from './types';
@@ -735,10 +736,32 @@ export function resolveTurn(game: Game, orders: Order[][]): Resolution {
     share: g.players.map((_, i) => standings.find((s) => s.player === i)!.share),
     crown: g.players.map((_, i) => standings.find((s) => s.player === i)!.crown),
   });
+  const scores: ScoreDelta[] = g.players.map((_, i) => {
+    const now = standings.find((x) => x.player === i)!;
+    const before = prev.find((x) => x.player === i);
+    const prevRank = before ? prev.indexOf(before) + 1 : standings.indexOf(now) + 1;
+    const nextRank = standings.indexOf(now) + 1;
+    const worthDelta = now.worthComponent - (before?.worthComponent ?? 0);
+    const shareDelta = now.shareComponent - (before?.shareComponent ?? 0);
+    const prestigeDelta = now.prestigeComponent - (before?.prestigeComponent ?? 0);
+    return {
+      player: i,
+      prevRank,
+      nextRank,
+      rankDelta: prevRank - nextRank,
+      prevCrown: before?.crown ?? 0,
+      crown: now.crown,
+      crownDelta: worthDelta + shareDelta + prestigeDelta,
+      worthDelta,
+      shareDelta,
+      prestigeDelta,
+    };
+  });
   for (const s of standings) {
-    const before = prev.find((x) => x.player === s.player);
-    const d = s.crown - (before?.crown ?? 0);
-    say('events', `${hn(s.player)} Crown Index ${s.crown}`, `${d >= 0 ? '+' : '−'}${Math.abs(d)} · ${s.worthComponent} + ${s.shareComponent} + ${s.prestigeComponent}`, s.player);
+    const sc = scores[s.player];
+    const d = sc.crownDelta;
+    const rank = sc.rankDelta === 0 ? `#${sc.nextRank} held` : `#${sc.prevRank} → #${sc.nextRank}`;
+    say('events', `${hn(s.player)} Crown Index ${s.crown}`, `${d >= 0 ? '+' : '−'}${Math.abs(d)} · ${rank}`, s.player);
   }
   const top = standings[0];
   if (top && top.player !== g.leader && (g.leader < 0 || top.crown - (standings.find((s) => s.player === g.leader)?.crown ?? 0) >= LEAD_MARGIN) && T > 1) {
@@ -795,6 +818,7 @@ export function resolveTurn(game: Game, orders: Order[][]): Resolution {
     lines,
     cash,
     standings,
+    scores,
     committed: committed.map((l) => l.length),
   };
   return { game: g, summary, committed };

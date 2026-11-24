@@ -10,6 +10,8 @@ export class LocalMatch {
   game: Game;
   readonly config: MatchConfig;
   log: ActionLog = [];
+  /** Log lengths at which Continue in Endless was pressed (canonical continuation record). */
+  endlessAt: number[] = [];
   hashes: string[] = [];
   summaries: TurnSummary[] = [];
   /** Per player: this turn's draft. */
@@ -50,10 +52,13 @@ export class LocalMatch {
     const next = continueEndless(this.game);
     if (!next) return false;
     this.game = next;
+    this.endlessAt.push(this.log.length);
     return true;
   }
 
   export(): MatchExport {
-    return { version: 3, config: this.config, log: this.log, hashes: this.hashes };
+    const out: MatchExport = { version: 3, config: this.config, log: this.log, hashes: this.hashes };
+    if (this.endlessAt.length > 0) out.endlessAt = [...this.endlessAt];
+    return out;
   }
 }

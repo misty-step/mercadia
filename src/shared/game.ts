@@ -174,12 +174,16 @@ export function computeStandings(g: Game): Standing[] {
 
 // ── Creation ──
 
-/** Start tiles by player index: [Factor, Watch Company]. Two Houses begin beside Grand Station, two beside the Harbor Pier. */
-const START_TILES: [number, number][] = [
-  [7 + 12, 8 + 12], // beside Grand Station: (7,1) (8,1)
-  [10 + 12, 9 + 12], // beside Grand Station: (10,1) (9,1)
-  [3 + 132, 4 + 132], // beside the Harbor Pier: (3,11) (4,11)
-  [6 + 132, 5 + 132], // beside the Harbor Pier: (6,11) (5,11)
+/**
+ * Start tiles by player index: [Factor, Watch Company]. PRODUCT.md "Match start": every House
+ * begins with one Factor and one Watch Company beside Grand Station — eight distinct tiles of the
+ * Streetcar Avenue frontage within five steps of the station door, (6,1) and (5,1) left open as seat 1's approach.
+ */
+export const START_TILES: readonly (readonly [number, number])[] = [
+  [7 + 12, 8 + 12], // (7,1) (8,1)
+  [10 + 12, 9 + 12], // (10,1) (9,1)
+  [11 + 12, 11 + 24], // (11,1) (11,2)
+  [4 + 12, 3 + 12], // (4,1) (3,1)
 ];
 
 export function createGame(cfg: MatchConfig): Game {

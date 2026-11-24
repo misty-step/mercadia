@@ -901,6 +901,7 @@ export function createHud(opts: HudOptions): Hud {
 
     const handoff = !!v.handoff;
     root.classList.toggle('is-handoff', handoff);
+    root.classList.toggle('is-table', !!v.tableDelta);
     root.inert = handoff;
     if (handoff && !lastHandoff) {
       resetSelection();
@@ -1110,7 +1111,7 @@ export function createHud(opts: HudOptions): Hud {
       board.onHover(() => {});
       if (elToasts) elToasts.replaceChildren();
       root.replaceChildren();
-      root.classList.remove('hud', 'is-handoff', 'has-drawer');
+      root.classList.remove('hud', 'is-handoff', 'is-table', 'has-drawer');
     },
     openTurnDelta(): void {
       openDrawer('delta', false);

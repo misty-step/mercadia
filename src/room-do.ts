@@ -6,15 +6,13 @@
 // summary are persisted in a single synchronous transaction before anything is sent.
 import { DurableObject } from 'cloudflare:workers';
 import { parseClientMsg, type ServerMsg } from './shared/protocol';
-import { RoomCore, isRoomCode, type Outbound, type RoomState } from './shared/room';
+import { IDLE_PURGE_MS, RoomCore, isRoomCode, roomAlarmAction, type Outbound, type RoomState } from './shared/room';
 import type { Game } from './shared/types';
 import type { Env } from './worker';
 
 interface Attachment {
   playerId: string | null;
 }
-
-const IDLE_PURGE_MS = 6 * 60 * 60 * 1000;
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
@@ -69,6 +67,7 @@ export class MercadiaRoom extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       this.write('room', JSON.stringify(core.room));
       if (core.game) this.write('game', JSON.stringify(core.game));
+      this.write('touched', String(Date.now()));
     });
   }
 
@@ -205,10 +204,17 @@ export class MercadiaRoom extends DurableObject<Env> {
     this.drop(ws);
   }
 
-  /** Rooms nobody has touched for hours are erased. */
+  /**
+   * Housekeeping only (never simulation): unstarted lobbies and finished rooms nobody has touched
+   * for hours are erased. A match in progress is never erased — its seats wait for their players.
+   */
   override async alarm(): Promise<void> {
-    if (this.ctx.getWebSockets().length > 0) {
-      await this.ctx.storage.setAlarm(Date.now() + IDLE_PURGE_MS);
+    const touched = Number(this.read('touched') ?? 0);
+    const idle = touched > 0 ? Date.now() - touched : IDLE_PURGE_MS;
+    const action = this.core ? roomAlarmAction(this.core.room, this.ctx.getWebSockets().length, idle) : 'purge';
+    if (action === 'keep') {
+      const wait = this.core?.room.status === 'playing' || this.ctx.getWebSockets().length > 0 ? IDLE_PURGE_MS : Math.max(60_000, IDLE_PURGE_MS - idle);
+      await this.ctx.storage.setAlarm(Date.now() + wait);
       return;
     }
     this.core = null;

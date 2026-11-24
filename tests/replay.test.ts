@@ -106,3 +106,61 @@ describe('LocalMatch (solo and hotseat host)', () => {
     }
   });
 });
+
+describe('Continue in Endless is part of the canonical record', () => {
+  for (const [name, cfg, humanSeed] of [
+    ['blitz solo with generated orders', config(71, 'blitz', ['human', 'ai', 'ai']), 71],
+    ['standard AI-only', config(72, 'standard', ['ai', 'ai', 'ai', 'ai']), undefined],
+  ] as const) {
+    it(`${name}: a post-Endless export replays every turn bit-for-bit`, () => {
+      const m = playLocal(cfg, humanSeed);
+      const finished: MatchExport = JSON.parse(JSON.stringify(m.export()));
+      expect(finished.endlessAt).toBeUndefined(); // a plain finished export is unchanged
+      expect(replayMatch(finished.config, finished.log, finished.endlessAt).hashes).toEqual(finished.hashes);
+
+      const n = m.log.length;
+      expect(m.continueEndless()).toBe(true);
+      const rngs = cfg.players.map((_, i) => draftRng(humanSeed ?? 0, `endless${i}`));
+      for (let k = 0; k < 3; k++) {
+        cfg.players.forEach((p, i) => {
+          if (p.kind === 'human') m.setDraft(i, humanSeed === undefined ? [] : genDraft(m.game, i, rngs[i], 7));
+        });
+        m.endTurn();
+      }
+      const exp: MatchExport = JSON.parse(JSON.stringify(m.export()));
+      expect(exp.version).toBe(3);
+      expect(exp.endlessAt).toEqual([n]);
+      expect(exp.log).toHaveLength(n + 3);
+      const rep = replayMatch(exp.config, exp.log, exp.endlessAt);
+      expect(rep.hashes).toEqual(exp.hashes);
+      expect(rep.hashes).toHaveLength(n + 3);
+      expect(stateHash(rep.game)).toBe(m.hash());
+      expect(rep.game.phase).toBe('planning');
+      expect(rep.game.endless).toBe(true);
+      expect(rep.game.turn).toBe(m.game.turn);
+      expect(rep.summaries.slice(-SUMMARY_KEEP)).toEqual(m.summaries);
+    });
+  }
+
+  it('without the recorded continuation the post-Endless batch cannot replay (the old failure)', () => {
+    const m = playLocal(config(73, 'blitz', ['ai', 'ai']));
+    m.continueEndless();
+    m.endTurn();
+    expect(() => replayMatch(m.config, m.log)).toThrow(/over/);
+    expect(replayMatch(m.config, m.log, m.endlessAt).hashes).toEqual(m.hashes);
+  });
+
+  it('a continuation recorded on a match that is still running is rejected', () => {
+    const m = new LocalMatch(config(74, 'blitz', ['ai', 'ai']));
+    m.endTurn();
+    expect(() => replayMatch(m.config, m.log, [1])).toThrow(/not over/);
+  });
+
+  it('a continuation right at the end of the log (no further turn played) still lands in planning', () => {
+    const m = playLocal(config(75, 'blitz', ['ai', 'ai']));
+    m.continueEndless();
+    const rep = replayMatch(m.config, m.log, m.export().endlessAt);
+    expect(rep.game.phase).toBe('planning');
+    expect(stateHash(rep.game)).toBe(m.hash());
+  });
+});

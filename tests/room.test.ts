@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { stateHash } from '../src/shared/game';
 import { parseClientMsg, type ClientMsg, type ServerMsg } from '../src/shared/protocol';
-import { RoomCore, cleanName, isRoomCode, makeRoomCode } from '../src/shared/room';
+import { IDLE_PURGE_MS, RoomCore, cleanName, isRoomCode, makeRoomCode, roomAlarmAction } from '../src/shared/room';
+import { replayMatch } from '../src/shared/replay';
 import type { Order } from '../src/shared/types';
 import { RoomHarness, playerOf, startedRoom, turnOf } from './harness';
 
@@ -665,6 +666,11 @@ describe('persistence and rematch', () => {
     expect(turnOf(h)).toBe(18);
     expect(h.core.room.log).toHaveLength(17);
     expect(JSON.stringify(h.core.room.log.slice(0, 16))).toBe(snapshot);
+    // The continuation is part of the canonical record: the room's log replays bit-for-bit through it.
+    expect(h.core.room.endlessAt).toEqual([16]);
+    const rep = replayMatch(h.core.room.config!, h.core.room.log, h.core.room.endlessAt);
+    expect(rep.hashes).toEqual(h.core.room.hashes);
+    expect(stateHash(rep.game)).toBe(hashNow(h));
   });
 
   it('a rematch starts a fresh match with a new seed', () => {
@@ -714,5 +720,25 @@ describe('wire parsing', () => {
     expect(parseClientMsg('')).toBeNull();
     expect(parseClientMsg('{nope')).toBeNull();
     expect(parseClientMsg('x'.repeat(70000))).toBeNull();
+  });
+});
+
+describe('room retention alarm (PRODUCT.md "Seat reclaim")', () => {
+  const long = IDLE_PURGE_MS * 10;
+  it('never purges a started match, even with every socket away for a very long time', () => {
+    const { h } = startedRoom(2);
+    expect(h.core.room.status).toBe('playing');
+    expect(roomAlarmAction(h.core.room, 0, long)).toBe('keep');
+    expect(roomAlarmAction(h.core.room, 0, IDLE_PURGE_MS)).toBe('keep');
+    expect(roomAlarmAction(h.core.room, 2, long)).toBe('keep');
+  });
+  it('purges only unstarted lobbies and finished rooms that have sat idle with nobody connected', () => {
+    const lobby = new RoomCore('QRST', 1).room;
+    expect(lobby.status).toBe('lobby');
+    expect(roomAlarmAction(lobby, 0, IDLE_PURGE_MS - 1)).toBe('keep');
+    expect(roomAlarmAction(lobby, 0, IDLE_PURGE_MS)).toBe('purge');
+    expect(roomAlarmAction(lobby, 1, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, 0, IDLE_PURGE_MS - 1)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, 0, IDLE_PURGE_MS)).toBe('purge');
   });
 });

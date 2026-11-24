@@ -17,7 +17,7 @@ export interface CouncilHandlers {
 /** The Council card applies when the viewing seat is planning a Council turn and has no Charter queued. */
 export function councilPending(v: SessionView): boolean {
   const g = v.game;
-  return !!g.council && g.phase === 'planning' && v.seat >= 0 && v.seat < g.players.length && !v.handoff && !v.ended && !v.draft.some((o) => o.t === 'charter');
+  return !!g.council && g.phase === 'planning' && v.seat >= 0 && v.seat < g.players.length && !v.handoff && !v.tableDelta && !v.ended && !v.draft.some((o) => o.t === 'charter');
 }
 
 export class CouncilCard {

@@ -91,6 +91,8 @@ class LocalSession extends Base {
   /** Index into `humans` of the seat planning now. */
   private cur = 0;
   private handoff: number | null = null;
+  /** Hotseat: player index of the first seat of the next turn while the table reads the Turn Delta. */
+  private tableDelta: number | null = null;
   private resolutions = 0;
   private notices: Notice[] = [];
   private noticeN = 0;
@@ -133,7 +135,7 @@ class LocalSession extends Base {
   protected build(): SessionView {
     const g = this.match.game;
     const seat = this.seat;
-    const hidden = this.handoff !== null;
+    const hidden = this.handoff !== null || this.tableDelta !== null;
     const ended = g.phase === 'ended';
     const draft = hidden ? [] : this.match.drafts[seat] ?? [];
     const plan = hidden || ended ? null : pruneDraft(g, seat, draft).plan;
@@ -143,6 +145,11 @@ class LocalSession extends Base {
     if (ended) {
       status = { text: 'Match over', tone: 'info' };
       endTurn = { label: 'Match over', enabled: false, kind: 'end' };
+    } else if (this.tableDelta !== null) {
+      // The table reads the Turn Delta first; no seat's plan is on screen.
+      const next = g.players[this.tableDelta];
+      status = { text: `Turn ${g.turn - 1} \u2192 ${g.turn} resolved \u00b7 Pass to ${next.name} next`, tone: 'info' };
+      endTurn = { label: `Pass to ${next.name}`, enabled: true, kind: 'end' };
     } else if (hidden) {
       status = { text: `Pass to ${player.name}`, tone: 'info' };
       endTurn = { label: `Pass to ${player.name}`, enabled: false, kind: 'end' };
@@ -173,6 +180,7 @@ class LocalSession extends Base {
       notices: this.notices.slice(),
       pruned: this.pruned,
       handoff: this.handoff === null ? null : { player: this.handoff },
+      tableDelta: this.tableDelta === null ? null : { next: this.tableDelta },
       roomCode: '',
       lobby: null,
       host: false,
@@ -181,7 +189,7 @@ class LocalSession extends Base {
   }
 
   private editable(): boolean {
-    return this.handoff === null && this.match.game.phase !== 'ended';
+    return this.handoff === null && this.tableDelta === null && this.match.game.phase !== 'ended';
   }
 
   private setDraft(orders: Order[]): void {
@@ -191,7 +199,7 @@ class LocalSession extends Base {
   }
 
   queue(order: Order): { ok: true } | { ok: false; reason: string } {
-    if (!this.editable()) return { ok: false, reason: this.handoff !== null ? 'Begin the turn first' : 'The match is over' };
+    if (!this.editable()) return { ok: false, reason: this.handoff !== null || this.tableDelta !== null ? 'Begin the turn first' : 'The match is over' };
     const r = queueOrder(this.match.game, this.seat, this.match.drafts[this.seat], order);
     if (!r.ok) return r;
     this.pruned = '';
@@ -236,6 +244,13 @@ class LocalSession extends Base {
   endTurn(): void {
     const g = this.match.game;
     if (g.phase === 'ended' || this.handoff !== null) return;
+    if (this.tableDelta !== null) {
+      // The table has read the Turn Delta: now cover the screen for the first seat's private planning.
+      this.handoff = this.tableDelta;
+      this.tableDelta = null;
+      this.emit();
+      return;
+    }
     if (readyBlock(g, this.seat, this.match.drafts[this.seat])) return;
     this.pruned = '';
     if (this.cur < this.humans.length - 1) {
@@ -247,7 +262,8 @@ class LocalSession extends Base {
       this.resolutions++;
       this.revs = this.match.game.players.map(() => 0);
       this.cur = 0;
-      this.handoff = this.humans.length > 1 && this.match.game.phase !== 'ended' ? this.humans[0] : null;
+      this.handoff = null;
+      this.tableDelta = this.humans.length > 1 && this.match.game.phase !== 'ended' ? this.humans[0] : null;
     }
     this.emit();
   }
@@ -261,6 +277,7 @@ class LocalSession extends Base {
   continueEndless(): void {
     if (!this.match.continueEndless()) return;
     this.cur = 0;
+    this.tableDelta = null;
     this.handoff = this.humans.length > 1 ? this.humans[0] : null;
     this.emit();
   }
@@ -272,6 +289,7 @@ class LocalSession extends Base {
     this.revs = this.match.game.players.map(() => 0);
     this.cur = 0;
     this.handoff = null;
+    this.tableDelta = null;
     this.pruned = '';
     this.notices = [];
     this.emit();
@@ -549,6 +567,7 @@ class RoomSession extends Base {
       notices: c.notices.slice(),
       pruned: c.pruned,
       handoff: null,
+      tableDelta: null,
       roomCode: this.code,
       lobby: c.lobby,
       host: !!c.lobby && c.seat >= 0 && c.lobby.host === c.seat,

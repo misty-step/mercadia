@@ -769,3 +769,68 @@ describe('the unit contract', () => {
   });
 });
 
+
+describe('Turn Delta score: rank changes and component deltas (PRODUCT.md TURN_SUMMARY)', () => {
+  /** House 0 leads and House 1 trails on the stored standings; then the money flips before the turn resolves. */
+  const swapped = () =>
+    stage(allHuman(9, 'standard', 3), (c) => {
+      c.players[0].cash = 3000;
+      c.players[1].cash = 1500;
+      c.players[2].cash = 200;
+      c.standings = computeStandings(c); // the stored "previous" ranking: 0, 1, 2
+      c.players[0].cash = 100;
+      c.players[2].cash = 4000;
+    });
+
+  it('reports prevRank, nextRank and rankDelta for a real rank swap', () => {
+    const g = swapped();
+    expect(g.standings.map((s) => s.player)).toEqual([0, 1, 2]);
+    const r = step(g, []);
+    expect(r.game.standings.map((s) => s.player)).toEqual([2, 1, 0]);
+    const sc = r.summary.scores;
+    expect(sc).toHaveLength(3);
+    expect(sc.map((s) => [s.player, s.prevRank, s.nextRank, s.rankDelta])).toEqual([
+      [0, 1, 3, -2],
+      [1, 2, 2, 0],
+      [2, 3, 1, 2],
+    ]);
+  });
+
+  it('component deltas are exact and sum to the Crown Index change for every House', () => {
+    const g = swapped();
+    const r = step(g, []);
+    for (const s of r.summary.scores) {
+      const before = g.standings.find((x) => x.player === s.player)!;
+      const after = r.game.standings.find((x) => x.player === s.player)!;
+      expect(s.worthDelta).toBe(after.worthComponent - before.worthComponent);
+      expect(s.shareDelta).toBe(after.shareComponent - before.shareComponent);
+      expect(s.prestigeDelta).toBe(after.prestigeComponent - before.prestigeComponent);
+      expect(s.worthDelta + s.shareDelta + s.prestigeDelta).toBe(s.crownDelta);
+      expect(s.crownDelta).toBe(after.crown - before.crown);
+      expect(s.prevCrown).toBe(before.crown);
+      expect(s.crown).toBe(after.crown);
+    }
+    expect(r.summary.scores[0].crownDelta).toBeLessThan(0);
+    expect(r.summary.scores[2].crownDelta).toBeGreaterThan(0);
+  });
+
+  it('prints the rank move on the Crown Index line, and the numbers survive a replay', () => {
+    const r = step(swapped(), []);
+    const line = r.summary.lines.find((l) => l.text.endsWith('Crown Index ' + r.summary.scores[0].crown) && l.player === 0)!;
+    expect(line.value).toMatch(/^[+−]\d+ · #1 → #3$/);
+    const again = step(swapped(), []);
+    expect(again.summary.scores).toEqual(r.summary.scores);
+  });
+
+  it('every turn of a full match reconciles: components sum to the delta and ranks are a permutation', () => {
+    const { resolutions } = playToEnd(newGame(21, 'blitz', ['ai', 'ai', 'ai', 'ai']));
+    for (const { summary } of resolutions) {
+      expect(summary.scores.map((s) => s.nextRank).sort()).toEqual([1, 2, 3, 4]);
+      expect(summary.scores.map((s) => s.prevRank).sort()).toEqual([1, 2, 3, 4]);
+      for (const s of summary.scores) {
+        expect(s.worthDelta + s.shareDelta + s.prestigeDelta).toBe(s.crownDelta);
+        expect(s.rankDelta).toBe(s.prevRank - s.nextRank);
+      }
+    }
+  });
+});

@@ -54,6 +54,12 @@ export interface SessionView {
   pruned: string;
   /** Hotseat: the next seat that must press "Begin … turn" before the draft/board is shown. */
   handoff: { player: number } | null;
+  /**
+   * Hotseat: the last human seat just ended the turn. The Turn N→N+1 delta is shown to the whole
+   * table (no seat's draft is exposed) until someone presses "Pass to …", which opens the first
+   * seat's handoff screen. `next` is the player who plans next.
+   */
+  tableDelta: { next: number } | null;
   /** Rooms: the room code, e.g. 'ABCD', else ''. */
   roomCode: string;
   /** Lobby view when the room has not started (mode 'room'). */

@@ -10,6 +10,8 @@
 /* ───────────── Shell ───────────── */
 #hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; font-family: var(--sans); font-size: 14px; color: var(--ink); }
 #hud.is-handoff { visibility: hidden; }
+/* Hotseat table delta: the Turn Delta is on view for everyone; only the Pass-to CTA remains live in the rail. */
+#hud.is-table .rail .treasury, #hud.is-table .rail .dock, #hud.is-table .rail .orders-toggle, #hud.is-table .rail .actions { visibility: hidden; }
 #hud .hud-shell { position: absolute; inset: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; }
 #hud .hud-top { position: relative; min-height: 0; }
 #hud .slot-left { position: absolute; top: 12px; left: 12px; width: 312px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
@@ -326,6 +328,18 @@
 #hud .dl .val { flex: none; text-align: right; font-size: 12.5px; font-weight: 500; white-space: nowrap; margin-left: auto; padding-left: 6px; }
 #hud .more { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; margin: 4px 0 0 4px; font-size: 12.5px; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
 #hud .more .hi { width: 15px; height: 15px; }
+#hud .scores { display: flex; flex-direction: column; gap: 2px; }
+#hud .srow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: 'id rank crown' 'comp comp comp'; column-gap: 10px; row-gap: 1px; align-items: center; padding: 5px 6px; border-left: 3px solid var(--hc, transparent); font-size: 13px; line-height: 1.35; }
+#hud .srow .sr-id { grid-area: id; display: flex; align-items: center; gap: 8px; min-width: 0; }
+#hud .srow .sr-name { font-weight: 600; overflow-wrap: anywhere; }
+#hud .srow .sr-rank { grid-area: rank; white-space: nowrap; font-size: 12.5px; }
+#hud .srow .sr-rank .rc { font-weight: 600; margin-left: 4px; }
+#hud .srow .sr-rank[data-tone='down'] .rc { color: var(--alert); }
+#hud .srow .sr-rank[data-tone='up'] .rc { color: var(--ink); }
+#hud .srow .sr-crown { grid-area: crown; white-space: nowrap; text-align: right; font-size: 12.5px; }
+#hud .srow .sr-crown b { font-weight: 600; }
+#hud .srow .sr-comp { grid-area: comp; display: flex; flex-wrap: wrap; gap: 2px 14px; padding-left: 24px; font-size: 12px; color: var(--graphite); }
+#hud .srow .sr-comp i { font-style: normal; color: var(--graphite); margin-right: 3px; }
 #hud .recons { margin-top: 8px; border-top: 1px solid var(--ink); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
 #hud .recon { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: start; padding-left: 8px; border-left: 3px solid var(--hc, transparent); }
 #hud .recon p { font-size: 12.5px; line-height: 1.55; }

@@ -40,6 +40,8 @@ export interface RoomState {
   summaries: TurnSummary[];
   log: ActionLog;
   hashes: string[]; // full state hash after each resolved turn
+  /** Log lengths at which the host chose Continue in Endless (absent in rooms stored before this field). */
+  endlessAt?: number[];
   config: { seed: number; mode: MatchMode; players: { name: string; house: number; kind: 'human' | 'ai'; persona: AiPersona | null }[] } | null;
 }
 
@@ -52,6 +54,20 @@ export interface JoinResult {
   playerId: string;
   seat: number;
   out: Outbound[];
+}
+
+/** How long an unstarted lobby or a finished room may sit untouched, with nobody connected, before it is erased. */
+export const IDLE_PURGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * What the room's cleanup alarm does. PRODUCT.md "Seat reclaim": seats are never timed out or handed
+ * to AI mid-match and the room simply waits, so a started match that has not ended is never erased,
+ * whether or not a socket happens to be connected when the alarm fires.
+ */
+export function roomAlarmAction(room: Pick<RoomState, 'status'>, sockets: number, idleMs: number): 'keep' | 'purge' {
+  if (sockets > 0) return 'keep';
+  if (room.status === 'playing') return 'keep';
+  return idleMs >= IDLE_PURGE_MS ? 'purge' : 'keep';
 }
 
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -254,6 +270,7 @@ export class RoomCore {
     r.summaries = [];
     r.log = [];
     r.hashes = [];
+    r.endlessAt = [];
     this.resetTurnState();
   }
 
@@ -382,6 +399,7 @@ export class RoomCore {
         const next = continueEndless(this.game);
         if (!next) return err('notPlaying', 'The match is still running');
         this.game = next;
+        (r.endlessAt ??= []).push(r.log.length);
         r.status = 'playing';
         r.mode = 'endless';
         this.resetTurnState();

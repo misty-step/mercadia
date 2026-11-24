@@ -304,7 +304,21 @@ describe('hotseat', () => {
     expect(s.view.game.turn).toBe(2);
     expect(s.view.resolutions).toBe(1);
     expect(s.view.summary?.to).toBe(2);
+    // The table reads the Turn 1→2 delta first: no handoff screen yet, nobody's plan on screen.
+    expect(s.view.handoff).toBeNull();
+    expect(s.view.tableDelta).toEqual({ next: 0 });
+    expect(s.view.summary?.from).toBe(1);
+    expect(s.view.draft).toEqual([]);
+    expect(s.view.plan).toBeNull();
+    expect(s.view.endTurn).toMatchObject({ label: 'Pass to Ann', enabled: true });
+    expect(s.queue(ORDERS[0]).ok).toBe(false); // nobody can plan before the handoff
+    s.beginTurn(); // not a way around the handoff either
+    expect(s.view.tableDelta).toEqual({ next: 0 });
+    s.endTurn(); // "Pass to Ann": now the first seat's handoff covers the screen
+    expect(s.view.tableDelta).toBeNull();
     expect(s.view.handoff).toEqual({ player: 0 });
+    expect(s.view.game.turn).toBe(2); // passing on never resolves anything
+    expect(s.view.resolutions).toBe(1);
     expect(s.view.draft).toEqual([]);
     s.beginTurn();
     expect(s.view.seat).toBe(0);

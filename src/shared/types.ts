@@ -244,6 +244,22 @@ export interface CashRecon {
   closing: number;
 }
 
+/** One House's Crown Index movement across a resolution (PRODUCT.md TURN_SUMMARY "Score"). */
+export interface ScoreDelta {
+  player: number;
+  prevRank: number; // 1-based rank before the resolution
+  nextRank: number; // 1-based rank after
+  /** prevRank − nextRank: positive = climbed places, negative = fell, 0 = unchanged. */
+  rankDelta: number;
+  prevCrown: number;
+  crown: number;
+  /** crown − prevCrown, always worthDelta + shareDelta + prestigeDelta. */
+  crownDelta: number;
+  worthDelta: number;
+  shareDelta: number;
+  prestigeDelta: number;
+}
+
 export interface TurnSummary {
   from: number;
   to: number;
@@ -253,6 +269,8 @@ export interface TurnSummary {
   lines: SummaryLine[];
   cash: CashRecon[];
   standings: Standing[];
+  /** Per House (index = player): rank change and Crown Index component deltas for this turn. */
+  scores: ScoreDelta[];
   /** Orders that were committed this turn, per player, in canonical order (public once resolved). */
   committed: number[]; // count per player
 }
