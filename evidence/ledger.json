@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "repo": "misty-step/mercadia",
   "intentRange": "7d1d9e06..b1bab784",
-  "verifiedSha": "3971ef9d8e195604a413f0d7915a369a4d9d73da",
-  "verifiedAt": "2026-11-24T23:25:00Z",
-  "criticVerdict": "pending (Cold Critic re-reviews the pushed HEAD after Pass 3 repair)",
+  "verifiedSha": "aa64160",
+  "verifiedAt": "2026-11-24T23:44:22Z",
+  "criticVerdict": "pending",
   "artifactUrl": null,
   "localPath": "~/chief-evidence/media/",
   "mediaType": "video/webm,image/png",
@@ -14,84 +14,84 @@
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::Clean-room replacement of the v2 simulation",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::The turn state machine",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
-      "id": "PRODUCT::PLANNING — the frozen board",
+      "id": "PRODUCT::PLANNING \u2014 the frozen board",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::RESOLVE_TURN",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::TURN_SUMMARY",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::Four Eras / Turns, dayparts, and Eras",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::Dynasty Charters (Council turns)",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::Match start",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::Citizens and footfall",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
       "id": "PRODUCT::Multiplayer sync and session rules",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     },
     {
-      "id": "DESIGN::1 Visual direction — Architectural Monograph board",
+      "id": "DESIGN::1 Visual direction \u2014 Architectural Monograph board",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 291 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 152 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 3: export version 4 (v3 rejected), unboxed Turn 1 start tiles, no seat-token expiry, Endless Export match control, open-drawer Turn Delta captures"
+      "evidence": "vitest 310 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 214 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay via real Export match downloads, start, >13h seat reclaim, idle). Pass 4: same-profile spectator tab never overwrites the seat token (+26h reclaim keeps seat/Ready/draft/hash); authority-scoped GET /api/rooms/:code/export (200/404/409, no playerIds/drafts/epochs) wired to the Export match button on Final Edition and after Continue in Endless (1440x900, 1024x768, 390x844); confirmed 404 clears only that room's token while explicit Leave keeps it; House-keyed start tiles (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) with export version 5 (versions 3 and 4 rejected)"
     }
   ],
   "passTwoRepairs": [
