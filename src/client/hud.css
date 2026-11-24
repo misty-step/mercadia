@@ -383,6 +383,8 @@
   #hud .tb { width: 48px; height: 48px; min-width: 48px; padding: 0; }
   #hud .tb .tt, #hud .tb .kh { display: none; }
   #hud .tb.delta { width: 48px; }
+  /* A fifth 48px button would crowd the Turn number on a phone: Export match lives in the Turn Delta sheet there. */
+  #hud .tb.tb-export { display: none; }
   #hud .tb .hi { width: 21px; height: 21px; }
 
   #hud .lb-compact { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; padding: 0 12px; gap: 10px; }

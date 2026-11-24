@@ -43,7 +43,7 @@ export function plateHtml(v: SessionView, o: { deltaOpen: boolean; muted: boolea
   </div>
   <div class="plate-btns" role="group" aria-label="Board and match controls">
     <button type="button" class="tb delta${o.deltaOpen ? ' on' : ''}" data-act="delta" aria-controls="h-drawer" aria-label="Turn Delta" aria-pressed="${o.deltaOpen}" aria-keyshortcuts="T"${o.hasDelta ? '' : ' aria-disabled="true" data-reason="No Turn Delta yet \u2014 the first turn has not resolved"'}>${ic('delta')}<span class="tt">Turn Delta</span><kbd class="kh mono" aria-hidden="true">T</kbd></button>
-    ${o.canExport ? `<button type="button" class="tb ico" data-act="export" aria-label="Export match" title="Export match (JSON)">${ic('export')}<span class="tt">Export</span></button>` : ''}
+    ${o.canExport ? `<button type="button" class="tb ico tb-export" data-act="export" aria-label="Export match" title="Export match (JSON)">${ic('export')}<span class="tt">Export</span></button>` : ''}
     <button type="button" class="tb ico" data-act="fit" aria-label="Fit board to view" title="Fit board (F)" aria-keyshortcuts="F">${ic('fit')}<span class="tt">Fit</span></button>
     <button type="button" class="tb ico" data-act="sound" aria-label="Mute" aria-pressed="${o.muted}" title="${o.muted ? 'Sound is off \u2014 unmute' : 'Mute sound'} (M)" aria-keyshortcuts="M">${ic(o.muted ? 'mute' : 'sound')}<span class="tt">Sound</span></button>
     <button type="button" class="tb ico" data-act="leave" aria-label="Leave match" title="Leave match">${ic('leave')}<span class="tt">Leave</span></button>

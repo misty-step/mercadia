@@ -4,7 +4,7 @@
 //   npm run build && npm run dev        (in another shell)
 //   npm run smoke                       BASE=http://127.0.0.1:8787  CHROME=/usr/bin/google-chrome
 //
-//   ONLY=solo,hotseat,mobile,room,relay,endless,start,idle   run sections selectively
+//   ONLY=solo,hotseat,mobile,room,relay,endless,start,reclaim,idle   run sections selectively
 //   FAST=1                                      shorten the 2-minute/5-minute idle checks to 20 s (NOT acceptance-grade)
 //   MEDIA=/path                                 directory for videos and screenshots (default ~/chief-evidence/media)
 //
@@ -12,7 +12,7 @@
 // securitypolicyviolation events and zero failed network/WebSocket requests.
 import { chromium } from 'playwright-core';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,7 +21,7 @@ const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
 const FAST = process.env.FAST === '1';
 const MEDIA = process.env.MEDIA ?? join(homedir(), 'chief-evidence', 'media');
 const RAW = join(MEDIA, '.raw');
-const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,endless,start,idle').split(',');
+const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,endless,start,reclaim,idle').split(',');
 const IDLE_MS = FAST ? 20_000 : 125_000;
 const HEARTBEAT_MS = FAST ? 30_000 : 300_000;
 mkdirSync(MEDIA, { recursive: true });
@@ -101,6 +101,45 @@ async function finishCtx(c, videoName, pagesToName = []) {
 }
 
 const shot = (page, name) => page.screenshot({ path: join(MEDIA, `${name}.png`) });
+
+/**
+ * Click a real UI control that triggers a browser download, capture Playwright's real download event,
+ * save the file and parse it. No window.__mercadia shortcut: this is exactly what a player gets.
+ */
+async function downloadVia(page, locator, file) {
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 10000 }), locator.click()]);
+  await dl.saveAs(file);
+  return { exp: JSON.parse(readFileSync(file, 'utf8')), name: dl.suggestedFilename() };
+}
+
+/** Make sure the Turn Delta drawer is open, fully faded in, on screen and on top; returns its measured state. */
+async function ensureDeltaOpen(page) {
+  const pressed = await page.evaluate(() => document.querySelector('#hud [data-act="delta"]')?.getAttribute('aria-pressed') === 'true' && document.querySelector('#h-drawer')?.classList.contains('open'));
+  if (!pressed) await page.locator('#hud [data-act="delta"]').click();
+  await page.waitForFunction(
+    () => {
+      const d = document.querySelector('#h-drawer');
+      if (!d || !d.classList.contains('open')) return false;
+      if (!/^Turn \d+ → \d+$/.test(document.querySelector('#h-dh')?.textContent.trim() ?? '')) return false;
+      const r = d.getBoundingClientRect();
+      const last = window.__drawerRect;
+      window.__drawerRect = `${r.x},${r.y},${r.width},${r.height}`;
+      const inside = r.width > 0 && r.height > 0 && r.left >= -1 && r.top >= -1 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1;
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 120));
+      return getComputedStyle(d).opacity === '1' && inside && !!hit && d.contains(hit) && last === window.__drawerRect;
+    },
+    null,
+    { timeout: 8000, polling: 120 },
+  );
+  await sleep(150);
+  return page.evaluate(() => {
+    const d = document.querySelector('#h-drawer');
+    const r = d.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 120));
+    return { opacity: getComputedStyle(d).opacity, rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }, vw: innerWidth, vh: innerHeight, onTop: d.contains(hit), heading: document.querySelector('#h-dh').textContent.trim() };
+  });
+}
+const deltaOpenOk = (st) => st.opacity === '1' && st.rect.w > 100 && st.rect.h > 100 && st.rect.x >= -1 && st.rect.y >= -1 && st.rect.x + st.rect.w <= st.vw + 1 && st.rect.y + st.rect.h <= st.vh + 1 && st.onTop;
 
 // ── helpers over the real UI ──
 const M = (page) =>
@@ -252,9 +291,11 @@ async function solo() {
   ok((await turnOf(page)) === t, 'end turn: Enter/Space on another focused control does not end the turn');
 
   // export + replay equivalence (acceptance 12) — replayed headlessly in node by the harness
-  const exp = await page.evaluate(() => window.__mercadia.exportMatch());
-  ok(exp && exp.log.length >= 6, 'replay: the match exports a seed and canonical action log', exp ? `${exp.log.length} turns` : 'null');
-  if (exp) writeFileSync(join(RAW, 'solo-export.json'), JSON.stringify(exp));
+  await ensureDeltaOpen(page);
+  const { exp } = await downloadVia(page, page.locator('#h-drawer [data-act="export"]'), join(RAW, 'solo-export.json'));
+  ok(exp && exp.version === 4 && exp.log.length >= 6, 'replay: the real Export match button downloads a version 4 export with the seed and canonical action log', exp ? `v${exp.version} ${exp.log.length} turns` : 'null');
+  const rs = nodeReplay(join(RAW, 'solo-export.json'));
+  ok(rs.ok && rs.mismatches.length === 0 && rs.turnsReplayed === exp.log.length, 'replay: the solo UI download replays bit-for-bit in headless Node', JSON.stringify(rs));
   await finishCtx(c, 'solo-desktop-walkthrough');
 }
 
@@ -461,6 +502,8 @@ async function endlessReplay() {
         await sleep(400);
         rankShot = true;
         rankSeen = await checkScoreDom(page, 'score delta (desktop)', '1440×900');
+        const open = await ensureDeltaOpen(page);
+        ok(deltaOpenOk(open), 'score delta (desktop): the Turn Delta drawer is open, opaque, on screen and on top before the 1440×900 capture', JSON.stringify(open));
         await shot(page, '20-turn-delta-rank-and-components-1440x900');
         await page.locator('#h-drawer').screenshot({ path: join(MEDIA, '21-turn-delta-drawer-crop.png') });
       }
@@ -471,16 +514,23 @@ async function endlessReplay() {
   if (!rankShot) ok(false, 'score delta (desktop): a turn with rank movement occurred in the match', 'no rank change in 32 turns');
   await sleep(600);
   await shot(page, '22-final-edition');
-  // Plain finished export replays bit-for-bit.
-  const done = await page.evaluate(() => window.__mercadia.exportMatch());
-  writeFileSync(join(RAW, 'finished-export.json'), JSON.stringify(done));
+  // Plain finished export: the real Export match button on Final Edition downloads it; it replays bit-for-bit.
+  const fdl = await downloadVia(page, page.locator('.gazette').getByRole('button', { name: 'Export match' }), join(RAW, 'finished-export.json'));
+  const done = fdl.exp;
   const r1 = nodeReplay(join(RAW, 'finished-export.json'));
-  ok(done.log.length === 32 && r1.ok && r1.turnsReplayed === 32 && r1.mismatches.length === 0, 'replay: the finished 32-turn export replays bit-for-bit in headless Node (every turn hash)', JSON.stringify(r1));
-  // Continue in Endless, play two more turns, export, replay.
+  ok(done.version === 4 && done.log.length === 32 && !done.endlessAt && /^mercadia-\d+\.json$/.test(fdl.name) && r1.ok && r1.turnsReplayed === 32 && r1.mismatches.length === 0, 'replay: the Final Edition Export match download (version 4, 32 turns) replays bit-for-bit in headless Node (every turn hash)', JSON.stringify({ v: done.version, name: fdl.name, ...r1 }));
+  // Continue in Endless, play two more turns, export through the real UI, replay.
   await page.getByRole('button', { name: 'Continue in Endless' }).click();
   await page.waitForFunction(() => window.__mercadia.phase === 'planning', null, { timeout: 10000 });
   await sleep(500);
   ok((await M(page)).turn === 33, 'endless: Continue in Endless re-opens planning on Turn 33');
+  const plateExport = await page.evaluate(() => {
+    const b = document.querySelector('#hud .plate [data-act="export"]');
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height), label: b.getAttribute('aria-label'), vis: getComputedStyle(b).visibility, inView: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight };
+  });
+  ok(plateExport && plateExport.label === 'Export match' && plateExport.vis === 'visible' && plateExport.w > 20 && plateExport.inView, 'endless: after Continue in Endless the planning screen carries a visible Export match button in the match controls (1440×900)', JSON.stringify(plateExport));
   await shot(page, '23-endless-turn33-planning');
   await playTurnUi(page);
   await sleep(500);
@@ -488,15 +538,26 @@ async function endlessReplay() {
   await sleep(800);
   const post = await M(page);
   ok(post.turn === 35 && post.phase === 'planning', 'endless: two Endless turns resolved (Turn 35)', JSON.stringify({ turn: post.turn, phase: post.phase }));
+  const dOpen = await ensureDeltaOpen(page);
+  ok(deltaOpenOk(dOpen), 'endless: the Endless Turn Delta drawer is open and on screen', JSON.stringify(dOpen));
+  const exBtn = await page.evaluate(() => { const b = document.querySelector('#h-drawer [data-act="export"]'); const r = b?.getBoundingClientRect(); return r ? { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x), right: Math.round(r.right), vw: innerWidth, text: b.textContent.trim(), scrollX: document.documentElement.scrollWidth - innerWidth, drawerScrollX: document.querySelector('#h-drawer').scrollWidth - document.querySelector('#h-drawer').clientWidth } : null; });
+  ok(exBtn && exBtn.text === 'Export match' && exBtn.right <= exBtn.vw && exBtn.scrollX <= 1 && exBtn.drawerScrollX <= 1, 'endless: the Turn Delta drawer carries an "Export match" button with no clipping or horizontal overflow (1440×900)', JSON.stringify(exBtn));
   await shot(page, '24-endless-turn35-delta');
-  const exp = await page.evaluate(() => window.__mercadia.exportMatch());
-  writeFileSync(join(RAW, 'endless-export.json'), JSON.stringify(exp));
-  ok(exp.log.length === 34 && Array.isArray(exp.endlessAt) && exp.endlessAt.length === 1 && exp.endlessAt[0] === 32, 'endless: the exported canonical log records the continuation (endlessAt=[32]) and 34 order batches', JSON.stringify({ n: exp.log.length, at: exp.endlessAt }));
+  const edl = await downloadVia(page, page.locator('#h-drawer [data-act="export"]'), join(RAW, 'endless-export.json'));
+  const exp = edl.exp;
+  ok(exp.version === 4 && exp.log.length === 34 && Array.isArray(exp.endlessAt) && exp.endlessAt.length === 1 && exp.endlessAt[0] === 32, 'endless: the Export match download after Continue in Endless is version 4 and records the continuation (endlessAt=[32]) and 34 order batches', JSON.stringify({ v: exp.version, n: exp.log.length, at: exp.endlessAt }));
   const r2 = nodeReplay(join(RAW, 'endless-export.json'));
-  ok(r2.ok && r2.turnsReplayed === 34 && r2.mismatches.length === 0 && r2.finalTurn === 35 && r2.phase === 'planning' && r2.endless === true, 'replay: the post-Endless export (Turn 35) replays bit-for-bit in headless Node, including the Endless turns', JSON.stringify(r2));
-  const lastHash = await page.evaluate(() => window.__mercadia.hash);
+  ok(r2.ok && r2.turnsReplayed === 34 && r2.mismatches.length === 0 && r2.finalTurn === 35 && r2.phase === 'planning' && r2.endless === true, 'replay: the post-Endless UI export (Turn 35) replays bit-for-bit in headless Node, including the Endless turns', JSON.stringify(r2));
+  // The planning-screen button downloads the same canonical export.
+  await page.keyboard.press('Escape');
+  await sleep(300);
+  const pdl = await downloadVia(page, page.locator('#hud .plate [data-act="export"]'), join(RAW, 'endless-export-plate.json'));
+  ok(JSON.stringify(pdl.exp) === JSON.stringify(exp), 'endless: the planning-screen Export match button downloads the same canonical export');
+  // A legacy version 3 export fails fast with an explicit version error, not 32 silent hash mismatches.
+  writeFileSync(join(RAW, 'legacy-v3-export.json'), JSON.stringify({ ...done, version: 3 }));
+  const r3 = nodeReplay(join(RAW, 'legacy-v3-export.json'));
+  ok(r3.ok === false && /Incompatible match export version 3/.test(r3.error ?? '') && !('mismatches' in r3), 'replay: a legacy version 3 export is rejected with an explicit incompatible-version error (no hash mismatch list)', JSON.stringify(r3));
   ok(exp.hashes.length === 34, 'replay: the browser recorded a state hash for every turn including the Endless ones', String(exp.hashes.length));
-  void lastHash;
   copyFileSync(join(RAW, 'endless-export.json'), join(MEDIA, '..', 'endless-export.json'));
   await finishCtx(c, 'endless-and-replay');
 
@@ -515,6 +576,8 @@ async function endlessReplay() {
     else {
       await sleep(600);
       await checkScoreDom(p2, `score delta (${name})`, `${vp.width}×${vp.height}`);
+      const open2 = await ensureDeltaOpen(p2);
+      ok(deltaOpenOk(open2), `score delta (${name}): the Turn Delta drawer is open, opaque, on screen and on top before the capture`, JSON.stringify(open2));
       await shot(p2, name === 'mobile' ? '25-turn-delta-rank-390x844' : '26-turn-delta-rank-1024x768');
       if (name === 'laptop') {
         // planning view next to the delta at 1024×768: no overlap of the delta drawer with the command rail
@@ -529,6 +592,28 @@ async function endlessReplay() {
         await shot(p2, '27-planning-1024x768');
       }
     }
+    // Continue in Endless at this viewport: the Export match controls are reachable and fit (no clipping/overflow).
+    for (let i = 0; i < 40 && (await M(p2)).phase !== 'ended'; i++) await playTurnUi(p2);
+    await sleep(500);
+    await p2.getByRole('button', { name: 'Continue in Endless' }).click();
+    await p2.waitForFunction(() => window.__mercadia.phase === 'planning', null, { timeout: 10000 });
+    await sleep(400);
+    await playTurnUi(p2);
+    await sleep(500);
+    const open3 = await ensureDeltaOpen(p2);
+    const fit = await p2.evaluate(() => {
+      const box = (b) => { if (!b) return null; const r = b.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), l: Math.round(r.left), r: Math.round(r.right), t: Math.round(r.top), b: Math.round(r.bottom), vis: getComputedStyle(b).visibility, label: b.getAttribute('aria-label') }; };
+      const d = document.querySelector('#h-drawer');
+      return { plate: box(document.querySelector('#hud .plate [data-act="export"]')), drawer: box(d.querySelector('[data-act="export"]')), vw: innerWidth, vh: innerHeight, scrollX: document.documentElement.scrollWidth - innerWidth, drawerScrollX: d.scrollWidth - d.clientWidth, plateOverlap: (() => { const q = ['.plate-main', '.plate-era', '.plate-btns'].map((x) => document.querySelector('#hud ' + x).getBoundingClientRect()); const hit = (a, b) => !(a.right <= b.left + 0.5 || a.left >= b.right - 0.5 || a.bottom <= b.top + 0.5 || a.top >= b.bottom - 0.5); return hit(q[0], q[1]) || hit(q[0], q[2]) || hit(q[1], q[2]); })(), plateScrollX: (() => { const p = document.querySelector('#hud .plate'); return p.scrollWidth - p.clientWidth; })() };
+    });
+    const inV = (q) => q && q.l >= 0 && q.r <= fit.vw && q.t >= 0 && q.b <= fit.vh && q.vis === 'visible';
+    const minSide = mobile ? 44 : 28;
+    const plateOk = mobile ? fit.plate && fit.plate.w === 0 : inV(fit.plate) && fit.plate.w >= minSide && fit.plate.h >= minSide; // on a phone the plate button is folded away so the Turn number is never crowded; the sheet carries it
+    ok(deltaOpenOk(open3) && plateOk && inV(fit.drawer) && fit.drawer.h >= minSide && fit.scrollX <= 1 && fit.drawerScrollX <= 1 && fit.plateScrollX <= 1 && !fit.plateOverlap, `endless export (${name}): the Export match control(s) are reachable (planning bar on desktop/laptop, Turn Delta sheet everywhere), on screen, tappable and cause no clipping or horizontal overflow at ${vp.width}×${vp.height}`, JSON.stringify(fit));
+    await shot(p2, name === 'mobile' ? '30-endless-export-390x844' : '31-endless-export-1024x768');
+    const dl2 = await downloadVia(p2, p2.locator('#h-drawer [data-act="export"]'), join(RAW, `endless-export-${name}.json`));
+    const rr = nodeReplay(join(RAW, `endless-export-${name}.json`));
+    ok(dl2.exp.version === 4 && dl2.exp.endlessAt?.length === 1 && rr.ok && rr.mismatches.length === 0, `endless export (${name}): the ${vp.width}×${vp.height} UI download is version 4 with endlessAt and replays bit-for-bit`, JSON.stringify({ v: dl2.exp.version, at: dl2.exp.endlessAt, ...rr }));
     await finishCtx(c2, `endless-${name}`);
   }
 }
@@ -557,7 +642,7 @@ async function startBeside() {
   const perHouse = [0, 1, 2, 3].map((o) => st.units.filter((u) => u.owner === o).map((u) => u.kind).sort().join('+'));
   ok(st.turn === 1 && st.players === 4 && st.cash.every((x) => x === 900) && st.buildings === 0, 'start: four Houses, §900 each, no property, on Turn 1', JSON.stringify({ cash: st.cash, b: st.buildings }));
   ok(perHouse.every((x) => x === 'factor+watch') && new Set(tiles).size === 8, 'start: each House has one Factor and one Watch Company, on 8 distinct tiles', JSON.stringify(perHouse));
-  ok(st.units.every((u) => u.y <= 2 && cheb(u) <= 5), 'start: all four Houses begin beside Grand Station (north avenue frontage, none on the Harbor Pier side)', JSON.stringify(st.units.map((u) => `${u.owner}:${u.kind[0]}(${u.x},${u.y})`)));
+  ok(st.units.every((u) => u.y <= 3 && cheb(u) <= 5), 'start: all four Houses begin beside Grand Station (north frontage, y <= 3, none on the Harbor Pier side)', JSON.stringify(st.units.map((u) => `${u.owner}:${u.kind[0]}(${u.x},${u.y})`)));
   await sleep(500);
   await shot(page, '28-turn1-all-four-houses-beside-station');
   await finishCtx(c, 'start');
@@ -730,9 +815,59 @@ async function room() {
   await finishCtx(cB, 'room-browser-B');
 }
 
-// seat → a lot within the seat's start reach (seat 0 at (7,1)/(8,1), seat 1 at (10,1)/(9,1))
+// seat → a lot within the seat's start reach (seat 0 Factor at (7,1), seat 1 Factor at (10,1))
 const A0TileFor = (seat, alt = 0) => (seat === 0 ? [31, 30][alt] : [34, 33][alt]); // (7,2)/(6,2) and (10,2)/(9,2)
 const B0TileFor = (seat) => (seat === 0 ? 32 : 35);
+
+
+// ═════════════════════════════ SEAT RECLAIM AFTER > 13 HOURS ═════════════════════════════
+const HOUR = 3600 * 1000;
+async function reclaimAfterHours() {
+  const { cA, cB, A, B, code } = await makeRoom('R1', 'R2', { videos: false });
+  const a0 = await M(A);
+  await queueRoastery(A, A0TileFor(a0.seat));
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  await sleep(500);
+  const before = await M(A);
+  ok(before.ready === true && before.draft === 1 && before.seat >= 0, 'reclaim: before closing, A holds a seat with a one-order draft and Ready set', JSON.stringify({ seat: before.seat, draft: before.draft, ready: before.ready }));
+  const key = `mercadia:pid:${code}`;
+  // Age the saved token by 25 hours in localStorage, then close the tab (the context's localStorage survives, sessionStorage does not).
+  const aged = await A.evaluate(([k, off]) => {
+    const raw = localStorage.getItem(k);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    v.at -= off;
+    v.beat -= off;
+    localStorage.setItem(k, JSON.stringify(v));
+    return { id: !!v.id };
+  }, [key, 25 * HOUR]);
+  pages.find((r) => r.page === A).csp = await A.evaluate(() => window.__csp ?? []); // read before the tab goes away
+  await A.close();
+  ok(!!aged, 'reclaim: the closed tab left a seat token in localStorage, aged here by 25 hours', JSON.stringify(aged && { ageH: 25 }));
+  // Reopen the room URL in a brand-new tab whose clock is also 26 hours ahead (Date.now shifted).
+  const R = await openPage(cA, 'reopen');
+  await R.addInitScript((off) => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + off;
+  }, 26 * HOUR);
+  await R.goto(`${BASE}/?dev=1&room=${code}`);
+  await R.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(700);
+  const clock = await R.evaluate(() => Date.now() - performance.timeOrigin - performance.now());
+  const after = await M(R);
+  ok(clock > 25 * HOUR, 'reclaim: the reopened tab really runs 26 hours ahead (Date.now shifted)', String(Math.round(clock / HOUR)));
+  ok(after.seat === before.seat && after.seat !== -1, 'reclaim: after > 13 h the reopened tab reclaims the exact same seat (never spectator -1)', JSON.stringify({ before: before.seat, after: after.seat }));
+  ok(after.ready === true && after.draft === before.draft && after.turn === before.turn && after.hash === before.hash, 'reclaim: the reopened tab shows the same draft, Ready state, turn and state hash', JSON.stringify({ before, after: { draft: after.draft, ready: after.ready, turn: after.turn, hash: after.hash } }));
+  await shot(R, '29-seat-reclaimed-after-26h');
+  // The server-side active room is still there too: B readying resolves the turn for the reclaimed seat.
+  await queueRoastery(B, B0TileFor((await M(B)).seat));
+  await endBtn(B).click();
+  await Promise.all([R, B].map((p) => p.waitForFunction(() => window.__mercadia.turn === 2, null, { timeout: 15000 })));
+  ok((await M(R)).hash === (await M(B)).hash, 'reclaim: the room still resolves normally once the other seat readies (both show Turn 2, same hash)');
+  await finishCtx(cA, 'reclaim-A');
+  await finishCtx(cB, 'reclaim-B');
+}
 
 // ═════════════════════════════ RELAY ═════════════════════════════
 // A WebSocket relay between the page and the room authority that can drop, hold, delay, reorder,
@@ -1007,9 +1142,9 @@ async function idleRoom() {
   await finishCtx(cB, 'idle-B');
 }
 
-const sections = { solo, hotseat, mobile, room, relay: relayChecks, endless: endlessReplay, start: startBeside };
+const sections = { solo, hotseat, mobile, room, relay: relayChecks, endless: endlessReplay, start: startBeside, reclaim: reclaimAfterHours };
 const jobs = [];
-for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay', 'endless', 'start']) {
+for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay', 'endless', 'start', 'reclaim']) {
   if (ONLY.includes(name)) jobs.push(sections[name]().catch((e) => ok(false, `${name}: section crashed`, e.stack?.split('\n').slice(0, 3).join(' / '))));
 }
 if (ONLY.includes('idle')) {
