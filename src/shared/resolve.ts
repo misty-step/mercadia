@@ -105,7 +105,7 @@ import {
 } from './game';
 import { shortHash } from './hash';
 import { CITY, chebyshev, manhattan, walkDist } from './map';
-import { defends, pathFor, pruneDraft, routeDistance, routeTiles } from './orders';
+import { defends, pathFor, pruneDraft, routeDistance, routeTiles, standable } from './orders';
 import { planAI } from './ai';
 import { stream } from './rng';
 import type {
@@ -226,17 +226,24 @@ export function resolveTurn(game: Game, orders: Order[][]): Resolution {
     const rivals = new Set(g.units.filter((x) => x.owner !== u.owner).map((x) => x.tile));
     const around = pathFor(u.kind, u.tile, e.o.to, rivals);
     const walkPath = around && around.length <= moveOf(p, u.kind) ? around : path;
+    // A unit passes through its own units but never stops on one, and a Barge never stops under a
+    // bridge: it halts on the last tile it may legally stand on.
+    let halt = u.tile;
     let blockedAt = -1;
     for (let k = 0; k < walkPath.length; k++) {
       const t = walkPath[k];
       const held = unitAt(g, t);
-      if (held && (held.owner !== u.owner || k === walkPath.length - 1)) {
+      if (held && held.owner !== u.owner) {
         blockedAt = t;
         break;
       }
-      u.tile = t;
+      if (held) {
+        if (k === walkPath.length - 1) blockedAt = t;
+        continue;
+      }
+      if (standable(u.kind, t)) halt = t;
     }
-    if (blockedAt < 0 && unitAt(g, u.tile)?.id !== u.id) blockedAt = u.tile;
+    u.tile = halt;
     if (blockedAt >= 0) say('movement', `${name} halted at ${tileName(u.tile)}, ${tileName(blockedAt)} is held`, 'Blocked', e.p, u.tile);
     else say('movement', `${name}: ${tileName(from)} → ${tileName(u.tile)}`, `${path.length} tile${path.length === 1 ? '' : 's'}`, e.p, u.tile);
   }
@@ -278,7 +285,10 @@ export function resolveTurn(game: Game, orders: Order[][]): Resolution {
   for (const e of sortBy(of('borrow', 'repay'), () => 0)) {
     const p = g.players[e.p];
     if (e.o.t === 'borrow') {
-      if (p.debt + LOAN_STEP > LOAN_MAX) continue;
+      if (p.debt + LOAN_STEP > LOAN_MAX) {
+        say('production', `${hn(e.p)} borrow refused, the Credit Line is full`, 'Refused', e.p);
+        continue;
+      }
       p.cash += LOAN_STEP;
       p.debt += LOAN_STEP;
       financing[e.p] += LOAN_STEP;
@@ -313,6 +323,16 @@ export function resolveTurn(game: Game, orders: Order[][]): Resolution {
       if (taken) {
         say('production', `${hn(e.p)} ${isShop(o.kind) ? SHOPS[o.kind].name : CIVICS[o.kind].name} at ${tileName(o.tile)}: lot taken by ${hn(taken.owner)}, refunded`, 'Refunded', e.p, o.tile);
         continue;
+      }
+      if (isShop(o.kind)) {
+        const desire = SHOPS[o.kind].desire;
+        const clash = g.buildings.find(
+          (b) => b.owner !== e.p && isShop(b.kind) && SHOPS[b.kind].desire === desire && chebyshev(b.tile, o.tile) <= 2 && pactBetween(g, e.p, b.owner, 'rent', T),
+        );
+        if (clash) {
+          say('production', `${hn(e.p)} ${SHOPS[o.kind].name} at ${tileName(o.tile)}: Rent Accord with ${hn(clash.owner)} forbids a same-trade shop within 2 tiles, refunded`, 'Refunded', e.p, o.tile);
+          continue;
+        }
       }
       const cost = buildCostFor(p, o.kind);
       if (!reachOk(e.p, o.tile) || cost > p.cash || ERA_UNLOCK[o.kind] > currentEra(g)) {
@@ -435,7 +455,10 @@ export function resolveTurn(game: Game, orders: Order[][]): Resolution {
   for (const e of sortBy(of('study'), () => 0)) {
     const p = g.players[e.p];
     const def = STUDIES[e.o.key];
-    if (!def || p.studies.includes(def.key) || def.era > currentEra(g) || STUDY_COST > p.cash || (p.study && p.study !== def.key)) continue;
+    if (!def || p.studies.includes(def.key) || def.era > currentEra(g) || STUDY_COST > p.cash || (p.study && p.study !== def.key)) {
+      if (def) say('production', `${hn(e.p)} study of ${def.name} no longer legal, refunded`, 'Refunded', e.p);
+      continue;
+    }
     spend(p, STUDY_COST);
     p.study = def.key;
     p.studyPoints++;
@@ -479,8 +502,24 @@ export function resolveTurn(game: Game, orders: Order[][]): Resolution {
     const o = e.o;
     if (o.t === 'stance') {
       if (o.stance >= 0 && o.stance <= 3) {
+        const def = SHOPS[b.kind as keyof typeof SHOPS];
+        const priceAt = (stance: number): number => Math.max(1, Math.round(def.price * STANCES[stance].mult));
+        const was = priceAt(b.stance);
         b.stance = o.stance;
         say('production', `${hn(e.p)} prices ${tileName(b.tile)} at ${STANCES[o.stance].name}`, STANCES[o.stance].label, e.p, b.tile);
+        // Price war: dropping below a same-trade rival within three tiles is news (the first rival by id).
+        const now = priceAt(o.stance);
+        const rival = g.buildings
+          .filter((r) => r.owner !== e.p && isShop(r.kind) && SHOPS[r.kind as keyof typeof SHOPS].desire === def.desire && chebyshev(r.tile, b.tile) <= 3)
+          .sort((a, c) => a.id - c.id)
+          .find((r) => {
+            const rp = Math.max(1, Math.round(SHOPS[r.kind as keyof typeof SHOPS].price * STANCES[r.stance].mult));
+            return now < rp && was >= rp;
+          });
+        if (rival) {
+          const rp = Math.max(1, Math.round(SHOPS[rival.kind as keyof typeof SHOPS].price * STANCES[rival.stance].mult));
+          dispatch('market', `${hn(e.p)} undercuts ${hn(rival.owner)} at ${tileName(b.tile)}`, `§${now} vs §${rp}`, e.p, b.tile);
+        }
       }
     } else if (o.t === 'auto') {
       b.auto = o.on;

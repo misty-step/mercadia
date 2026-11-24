@@ -23,6 +23,7 @@ import {
   UNIT_KINDS,
   BUILD_KINDS,
   isCivic,
+  isCharter,
   isShop,
   lockNotice,
   LEVEL3_NOTICE,
@@ -338,8 +339,8 @@ export function checkOrder(g: Game, plan: Plan, o: Order): string | null {
       return null;
     }
     case 'study': {
+      if (!isStudyKey(o.key)) return 'Unknown study';
       const def = STUDIES[o.key];
-      if (!def) return 'Unknown study';
       if (def.era > era) return `${def.name} unlocks in Era ${['I', 'II', 'III', 'IV'][def.era - 1]}`;
       if (hasStudy(p, o.key)) return 'Already completed';
       const cur = plan.study ?? p.study;
@@ -616,6 +617,7 @@ export function describeOrder(g: Game, seat: number, o: Order): OrderLabel {
 // ───────────────────────────── Untrusted input ─────────────────────────────
 
 const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+const isStudyKey = (k: unknown): k is StudyKey => typeof k === 'string' && Object.prototype.hasOwnProperty.call(STUDIES, k);
 
 /** Strictly parse an order from untrusted JSON; returns null for anything malformed. */
 export function parseOrder(v: unknown): Order | null {
@@ -643,7 +645,7 @@ export function parseOrder(v: unknown): Order | null {
     case 'respond':
       return isInt(o.proposal) && typeof o.accept === 'boolean' ? { t: 'respond', proposal: o.proposal, accept: o.accept } : null;
     case 'study':
-      return typeof o.key === 'string' && o.key in STUDIES ? { t: 'study', key: o.key as StudyKey } : null;
+      return isStudyKey(o.key) ? { t: 'study', key: o.key } : null;
     case 'stance':
       return isInt(o.building) && isInt(o.stance) ? { t: 'stance', building: o.building, stance: o.stance } : null;
     case 'auto':
@@ -653,7 +655,7 @@ export function parseOrder(v: unknown): Order | null {
     case 'repay':
       return { t: 'repay' };
     case 'charter':
-      return typeof o.key === 'string' && o.key in CHARTERS ? { t: 'charter', key: o.key as CharterKey } : null;
+      return isCharter(o.key) ? { t: 'charter', key: o.key } : null;
     default:
       return null;
   }
