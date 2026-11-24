@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "repo": "misty-step/mercadia",
   "intentRange": "7d1d9e06..b1bab784",
-  "verifiedSha": "08910265f7fe703b8cc5196bbc21b23187e524ef",
-  "verifiedAt": "2026-11-24T22:14:17Z",
-  "criticVerdict": "pending (Cold Critic runs after builder exit)",
+  "verifiedSha": "8ebefc2365dea07955beacc89ad3d71235a8e69b",
+  "verifiedAt": "2026-11-24T22:50:00Z",
+  "criticVerdict": "pending (Cold Critic re-reviews the pushed HEAD after Pass 2 repair)",
   "artifactUrl": null,
   "localPath": "~/chief-evidence/media/",
   "mediaType": "video/webm,image/png",
@@ -14,85 +14,116 @@
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::Clean-room replacement of the v2 simulation",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::The turn state machine",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::PLANNING \u2014 the frozen board",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::RESOLVE_TURN",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::TURN_SUMMARY",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::Four Eras / Turns, dayparts, and Eras",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::Dynasty Charters (Council turns)",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::Match start",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::Citizens and footfall",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "PRODUCT::Multiplayer sync and session rules",
-      "status": "partially-verified",
+      "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass",
-      "note": "acceptance 10-repeat and 16 browser flows not green; covered by unit/DST tests"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
     },
     {
       "id": "DESIGN::1 Visual direction \u2014 Architectural Monograph board",
       "status": "verified",
       "localPath": "~/chief-evidence/media/",
       "mediaType": "video/webm,image/png",
-      "evidence": "vitest 259 pass; scripts/smoke.mjs sections solo, hotseat, mobile, room, idle pass; relay core checks pass"
+      "evidence": "vitest 274 pass; tsc + worker tsc clean; npm run build ok; node scripts/smoke.mjs 127 passed / 0 failed against wrangler dev + real Chrome (solo, hotseat, mobile, room, relay, endless+replay, start, idle)"
+    }
+  ],
+  "passTwoRepairs": [
+    {
+      "finding": "Endless continuation breaks canonical replay",
+      "fix": "MatchExport.endlessAt / RoomState.endlessAt record the continuation; replayMatch(config, log, endlessAt) applies it",
+      "proof": "tests/replay.test.ts, tests/room.test.ts; smoke: 32-turn Standard export and post-Endless (Turn 35) export both replay bit-for-bit via scripts/replay.ts"
+    },
+    {
+      "finding": "Hotseat hides the Turn Delta behind the next handoff",
+      "fix": "SessionView.tableDelta: delta shown to the table with a Pass-to CTA before the first seat handoff",
+      "proof": "tests/session.test.ts; smoke: computed-style/bounding-box checks and media/09-hotseat-turn-delta.png"
+    },
+    {
+      "finding": "Match start diverges from PRODUCT.md",
+      "fix": "START_TILES: all four Houses start on the Grand Station avenue frontage; SPEC.md synced",
+      "proof": "tests/core.test.ts; smoke start section; media/28-turn1-all-four-houses-beside-station.png"
+    },
+    {
+      "finding": "Turn Delta omits rank changes and component deltas",
+      "fix": "TurnSummary.scores (prev/next rank, rankDelta, worth/share/prestige deltas) rendered in hud-delta",
+      "proof": "tests/resolve.test.ts, tests/hud-delta.test.ts; smoke DOM assertions at 1440x900, 1024x768, 390x844"
+    },
+    {
+      "finding": "Smoke reliability",
+      "fix": "Standard relay room, deterministic offline step, CSP read before context close, truthful privacy check",
+      "proof": "node scripts/smoke.mjs 127/127"
+    },
+    {
+      "finding": "DO alarm purges active matches",
+      "fix": "roomAlarmAction never purges a started match; lobbies/finished rooms purge only after idle",
+      "proof": "tests/room.test.ts"
     }
   ]
 }
