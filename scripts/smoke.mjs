@@ -4,13 +4,14 @@
 //   npm run build && npm run dev        (in another shell)
 //   npm run smoke                       BASE=http://127.0.0.1:8787  CHROME=/usr/bin/google-chrome
 //
-//   ONLY=solo,hotseat,mobile,room,relay,idle   run sections selectively
+//   ONLY=solo,hotseat,mobile,room,relay,endless,start,idle   run sections selectively
 //   FAST=1                                      shorten the 2-minute/5-minute idle checks to 20 s (NOT acceptance-grade)
 //   MEDIA=/path                                 directory for videos and screenshots (default ~/chief-evidence/media)
 //
 // Every page must finish with zero console errors/warnings, zero page errors, zero
 // securitypolicyviolation events and zero failed network/WebSocket requests.
 import { chromium } from 'playwright-core';
+import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -20,7 +21,7 @@ const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
 const FAST = process.env.FAST === '1';
 const MEDIA = process.env.MEDIA ?? join(homedir(), 'chief-evidence', 'media');
 const RAW = join(MEDIA, '.raw');
-const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,idle').split(',');
+const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,endless,start,idle').split(',');
 const IDLE_MS = FAST ? 20_000 : 125_000;
 const HEARTBEAT_MS = FAST ? 30_000 : 300_000;
 mkdirSync(MEDIA, { recursive: true });
@@ -70,6 +71,16 @@ async function openPage(c, tag) {
 }
 
 async function finishCtx(c, videoName, pagesToName = []) {
+  // Read the live pages' CSP violations BEFORE the context closes (a closed page cannot be asked).
+  for (const rec of pages) {
+    if (!c.context.pages().includes(rec.page)) continue;
+    try {
+      rec.csp = await rec.page.evaluate(() => window.__csp ?? []);
+    } catch (e) {
+      rec.csp = null;
+      rec.issues.push(`csp-capture-failed: ${e.message}`);
+    }
+  }
   const paths = [];
   for (const p of c.context.pages()) {
     const v = p.video();
@@ -272,6 +283,44 @@ async function idleSolo() {
   await finishCtx(c, 'idle');
 }
 
+
+// Rendered-DOM state of the hotseat table delta (computed style + bounding boxes), read from the live page.
+const tableDeltaState = (page) =>
+  page.evaluate(() => {
+    const rect = (e) => {
+      const r = e.getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+    };
+    const visible = (e) => {
+      const cs = getComputedStyle(e);
+      const r = e.getBoundingClientRect();
+      return cs.visibility === 'visible' && cs.display !== 'none' && Number(cs.opacity) > 0 && r.width > 0 && r.height > 0;
+    };
+    const hud = document.querySelector('#hud');
+    const drawer = document.querySelector('#h-drawer');
+    const head = drawer.querySelector('#h-dh');
+    const end = document.querySelector('#end-turn');
+    const hr = head.getBoundingClientRect();
+    const m = window.__mercadia;
+    return {
+      handoffLayer: !!document.querySelector('.handoff-layer'),
+      hudVisibility: getComputedStyle(hud).visibility,
+      hudInert: hud.inert,
+      hudRect: rect(hud),
+      drawerOpen: drawer.classList.contains('open') && !drawer.inert,
+      drawerVisibility: getComputedStyle(drawer).visibility,
+      drawerRect: rect(drawer),
+      heading: head.textContent.trim(),
+      headingVisible: visible(head),
+      headingInViewport: hr.left >= 0 && hr.top >= 0 && hr.right <= innerWidth && hr.bottom <= innerHeight,
+      text: drawer.innerText,
+      draftLen: m.draft.length,
+      cta: end ? { label: end.innerText.replace(/\s*Enter\s*$/, '').trim(), visible: visible(end), enabled: !end.disabled } : null,
+      turn: m.turn,
+      res: m.view.resolutions,
+    };
+  });
+
 // ═════════════════════════════ HOTSEAT ═════════════════════════════
 async function hotseat() {
   const c = await ctx('hotseat');
@@ -303,11 +352,215 @@ async function hotseat() {
   await endBtn(page).click();
   await waitTurn(page, t0 + 1);
   ok((await turnOf(page)) === t0 + 1, 'hotseat: the turn resolves only after the second seat ends', `${t0} → ${await turnOf(page)}`);
-  const s = await page.evaluate(() => window.__mercadia.summary);
-  ok(s && s.from === t0 && s.to === t0 + 1, 'hotseat: the table sees the Turn Delta N→N+1', s ? `${s.from}→${s.to}` : 'none');
-  await sleep(500);
+  await sleep(700);
+  // PRODUCT.md Hotseat: the Turn Delta is shown to the TABLE before the first seat plans the next turn.
+  // Real rendered DOM checks (computed style + bounding boxes), taken BEFORE anybody clicks into Turn 2.
+  const vis = await tableDeltaState(page);
+  ok(vis.handoffLayer === false, 'hotseat: no handoff screen covers the game when Turn 1→2 resolves', JSON.stringify(vis));
+  ok(vis.hudVisibility === 'visible' && !vis.hudInert && vis.hudRect.w > 1000 && vis.hudRect.h > 600, 'hotseat: the HUD is genuinely visible (visibility: visible, full-viewport bounding box)', JSON.stringify({ v: vis.hudVisibility, inert: vis.hudInert, r: vis.hudRect }));
+  ok(vis.drawerOpen && vis.drawerVisibility === 'visible' && vis.drawerRect.w > 200 && vis.drawerRect.h > 200, 'hotseat: the Turn Delta drawer is open and visible with a real bounding box', JSON.stringify({ o: vis.drawerOpen, v: vis.drawerVisibility, r: vis.drawerRect }));
+  ok(vis.heading === `Turn ${t0} \u2192 ${t0 + 1}` && vis.headingVisible && vis.headingInViewport, 'hotseat: the readable "Turn 1 → 2" heading is on screen before Turn 2 is entered', JSON.stringify({ h: vis.heading, vis: vis.headingVisible, inVp: vis.headingInViewport }));
+  ok(/Worth [+\u2212]?\d/.test(vis.text) && /#\d( \u2192 #\d|\s*held)?/.test(vis.text) && /Crown Index/.test(vis.text), 'hotseat: the visible delta shows numbers (Crown Index, rank, component deltas)', vis.text.slice(0, 160).replace(/\s+/g, ' '));
+  ok(vis.draftLen === 0 && vis.cta?.label === 'Pass to Ada' && vis.cta.visible && vis.cta.enabled, 'hotseat: a visible "Pass to Ada" CTA exists and no private draft is exposed', JSON.stringify({ d: vis.draftLen, cta: vis.cta }));
+  ok(vis.turn === t0 + 1 && vis.res === 1, 'hotseat: Turn 2 is resolved but unplanned — the world has not moved again', JSON.stringify({ turn: vis.turn, res: vis.res }));
   await shot(page, '09-hotseat-turn-delta');
+  // The CTA hands over: now the Turn 2 first-seat handoff covers the screen and hides the HUD.
+  await page.getByRole('button', { name: /^Pass to Ada/ }).click();
+  await sleep(600);
+  const covered = await page.evaluate(() => ({ layer: !!document.querySelector('.handoff-layer'), hud: getComputedStyle(document.querySelector('#hud')).visibility, text: document.querySelector('.handoff-layer')?.innerText ?? '', turn: window.__mercadia.turn, draft: window.__mercadia.draft.length }));
+  ok(covered.layer && covered.hud === 'hidden' && /Pass to /.test(covered.text) && covered.turn === t0 + 1 && covered.draft === 0, 'hotseat: after the CTA the Turn 2 first-seat handoff covers the board (HUD hidden) and nothing resolved', JSON.stringify(covered));
+  await shot(page, '09b-hotseat-turn2-handoff');
+  await page.getByRole('button', { name: /^Begin .*turn/ }).click();
+  await sleep(500);
+  const planning = await page.evaluate(() => ({ seat: window.__mercadia.seat, draft: window.__mercadia.draft.length, layer: !!document.querySelector('.handoff-layer'), hud: getComputedStyle(document.querySelector('#hud')).visibility }));
+  ok(planning.seat === 0 && planning.draft === 0 && !planning.layer && planning.hud === 'visible', "hotseat: Ada then plans Turn 2 on an empty draft behind a visible HUD", JSON.stringify(planning));
   await finishCtx(c, 'hotseat-walkthrough');
+}
+
+
+// ═════════════════════════════ ENDLESS + REPLAY + SCORE DELTA ═════════════════════════════
+const REPLAY_CLI = join(process.cwd(), 'node_modules', 'tsx', 'dist', 'cli.mjs');
+function nodeReplay(file) {
+  try {
+    const out = execFileSync(process.execPath, [REPLAY_CLI, join(process.cwd(), 'scripts', 'replay.ts'), file], { encoding: 'utf8' });
+    return JSON.parse(out.trim().split('\n').pop());
+  } catch (e) {
+    const out = String(e.stdout ?? '').trim().split('\n').pop();
+    try {
+      return JSON.parse(out);
+    } catch {
+      return { ok: false, error: String(e.stderr ?? e.message).slice(0, 300) };
+    }
+  }
+}
+
+/** One planning turn through the real UI: adopt a Charter on a Council turn, then End Turn. Returns once the world moved. */
+async function playTurnUi(page) {
+  const before = await M(page);
+  if ((await page.locator('.charter').count()) > 0) {
+    await page.locator('.charter').first().click();
+    await sleep(250);
+  }
+  await sleep(650); // outside the End Turn gesture guard
+  await endBtn(page).click();
+  await page.waitForFunction((t) => window.__mercadia.turn !== t || window.__mercadia.phase === 'ended', before.turn, { timeout: 15000 });
+  await sleep(120);
+}
+
+/** The Turn Delta score block as rendered: text, rows, overflow and visibility. */
+const scoreBlockState = (page) =>
+  page.evaluate(() => {
+    const drawer = document.querySelector('#h-drawer');
+    const block = drawer.querySelector('.dscore');
+    const rows = [...(block?.querySelectorAll('.srow') ?? [])];
+    const body = drawer.querySelector('#h-dbody') ?? drawer;
+    const r = (block ?? drawer).getBoundingClientRect();
+    const vis = block ? getComputedStyle(block).visibility === 'visible' && r.width > 0 && r.height > 0 : false;
+    const clipped = rows.some((e) => e.scrollWidth > e.clientWidth + 1);
+    const sc = window.__mercadia.summary?.scores ?? [];
+    return {
+      heading: drawer.querySelector('#h-dh')?.textContent.trim(),
+      has: !!block,
+      visible: vis,
+      rowCount: rows.length,
+      text: block ? block.innerText.replace(/\s+/g, ' ') : '',
+      clipped,
+      pageOverflowX: document.documentElement.scrollWidth - innerWidth,
+      drawerOverflowX: drawer.scrollWidth - drawer.clientWidth,
+      bodyOverflowX: body.scrollWidth - body.clientWidth,
+      drawerRect: (() => { const q = drawer.getBoundingClientRect(); return { x: Math.round(q.x), y: Math.round(q.y), w: Math.round(q.width), h: Math.round(q.height) }; })(),
+      moved: sc.filter((x) => x.rankDelta !== 0).map((x) => ({ p: x.player, from: x.prevRank, to: x.nextRank, d: x.rankDelta })),
+      scores: sc,
+    };
+  });
+
+async function checkScoreDom(page, label, widthName) {
+  const st = await scoreBlockState(page);
+  const sign = (n) => (n === 0 ? '0' : `${n > 0 ? '+' : '−'}${Math.abs(n)}`);
+  ok(st.has && st.visible && st.rowCount === st.scores.length && st.rowCount >= 2, `${label}: the Turn Delta shows a visible "Crown Index · rank" block with one row per House (${widthName})`, JSON.stringify({ has: st.has, vis: st.visible, rows: st.rowCount }));
+  const moved = st.moved[0];
+  ok(!!moved && st.text.includes(`#${moved.from} → #${moved.to}`) && st.text.includes(moved.d > 0 ? `▲${moved.d}` : `▼${-moved.d}`), `${label}: the rendered text shows the rank change (#${moved?.from} → #${moved?.to}) with its ▲/▼ chip (${widthName})`, st.text.slice(0, 200));
+  const allDeltas = st.scores.every((x) => st.text.includes(`Worth ${sign(x.worthDelta)}`) && st.text.includes(`Share ${sign(x.shareDelta)}`) && st.text.includes(`Prestige ${sign(x.prestigeDelta)}`) && x.worthDelta + x.shareDelta + x.prestigeDelta === x.crownDelta);
+  ok(allDeltas, `${label}: every House row prints Worth, Share and Prestige deltas that sum to its Crown Index change (${widthName})`, st.text.slice(0, 260));
+  ok(!st.clipped && st.pageOverflowX <= 1 && st.drawerOverflowX <= 1, `${label}: no clipping or horizontal overflow at ${widthName}`, JSON.stringify({ clipped: st.clipped, page: st.pageOverflowX, drawer: st.drawerOverflowX }));
+  return st;
+}
+
+async function endlessReplay() {
+  const c = await ctx('endless', { video: false });
+  const page = await openPage(c, 'solo-to-endless');
+  await startSolo(page);
+  let rankShot = false;
+  let rankSeen = null;
+  // Finish a real 32-turn Standard match through the UI (Charters adopted on Council turns).
+  for (let i = 0; i < 40 && (await M(page)).phase !== 'ended'; i++) {
+    await playTurnUi(page);
+    if (!rankShot && (await M(page)).phase !== 'ended') {
+      const moved = await page.evaluate(() => (window.__mercadia.summary?.scores ?? []).some((x) => x.rankDelta !== 0));
+      if (moved) {
+        await sleep(400);
+        rankShot = true;
+        rankSeen = await checkScoreDom(page, 'score delta (desktop)', '1440×900');
+        await shot(page, '20-turn-delta-rank-and-components-1440x900');
+        await page.locator('#h-drawer').screenshot({ path: join(MEDIA, '21-turn-delta-drawer-crop.png') });
+      }
+    }
+  }
+  const fin = await M(page);
+  ok(fin.phase === 'ended' && fin.turn === 33, 'endless: a real 32-turn Standard match finished in the browser (Final Edition)', JSON.stringify({ phase: fin.phase, turn: fin.turn }));
+  if (!rankShot) ok(false, 'score delta (desktop): a turn with rank movement occurred in the match', 'no rank change in 32 turns');
+  await sleep(600);
+  await shot(page, '22-final-edition');
+  // Plain finished export replays bit-for-bit.
+  const done = await page.evaluate(() => window.__mercadia.exportMatch());
+  writeFileSync(join(RAW, 'finished-export.json'), JSON.stringify(done));
+  const r1 = nodeReplay(join(RAW, 'finished-export.json'));
+  ok(done.log.length === 32 && r1.ok && r1.turnsReplayed === 32 && r1.mismatches.length === 0, 'replay: the finished 32-turn export replays bit-for-bit in headless Node (every turn hash)', JSON.stringify(r1));
+  // Continue in Endless, play two more turns, export, replay.
+  await page.getByRole('button', { name: 'Continue in Endless' }).click();
+  await page.waitForFunction(() => window.__mercadia.phase === 'planning', null, { timeout: 10000 });
+  await sleep(500);
+  ok((await M(page)).turn === 33, 'endless: Continue in Endless re-opens planning on Turn 33');
+  await shot(page, '23-endless-turn33-planning');
+  await playTurnUi(page);
+  await sleep(500);
+  await playTurnUi(page);
+  await sleep(800);
+  const post = await M(page);
+  ok(post.turn === 35 && post.phase === 'planning', 'endless: two Endless turns resolved (Turn 35)', JSON.stringify({ turn: post.turn, phase: post.phase }));
+  await shot(page, '24-endless-turn35-delta');
+  const exp = await page.evaluate(() => window.__mercadia.exportMatch());
+  writeFileSync(join(RAW, 'endless-export.json'), JSON.stringify(exp));
+  ok(exp.log.length === 34 && Array.isArray(exp.endlessAt) && exp.endlessAt.length === 1 && exp.endlessAt[0] === 32, 'endless: the exported canonical log records the continuation (endlessAt=[32]) and 34 order batches', JSON.stringify({ n: exp.log.length, at: exp.endlessAt }));
+  const r2 = nodeReplay(join(RAW, 'endless-export.json'));
+  ok(r2.ok && r2.turnsReplayed === 34 && r2.mismatches.length === 0 && r2.finalTurn === 35 && r2.phase === 'planning' && r2.endless === true, 'replay: the post-Endless export (Turn 35) replays bit-for-bit in headless Node, including the Endless turns', JSON.stringify(r2));
+  const lastHash = await page.evaluate(() => window.__mercadia.hash);
+  ok(exp.hashes.length === 34, 'replay: the browser recorded a state hash for every turn including the Endless ones', String(exp.hashes.length));
+  void lastHash;
+  copyFileSync(join(RAW, 'endless-export.json'), join(MEDIA, '..', 'endless-export.json'));
+  await finishCtx(c, 'endless-and-replay');
+
+  // Same Turn Delta rank/component check on a 390×844 phone and a 1024×768 laptop, on a turn with rank movement.
+  for (const [name, vp, mobile] of [['mobile', { width: 390, height: 844 }, true], ['laptop', { width: 1024, height: 768 }, false]]) {
+    const c2 = await ctx('endless-' + name, { mobile, video: false });
+    const p2 = await openPage(c2, name);
+    if (!mobile) await p2.setViewportSize(vp);
+    await startSolo(p2);
+    let found = false;
+    for (let i = 0; i < 16 && !found; i++) {
+      await playTurnUi(p2);
+      found = await p2.evaluate(() => (window.__mercadia.summary?.scores ?? []).some((x) => x.rankDelta !== 0));
+    }
+    if (!found) ok(false, `score delta (${name}): a turn with rank movement occurred`, 'none in 16 turns');
+    else {
+      await sleep(600);
+      await checkScoreDom(p2, `score delta (${name})`, `${vp.width}×${vp.height}`);
+      await shot(p2, name === 'mobile' ? '25-turn-delta-rank-390x844' : '26-turn-delta-rank-1024x768');
+      if (name === 'laptop') {
+        // planning view next to the delta at 1024×768: no overlap of the delta drawer with the command rail
+        const geo = await p2.evaluate(() => {
+          const q = (sel) => { const e = document.querySelector(sel); if (!e) return null; const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; };
+          return { drawer: q('#h-drawer'), rail: q('#rail'), vw: innerWidth, vh: innerHeight };
+        });
+        const overlap = geo.drawer && geo.rail && !(geo.drawer.r <= geo.rail.l || geo.drawer.l >= geo.rail.r || geo.drawer.b <= geo.rail.t || geo.drawer.t >= geo.rail.b);
+        ok(!overlap && geo.drawer.r <= geo.vw + 1 && geo.drawer.b <= geo.vh + 1, 'laptop 1024×768: the Turn Delta drawer does not overlap the command rail and stays on screen', JSON.stringify(geo));
+        await p2.keyboard.press('Escape');
+        await sleep(400);
+        await shot(p2, '27-planning-1024x768');
+      }
+    }
+    await finishCtx(c2, `endless-${name}`);
+  }
+}
+
+// ═════════════════════════════ ALL FOUR HOUSES START BESIDE GRAND STATION ═════════════════════════════
+async function startBeside() {
+  const c = await ctx('start', { video: false });
+  const page = await openPage(c, 'turn1');
+  await startSolo(page);
+  const st = await page.evaluate(() => {
+    const g = window.__mercadia.view.game;
+    const stationDoor = 8 + 12;
+    const stationTiles = [8, 9];
+    return {
+      turn: g.turn,
+      players: g.players.length,
+      cash: g.players.map((p) => p.cash),
+      buildings: g.buildings.length,
+      units: g.units.map((u) => ({ owner: u.owner, kind: u.kind, tile: u.tile, x: u.tile % 12, y: Math.floor(u.tile / 12) })),
+      stationDoor,
+      stationTiles,
+    };
+  });
+  const tiles = st.units.map((u) => u.tile);
+  const cheb = (u) => Math.min(...st.stationTiles.map((s) => Math.max(Math.abs(s - u.x), Math.abs(0 - u.y))));
+  const perHouse = [0, 1, 2, 3].map((o) => st.units.filter((u) => u.owner === o).map((u) => u.kind).sort().join('+'));
+  ok(st.turn === 1 && st.players === 4 && st.cash.every((x) => x === 900) && st.buildings === 0, 'start: four Houses, §900 each, no property, on Turn 1', JSON.stringify({ cash: st.cash, b: st.buildings }));
+  ok(perHouse.every((x) => x === 'factor+watch') && new Set(tiles).size === 8, 'start: each House has one Factor and one Watch Company, on 8 distinct tiles', JSON.stringify(perHouse));
+  ok(st.units.every((u) => u.y <= 2 && cheb(u) <= 5), 'start: all four Houses begin beside Grand Station (north avenue frontage, none on the Harbor Pier side)', JSON.stringify(st.units.map((u) => `${u.owner}:${u.kind[0]}(${u.x},${u.y})`)));
+  await sleep(500);
+  await shot(page, '28-turn1-all-four-houses-beside-station');
+  await finishCtx(c, 'start');
 }
 
 // ═════════════════════════════ MOBILE ═════════════════════════════
@@ -531,7 +784,7 @@ function installRelay(page) {
 }
 
 async function relayChecks() {
-  const { cA, cB, A, B, rel } = await makeRoom('RA', 'RB', { relayA: true, relayB: true });
+  const { cA, cB, A, B, rel } = await makeRoom('RA', 'RB', { relayA: true, relayB: true, mode: 'Standard', videos: false });
   const ra = rel.A;
   const rb = rel.B;
   const seatA = (await M(A)).seat;
@@ -692,13 +945,16 @@ async function relayChecks() {
   ra.drop('s2c', (m) => m?.t === 'readyAck', 1);
   await endBtn(A).click();
   await sleep(500);
+  // A goes offline for real (no quick reconnect can race the resolution): cut the socket AND block new connections.
+  await cA.context.setOffline(true);
   ra.cut();
-  await A.waitForFunction(() => window.__mercadia.view.status.text === 'Reconnecting…', null, { timeout: 15000 }).catch(() => {});
+  await A.waitForFunction(() => window.__mercadia.view.status.text === 'Reconnecting…', null, { timeout: 15000 });
   // queue one more order while "Reconnecting…" (unsent local revision r+1)
   await A.getByRole('button', { name: /Roastery/ }).first().click().catch(() => {});
   await tileClick(A, 44).catch(() => {});
   await endBtn(B).click();
   await B.waitForFunction((t) => window.__mercadia.turn === t + 1, t16, { timeout: 15000 });
+  await cA.context.setOffline(false);
   await A.waitForFunction((t) => window.__mercadia.turn === t + 1, t16, { timeout: 30000 });
   await sleep(600);
   const a16 = await M(A);
@@ -717,8 +973,22 @@ async function relayChecks() {
   ok(a16b.hash === hash16 && a16b.ready === false && a16b.draft === 0, "16: A's draft, Ready state and the state hash are unchanged");
 
   // 14(e)/(privacy): nothing B receives contains A's draft or epoch
-  const leaked = rb.log.filter((x) => x.dir === 's2c').some((x) => JSON.stringify(x.msg).includes('"epoch"') || JSON.stringify(x.msg).includes('"draft"') && x.msg.t !== 'state');
+  // B's own acks are fine; nothing carrying A's draft/epoch may reach B. (1) every ack B received answers a message B itself sent;
+  // (2) outside its own `own` block no message to B has a draft/orders/revision/epoch field.
+  const bSent = rb.log.filter((x) => x.dir === 'c2s' && ['ready', 'cancelReady', 'draft'].includes(x.msg.t)).map((x) => `${x.msg.t === 'draft' ? 'draftAck' : 'readyAck'}:${x.msg.turn}`);
+  const bAcks = rb.log.filter((x) => x.dir === 's2c' && (x.msg.t === 'readyAck' || x.msg.t === 'draftAck'));
+  const orphanAcks = bAcks.filter((x) => !bSent.includes(`${x.msg.t}:${x.msg.turn}`));
+  const PRIVATE = /"(draft|orders|revision|epoch|ackedRevision)":/;
+  const privateHits = rb.log
+    .filter((x) => x.dir === 's2c' && x.msg.t !== 'readyAck' && x.msg.t !== 'draftAck')
+    .filter((x) => {
+      const { own, ...rest } = x.msg;
+      return PRIVATE.test(JSON.stringify(rest));
+    })
+    .map((x) => x.msg.t);
   const bStateOwn = rb.log.filter((x) => x.dir === 's2c' && x.msg.t === 'state').every((x) => x.msg.own === null || x.msg.player === seatB);
+  const leaked = orphanAcks.length > 0 || privateHits.length > 0;
+  if (leaked) console.log('B privacy offenders:', JSON.stringify({ orphan: orphanAcks.map((x) => [x.msg.t, x.msg.turn]), privateHits }));
   ok(!leaked && bStateOwn, '14: nothing B receives over its socket contains A\'s draft or readiness epoch (only B\'s own state/acks)');
   await finishCtx(cA, 'relay-browser-A');
   await finishCtx(cB, 'relay-browser-B');
@@ -737,9 +1007,9 @@ async function idleRoom() {
   await finishCtx(cB, 'idle-B');
 }
 
-const sections = { solo, hotseat, mobile, room, relay: relayChecks };
+const sections = { solo, hotseat, mobile, room, relay: relayChecks, endless: endlessReplay, start: startBeside };
 const jobs = [];
-for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay']) {
+for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay', 'endless', 'start']) {
   if (ONLY.includes(name)) jobs.push(sections[name]().catch((e) => ok(false, `${name}: section crashed`, e.stack?.split('\n').slice(0, 3).join(' / '))));
 }
 if (ONLY.includes('idle')) {
@@ -749,19 +1019,12 @@ if (ONLY.includes('idle')) {
 await Promise.all(jobs);
 
 // Hygiene: zero console errors/warnings, page errors, CSP violations and failed requests anywhere.
+// Every page's CSP violations were read from the LIVE page in finishCtx, before its context closed.
 for (const rec of pages) {
-  let csp = [];
-  try {
-    csp = await rec.page.evaluate(() => window.__csp ?? []);
-  } catch {
-    // page closed with its context
-  }
-  const issues = rec.issues.filter((i) => !/net::ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|WebSocket connection to .* failed|Failed to load resource: net::ERR_INTERNET/.test(i) || !/offline|reconnect/i.test('')).filter((i) => true);
-  ok(csp.length === 0, `hygiene ${rec.tag}: zero CSP violations`, csp.join(' | '));
-  rec.hygiene = issues;
+  ok(Array.isArray(rec.csp) && rec.csp.length === 0, `hygiene ${rec.tag}: zero CSP violations (read from the live page)`, rec.csp === undefined ? 'never captured' : (rec.csp ?? []).join(' | '));
 }
 // Offline/online and relay-cut sections legitimately fail sockets on purpose; report them separately but strictly for the plain sections.
-const strict = pages.filter((p) => /^(solo|hotseat|mobile|idle)\//.test(p.tag));
+const strict = pages.filter((p) => /^(solo|hotseat|mobile|idle|endless|start)[-/]/.test(p.tag));
 for (const rec of strict) ok(rec.issues.length === 0, `hygiene ${rec.tag}: zero console errors/warnings, page errors and failed requests`, rec.issues.slice(0, 4).join(' | '));
 const roomPages = pages.filter((p) => /^room-/.test(p.tag));
 for (const rec of roomPages) {
