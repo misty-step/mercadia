@@ -33,7 +33,7 @@ way tokens sit on a printed map; they move only when a turn resolves.
 | Sage | `#8FA58E` | Parks, vacant lots, foliage |
 | Terracotta | `#B65A3C` | Roofs, civic accents, `Reconnecting…` rule |
 | Brass | `#B8893A` | Era marks, Milestone stars, `Waiting…` rule; never small text |
-| Alert | `#9F2B23` | Error rule and error text (≥ 7:1 on Alabaster) |
+| Alert | `#8B241D` | Error rule and error text (8.1:1 on Alabaster; meets ≥ 7:1) |
 
 High contrast is mandatory: body text is Ink on Alabaster (≥ 15:1); secondary text is Graphite or
 darker; no text sits on a House color or on the board without an Alabaster backing. Focus rings
@@ -140,12 +140,13 @@ Command rail or the Turn plate.
 - **End Turn** is the single primary button: Ink fill, Alabaster IBM Plex Sans 600 label, at least
   56px tall and 168px wide on desktop, with a mono `Enter` hint. It is always visible during
   play.
-- In a room, End Turn marks the seat Ready for the current turn. The button then becomes an
-  outlined `Cancel Ready` and the Status line reads `Waiting for opponent…` (or
+- In a room, End Turn marks the seat Ready for the current turn. Once the authority confirms
+  it, the button becomes an outlined `Cancel Ready` and the Status line reads `Waiting for opponent…` (or
   `Waiting for 2 opponents…`), naming who is still planning. When the last seat is Ready, both
   read `Resolving Turn 12…` until the authority's result arrives.
 - When End Turn is unavailable, it stays visible, disabled, and labelled with the reason:
-  `Choose a Charter`, `Reconnecting…`, `Resolving Turn 12…`, or `Spectating`.
+  `Choose a Charter`, `Saving draft…` (in a room, until the latest draft revision is
+  acknowledged), `Reconnecting…`, `Resolving Turn 12…`, or `Spectating`.
 - **Actions remaining** sits beside End Turn as `Actions 3 of 6` in mono; it turns to Graphite
   `Actions 0 of 6` when spent and the dock disables Action-costing tools with the reason.
 - After each resolution End Turn ignores the remainder of the activating gesture (a held key,
@@ -185,6 +186,13 @@ Command rail or the Turn plate.
   checkbox) and never end the turn. They also never end the turn while the Council card, handoff
   screen, a confirmation, or the Final Edition is open, with a modifier key held, during IME
   composition, or on key auto-repeat.
+- **A focused End Turn button activates normally.** The End Turn button is itself a focusable
+  control, so when it has focus, `Enter` (on keydown) or `Space` (on keyup) activates it by
+  ordinary button activation and ends the turn (or marks Ready) exactly once, the same as a
+  click. This is the button doing its own job, not the global shortcut: the page-level
+  `Enter`/`Space` handler is suppressed whenever any control has focus, including End Turn, so a
+  single key press can never both activate a focused control and fire the global shortcut. A
+  focused `Cancel Ready` likewise activates normally, and a disabled End Turn does nothing.
 - Every action available by pointer is available by keyboard, and vice versa; a full turn can be
   planned and ended keyboard-only.
 
@@ -252,17 +260,50 @@ never on a timer. Audio starts on the first user gesture; mute is a persistent t
   loop; it changes world state only inside a resolution.
 - **Room authority.** The Durable Object persists, in one transaction per resolution: the state,
   the canonical action log, the turn summary, and the last resolved turn. Ready sets and drafts
-  are stored per turn. Resolution is guarded by the stored last resolved turn, so concurrent or
-  repeated Ready messages resolve a turn exactly once.
+  (each with its acknowledged revision) are stored per turn. Resolution is guarded by the stored
+  last resolved turn, so concurrent or repeated Ready messages resolve a turn exactly once.
 - **Wire protocol.** Client → authority: `hello` (room code, seat token, last seen turn),
-  `draft` (turn, revision, orders), `ready` (turn), `cancelReady` (turn), `ping`. Authority →
-  client: `state` (full state, phase, seat draft and Ready flag, seats' Ready and presence, latest
-  summary; sent on every join and reconnect), `seats` (Ready and presence changes), `resolved`
-  (turn N → N+1, summary, state hash), `error` (code, message), `pong`. `ping` and `pong` never
-  reach the core. There is no polling and no snapshot interpolation.
+  `draft` (turn, revision, orders), `ready` (turn, revision), `cancelReady` (turn), `ping`.
+  Authority → client: `state` (sent on every join and reconnect: turn, phase, full state and its
+  hash, the receiving seat's own draft with its acknowledged revision and Ready flag, every seat's
+  Ready and presence, latest summary), `draftAck` (turn, acknowledged revision; to the drafting
+  seat only), `seats` (Ready and presence changes), `resolved` (see below), `error` (code,
+  message, and the current turn and acknowledged revision where relevant), `pong`. `ping` and
+  `pong` never reach the core. There is no polling and no snapshot interpolation.
+- **Resolution broadcast carries the N+1 state.** When Turn N resolves and its transaction has
+  committed, the authority sends every connected client one `resolved` message containing, together,
+  the authoritative Turn N+1 state (versioned by its turn number N+1 and its full state hash), the
+  immutable N→N+1 summary, and the resulting phase and seats' Ready flags (all cleared). A client
+  applies that state and summary as one atomic swap: it never recomputes N+1 locally in a room,
+  never shows a summary without its matching state (or the reverse), ignores a `resolved` whose turn
+  is not newer than the one it holds, and never replaces its world with an older turn's state. A
+  client that misses the broadcast receives the same N+1 state and N→N+1 summary in the `state`
+  message on reconnect.
+- **Drafts stay private.** A seat's draft and its revision are sent only back to that seat (in
+  `draftAck` and in its own `state`). `seats`, `resolved`, spectator `state`, and every other
+  seat's `state` carry only public information: Ready flags, presence, and the resolved world.
+  Drafts become visible to others only as committed orders in the resolved summary.
+- **Ready binds to an acknowledged draft revision.** The authority stores, per seat and turn, the
+  latest acknowledged draft revision; each turn starts at revision 0 (the empty draft). A `draft`
+  with a revision higher than the stored one is stored and answered with `draftAck`; an older or
+  duplicate revision is never applied and is answered with a `draftAck` of the current revision. A
+  `ready` must carry the current turn and exactly the stored acknowledged revision. If the revision
+  is older, newer, or not yet acknowledged (for example after a dropped or reordered `draft`), the
+  authority rejects it with `error { code: "staleDraft" }`, records nothing, and the seat stays
+  Planning. The client shows `Draft not saved yet — Ready not recorded`, resends its latest draft,
+  never retries Ready on its own, and re-enables Ready only after the matching `draftAck`, so the
+  player marks Ready again deliberately. A `draft` received while the seat is Ready is rejected with
+  `error { code: "readyLocked" }` and does not change the stored draft, so the turn always resolves
+  with exactly the revision each seat had acknowledged when it was recorded Ready.
+  A client shows its seat as Ready (`Cancel Ready`, `Waiting for opponent…`) only after the
+  authority confirms it in `seats`. If a `ready` is lost, the seat stays Planning everywhere and
+  pressing End Turn again is safe, because a repeated Ready for the same turn and revision is a
+  no-op.
 - **Client sessions.** Seat tokens persist in `localStorage` per room; reconnect uses exponential
-  backoff and shows `Reconnecting…` until a fresh `state` arrives, then reconciles the local draft
-  by revision. The room URL is `/?room=ABCD`; the socket is `/ws/rooms/ABCD`.
+  backoff and shows `Reconnecting…` until a fresh `state` arrives. The client then reconciles its
+  local draft by revision: if the authority's acknowledged revision is older than the local one
+  and the seat is not Ready, it resends the local draft and waits for `draftAck` before enabling
+  Ready. The room URL is `/?room=ABCD`; the socket is `/ws/rooms/ABCD`.
 - **Renderer and HUD.** Canvas 2D 2:1 isometric renderer with zoom-bucketed sprite caching and
   on-demand redraw; the declarative HUD binds to a view store derived from the current state and
   the local draft.
@@ -299,8 +340,10 @@ Every visual and interaction change is checked in real browsers at **1440×900**
   and the Final Edition.
 - Turn #, `Actions n of m`, treasury, and End Turn are visible and unclipped at every size; no
   text overlaps; drawers never cover the Command rail.
-- With a button, input, or the board focused, `Enter` and `Space` perform that control's normal
-  action and do not end the turn; with nothing focused they end it exactly once.
+- With a button other than End Turn, an input, or the board focused, `Enter` and `Space` perform
+  that control's normal action and do not end the turn; with End Turn itself focused they
+  activate it exactly once as a normal button press; with nothing focused they end it exactly
+  once.
 - A full turn can be completed keyboard-only on desktop and touch-only at 390×844; mobile tap
   targets are at least 48×48px; focus rings are visible on every control.
 - Text contrast meets the ratios in the palette; ownership is distinguishable in grayscale.

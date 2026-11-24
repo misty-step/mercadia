@@ -434,15 +434,24 @@ orders. AI orders are computed instantly at the start of PLANNING and are never 
 - **Authority.** The room authority holds the canonical state, the canonical action log, and the
   set of Ready seats for the current turn, persisted transactionally. It resolves Turn N exactly
   once, at the moment the last human seat's Ready for Turn N is recorded, persists the new state,
-  log, and summary, then broadcasts Turn N+1 and the N→N+1 summary to every connection.
+  log, and summary, then sends every connected client one message carrying both the
+  authoritative Turn N+1 state (with its turn number and state hash) and the N→N+1 summary.
+  Clients show the state and summary together and never compute Turn N+1 themselves.
 - **Drafts.** Each queue edit is sent to the authority with the seat's turn number and a draft
-  revision; the latest revision wins and stale revisions are ignored. A reloaded or reconnected
-  seat gets its draft back.
-- **Turn-keyed, idempotent Ready.** Ready messages carry the turn number (`ready { turn: N }`). A
-  Ready for the current turn is recorded once; repeats are no-ops. A Ready for any other turn is
-  ignored and answered with the current state. A seat may withdraw Ready (*Cancel Ready*) until
-  the last human seat is Ready; after that the turn is resolving and withdrawal is ignored. A
-  Ready seat cannot edit its draft without first cancelling Ready.
+  revision. The authority acknowledges the latest revision it stored; an older or duplicate
+  revision is never applied. A seat's draft is private: it is sent only to that seat, never to
+  rivals or spectators. A reloaded or reconnected seat gets its draft back.
+- **Turn-keyed, revision-bound, idempotent Ready.** Ready messages carry the turn number and the
+  draft revision the seat last saw acknowledged (`ready { turn: N, revision: r }`). A Ready for
+  the current turn whose revision exactly matches the authority's acknowledged revision is
+  recorded once; repeats are no-ops. A Ready whose revision does not match (a draft edit was
+  dropped, delayed, or arrived out of order) is explicitly rejected: nothing is recorded, the seat
+  stays Planning, and the player sees `Draft not saved yet — Ready not recorded` until the draft
+  is acknowledged and they mark Ready again. A Ready for any other turn is ignored and answered
+  with the current state. A seat may withdraw Ready (*Cancel Ready*) until the last human seat is
+  Ready; after that the turn is resolving and withdrawal is ignored. A Ready seat cannot edit its
+  draft without first cancelling Ready, so a turn always resolves with exactly the draft each seat
+  had acknowledged when it was Ready.
 - **No double advance.** The authority stores the last resolved turn; any Ready, retry, or
   duplicate referring to an already-resolved turn returns the stored summary for that turn and
   never resolves again.
@@ -458,8 +467,8 @@ orders. AI orders are computed instantly at the start of PLANNING and are never 
 - **User-visible states.** The HUD always shows which state the client is in: `Your turn`,
   `Waiting for opponent…` (with who is not yet Ready), `Resolving Turn N…`, `Reconnecting…`
   (draft kept locally, Ready unavailable until synced), and clear errors such as `Room not found`,
-  `Room is full — watching as spectator`, `Order rejected: not enough §`, or
-  `Turn 12 already resolved — showing its summary`.
+  `Room is full — watching as spectator`, `Order rejected: not enough §`,
+  `Draft not saved yet — Ready not recorded`, or `Turn 12 already resolved — showing its summary`.
 - **Host.** The room creator configures seats and starts the match; if the creator leaves the
   lobby, the next connected human becomes host. The host has no control over pace or resolution.
 
@@ -484,6 +493,9 @@ heartbeats. After every step it checks:
   unit exceeds its movement allowance; Cohesion stays within bounds; unit count changes only by
   recorded recruitment or disbandment; per-House unit cap is respected.
 - **Actions:** no House commits more orders than its Actions for the turn.
+- **Draft binding and privacy:** every recorded Ready matches that seat's acknowledged draft
+  revision, each resolution applies exactly those revisions, and no seat or spectator ever
+  receives another seat's draft.
 - **AI determinism:** identical seed and state produce identical AI orders, regardless of human
   draft timing.
 - **Replay equivalence:** replaying from the seed and canonical action log reproduces every
@@ -514,8 +526,8 @@ Each check runs against the real app (Worker dev server and real browsers), not 
    show the same N+1 Turn # and Turn Delta.
 9. **Reconnect across resolution.** A goes offline; B marks Ready after A was already Ready; A
    reconnects and immediately shows Turn N+1 and the same N→N+1 Turn Delta as B.
-10. **Retry safety.** Re-sending A's `ready { turn: N }` after resolution (duplicate, delayed, or
-    after reconnect) does not change Turn # or the state hash, and shows
+10. **Retry safety.** Re-sending A's `ready { turn: N, revision: r }` after resolution (duplicate,
+    delayed, or after reconnect) does not change Turn # or the state hash, and shows
     `Turn N already resolved — showing its summary` at most.
 11. **Heartbeats.** With both seats connected and idle for five minutes of heartbeats, the turn,
     world, and Ready states are unchanged.
@@ -523,6 +535,26 @@ Each check runs against the real app (Worker dev server and real browsers), not 
     reproduces every turn's state hash and the final standings.
 13. **AI determinism.** Two solo matches with the same seed and the same human orders produce
     identical AI orders and identical Turn Deltas.
+14. **Dropped or reordered draft and Ready.** In a two-browser room, A's room socket passes through
+    a test relay that can drop, delay, reorder, or replay single messages. (a) A edits the draft and
+    the latest `draft` is dropped: End Turn reads `Saving draft…`, and a
+    `ready { turn: N, revision: r }` for that unacknowledged revision, injected by the relay, is
+    rejected with `Draft not saved yet — Ready not recorded`. A stays `Planning` in both browsers
+    and the state hash does not change. (b) The relay delivers A's `ready` ahead of the `draft`
+    revision it names: the Ready is rejected the same way, the late draft is then acknowledged, and
+    A must mark Ready again before it is recorded. (c) An older `draft` revision delivered after a
+    newer one leaves the acknowledged revision unchanged. (d) A's `ready` is dropped: B keeps
+    showing A as `Planning`, A is not shown as Ready, no resolution occurs, and pressing End Turn
+    again records Ready exactly once. After B marks Ready, exactly one resolution occurs, and the
+    Turn Delta shows exactly the orders in A's last acknowledged draft. Nothing B receives over its
+    socket at any point contains A's draft.
+15. **Next state broadcast and reconnect.** A and B mark Ready for Turn N. Each browser receives
+    one resolution message that contains both the Turn N+1 state, with its turn number and state
+    hash, and the N→N+1 summary. Both show Turn N+1 with the same hash and the same Turn Delta,
+    and neither shows the summary before the new state. In a repeat run, A's resolution message
+    is dropped (or A goes offline after marking Ready and B then marks Ready). On reconnect, A
+    receives the same Turn N+1 state, hash, and N→N+1 summary in its join state. No second
+    resolution occurs, and A never displays Turn N's world again.
 
 ## What MERCADIA is not
 
