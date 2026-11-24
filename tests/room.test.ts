@@ -771,7 +771,7 @@ describe('authority-scoped public export (GET /api/rooms/:code/export)', () => {
     ready(h, ids[0], 1, 0);
     const exp = h.core.exportMatch()!;
     expect(Object.keys(exp).sort()).toEqual(PUBLIC_KEYS);
-    expect(exp.version).toBe(4);
+    expect(exp.version).toBe(5);
     expect(exp.log).toHaveLength(1);
     expect(exp.hashes).toHaveLength(1);
     expect(Object.keys(exp.config).sort()).toEqual(['mode', 'players', 'seed']);

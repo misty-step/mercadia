@@ -5,10 +5,14 @@ import { continueEndless, resolveTurn } from './resolve';
 import type { ActionLog, Game, MatchConfig, TurnSummary } from './types';
 
 /**
- * Export/ruleset version. Bumped to 4 when the Turn 1 start tiles changed: a version 3 export's state
- * hashes cannot be reproduced by the current rules, so it is rejected up front instead of replayed.
+ * Export/ruleset version. Any change to the initial world or the rules changes every state hash, so the
+ * version is bumped and older exports are rejected up front instead of replayed:
+ *  - 4: Turn 1 start tiles moved beside Grand Station (version 3 exports no longer reproduce).
+ *  - 5: start tiles are keyed by House (Vermilion, Cobalt, Marigold (4,1)/(3,1), Emerald (10,3)/(11,3)) instead
+ *       of by seat, which changes the initial world and Turn 1 hash of the default seating (version 4 exports
+ *       no longer reproduce).
  */
-export const MATCH_EXPORT_VERSION = 4;
+export const MATCH_EXPORT_VERSION = 5;
 
 export interface MatchExport {
   version: typeof MATCH_EXPORT_VERSION;

@@ -945,7 +945,7 @@ describe('room export from the authority', () => {
   it('fetches /api/rooms/:code/export and returns the public export; null on 404/409 or offline', async () => {
     const auth = new Authority();
     const a = client(auth, 'Ann');
-    const exp = { version: 4, config: { seed: 1, mode: 'standard', players: [] }, log: [], hashes: [] };
+    const exp = { version: 5, config: { seed: 1, mode: 'standard', players: [] }, log: [], hashes: [] };
     const f = vi.fn(async (url: string) => (url === '/api/rooms/ABCD/export' ? { ok: true, status: 200, json: async () => exp } : { ok: false, status: 404, json: async () => ({}) }));
     (globalThis as { fetch?: unknown }).fetch = f;
     expect(await a.s.exportMatchAsync()).toEqual(exp);

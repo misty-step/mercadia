@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { SUMMARY_KEEP } from '../src/shared/constants';
 import { createGame, stateHash } from '../src/shared/game';
 import { LocalMatch } from '../src/shared/local';
-import { MATCH_EXPORT_VERSION, replayMatch, replayMatchExport, type MatchExport } from '../src/shared/replay';
+import { MATCH_EXPORT_VERSION, assertExportVersion, replayMatch, replayMatchExport, type MatchExport } from '../src/shared/replay';
 import { canonicalOrders, resolveTurn } from '../src/shared/resolve';
 import type { MatchConfig, Order } from '../src/shared/types';
 import { config, draftRng, genDraft } from './helpers';
@@ -129,7 +129,7 @@ describe('Continue in Endless is part of the canonical record', () => {
       }
       const exp: MatchExport = JSON.parse(JSON.stringify(m.export()));
       expect(exp.version).toBe(MATCH_EXPORT_VERSION);
-      expect(exp.version).toBe(4);
+      expect(exp.version).toBe(5);
       expect(exp.endlessAt).toEqual([n]);
       expect(exp.log).toHaveLength(n + 3);
       const rep = replayMatch(exp.config, exp.log, exp.endlessAt);
@@ -166,30 +166,41 @@ describe('Continue in Endless is part of the canonical record', () => {
   });
 });
 
-describe('export version (MATCH_EXPORT_VERSION = 4)', () => {
+describe('export version (MATCH_EXPORT_VERSION = 5)', () => {
   const standardExport = (): MatchExport => JSON.parse(JSON.stringify(playLocal(config(81, 'standard', ['ai', 'ai', 'ai', 'ai'])).export()));
 
-  it('current exports are version 4 and round-trip bit-for-bit (Standard, Blitz, Endless with endlessAt)', () => {
-    expect(MATCH_EXPORT_VERSION).toBe(4);
+  it('current exports are version 5 and round-trip bit-for-bit (Standard, Blitz, Endless with endlessAt)', () => {
+    expect(MATCH_EXPORT_VERSION).toBe(5);
     const std = standardExport();
-    expect(std.version).toBe(4);
+    expect(std.version).toBe(5);
     expect(replayMatchExport(std).hashes).toEqual(std.hashes);
     const blitz: MatchExport = JSON.parse(JSON.stringify(playLocal(config(82, 'blitz', ['ai', 'ai', 'ai'])).export()));
-    expect(blitz.version).toBe(4);
+    expect(blitz.version).toBe(5);
     expect(replayMatchExport(blitz).hashes).toEqual(blitz.hashes);
     const m = playLocal(config(83, 'blitz', ['ai', 'ai']));
     m.continueEndless();
     m.endTurn();
     const endless: MatchExport = JSON.parse(JSON.stringify(m.export()));
-    expect(endless.version).toBe(4);
+    expect(endless.version).toBe(5);
     expect(endless.endlessAt).toHaveLength(1);
     const rep = replayMatchExport(endless);
     expect(rep.hashes).toEqual(endless.hashes);
     expect(stateHash(rep.game)).toBe(m.hash());
   });
 
-  it.each([3, 2, 5, undefined, '4'])('version %s fails fast with an explicit incompatible-version error, never a silent hash mismatch', (v) => {
+  it.each([3, 4, 2, 6, undefined, '5'])('version %s fails fast with an explicit incompatible-version error, never a silent hash mismatch', (v) => {
     const exp = { ...standardExport(), version: v } as unknown as MatchExport;
-    expect(() => replayMatchExport(exp)).toThrow(/Incompatible match export version .*replays version 4 exports only/);
+    expect(() => replayMatchExport(exp)).toThrow(/Incompatible match export version .*replays version 5 exports only \(ruleset changed/);
+    expect(() => assertExportVersion(exp)).toThrow(/Incompatible match export version/);
+  });
+
+  it.each([3, 4])('a legacy version %s fixture (an export file as an older build wrote it) is rejected with the explicit version in the message', (v) => {
+    // The Pass 3 (version 4) initial world: seat-keyed start tiles, Turn 1 hash 34928f5d384bd1a0 for seed 7 (4 seats).
+    const legacy = { version: v, config: config(7, 'standard', ['human', 'ai', 'ai', 'ai']), log: [[[], [], [], []]], hashes: ['34928f5d384bd1a0'] } as unknown as MatchExport;
+    expect(() => replayMatchExport(legacy)).toThrow(new RegExp(`Incompatible match export version ${v}: this build replays version 5 exports only`));
+  });
+
+  it('the version 4 -> 5 bump is real: the current initial world differs from the Pass 3 (version 4) one', () => {
+    expect(stateHash(createGame(config(7, 'standard', ['human', 'ai', 'ai', 'ai'])))).not.toBe('34928f5d384bd1a0');
   });
 });

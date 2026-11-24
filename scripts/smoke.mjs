@@ -4,7 +4,7 @@
 //   npm run build && npm run dev        (in another shell)
 //   npm run smoke                       BASE=http://127.0.0.1:8787  CHROME=/usr/bin/google-chrome
 //
-//   ONLY=solo,hotseat,mobile,room,relay,endless,start,reclaim,idle   run sections selectively
+//   ONLY=solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,idle   run sections selectively
 //   FAST=1                                      shorten the 2-minute/5-minute idle checks to 20 s (NOT acceptance-grade)
 //   MEDIA=/path                                 directory for videos and screenshots (default ~/chief-evidence/media)
 //
@@ -21,7 +21,7 @@ const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
 const FAST = process.env.FAST === '1';
 const MEDIA = process.env.MEDIA ?? join(homedir(), 'chief-evidence', 'media');
 const RAW = join(MEDIA, '.raw');
-const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,endless,start,reclaim,idle').split(',');
+const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,idle').split(',');
 const IDLE_MS = FAST ? 20_000 : 125_000;
 const HEARTBEAT_MS = FAST ? 30_000 : 300_000;
 mkdirSync(MEDIA, { recursive: true });
@@ -293,7 +293,7 @@ async function solo() {
   // export + replay equivalence (acceptance 12) — replayed headlessly in node by the harness
   await ensureDeltaOpen(page);
   const { exp } = await downloadVia(page, page.locator('#h-drawer [data-act="export"]'), join(RAW, 'solo-export.json'));
-  ok(exp && exp.version === 4 && exp.log.length >= 6, 'replay: the real Export match button downloads a version 4 export with the seed and canonical action log', exp ? `v${exp.version} ${exp.log.length} turns` : 'null');
+  ok(exp && exp.version === 5 && exp.log.length >= 6, 'replay: the real Export match button downloads a version 5 export with the seed and canonical action log', exp ? `v${exp.version} ${exp.log.length} turns` : 'null');
   const rs = nodeReplay(join(RAW, 'solo-export.json'));
   ok(rs.ok && rs.mismatches.length === 0 && rs.turnsReplayed === exp.log.length, 'replay: the solo UI download replays bit-for-bit in headless Node', JSON.stringify(rs));
   await finishCtx(c, 'solo-desktop-walkthrough');
@@ -518,7 +518,7 @@ async function endlessReplay() {
   const fdl = await downloadVia(page, page.locator('.gazette').getByRole('button', { name: 'Export match' }), join(RAW, 'finished-export.json'));
   const done = fdl.exp;
   const r1 = nodeReplay(join(RAW, 'finished-export.json'));
-  ok(done.version === 4 && done.log.length === 32 && !done.endlessAt && /^mercadia-\d+\.json$/.test(fdl.name) && r1.ok && r1.turnsReplayed === 32 && r1.mismatches.length === 0, 'replay: the Final Edition Export match download (version 4, 32 turns) replays bit-for-bit in headless Node (every turn hash)', JSON.stringify({ v: done.version, name: fdl.name, ...r1 }));
+  ok(done.version === 5 && done.log.length === 32 && !done.endlessAt && /^mercadia-\d+\.json$/.test(fdl.name) && r1.ok && r1.turnsReplayed === 32 && r1.mismatches.length === 0, 'replay: the Final Edition Export match download (version 5, 32 turns) replays bit-for-bit in headless Node (every turn hash)', JSON.stringify({ v: done.version, name: fdl.name, ...r1 }));
   // Continue in Endless, play two more turns, export through the real UI, replay.
   await page.getByRole('button', { name: 'Continue in Endless' }).click();
   await page.waitForFunction(() => window.__mercadia.phase === 'planning', null, { timeout: 10000 });
@@ -545,7 +545,7 @@ async function endlessReplay() {
   await shot(page, '24-endless-turn35-delta');
   const edl = await downloadVia(page, page.locator('#h-drawer [data-act="export"]'), join(RAW, 'endless-export.json'));
   const exp = edl.exp;
-  ok(exp.version === 4 && exp.log.length === 34 && Array.isArray(exp.endlessAt) && exp.endlessAt.length === 1 && exp.endlessAt[0] === 32, 'endless: the Export match download after Continue in Endless is version 4 and records the continuation (endlessAt=[32]) and 34 order batches', JSON.stringify({ v: exp.version, n: exp.log.length, at: exp.endlessAt }));
+  ok(exp.version === 5 && exp.log.length === 34 && Array.isArray(exp.endlessAt) && exp.endlessAt.length === 1 && exp.endlessAt[0] === 32, 'endless: the Export match download after Continue in Endless is version 5 and records the continuation (endlessAt=[32]) and 34 order batches', JSON.stringify({ v: exp.version, n: exp.log.length, at: exp.endlessAt }));
   const r2 = nodeReplay(join(RAW, 'endless-export.json'));
   ok(r2.ok && r2.turnsReplayed === 34 && r2.mismatches.length === 0 && r2.finalTurn === 35 && r2.phase === 'planning' && r2.endless === true, 'replay: the post-Endless UI export (Turn 35) replays bit-for-bit in headless Node, including the Endless turns', JSON.stringify(r2));
   // The planning-screen button downloads the same canonical export.
@@ -556,6 +556,10 @@ async function endlessReplay() {
   // A legacy version 3 export fails fast with an explicit version error, not 32 silent hash mismatches.
   writeFileSync(join(RAW, 'legacy-v3-export.json'), JSON.stringify({ ...done, version: 3 }));
   const r3 = nodeReplay(join(RAW, 'legacy-v3-export.json'));
+  // A legacy version 4 export (Pass 3: seat-keyed start tiles) fails the same way.
+  writeFileSync(join(RAW, 'legacy-v4-export.json'), JSON.stringify({ ...done, version: 4 }));
+  const r4 = nodeReplay(join(RAW, 'legacy-v4-export.json'));
+  ok(r4.ok === false && /Incompatible match export version 4: this build replays version 5 exports only/.test(r4.error ?? '') && !('mismatches' in r4), 'replay: a legacy version 4 export is rejected with an explicit incompatible-version error (no hash mismatch list)', JSON.stringify(r4));
   ok(r3.ok === false && /Incompatible match export version 3/.test(r3.error ?? '') && !('mismatches' in r3), 'replay: a legacy version 3 export is rejected with an explicit incompatible-version error (no hash mismatch list)', JSON.stringify(r3));
   ok(exp.hashes.length === 34, 'replay: the browser recorded a state hash for every turn including the Endless ones', String(exp.hashes.length));
   copyFileSync(join(RAW, 'endless-export.json'), join(MEDIA, '..', 'endless-export.json'));
@@ -613,7 +617,7 @@ async function endlessReplay() {
     await shot(p2, name === 'mobile' ? '30-endless-export-390x844' : '31-endless-export-1024x768');
     const dl2 = await downloadVia(p2, p2.locator('#h-drawer [data-act="export"]'), join(RAW, `endless-export-${name}.json`));
     const rr = nodeReplay(join(RAW, `endless-export-${name}.json`));
-    ok(dl2.exp.version === 4 && dl2.exp.endlessAt?.length === 1 && rr.ok && rr.mismatches.length === 0, `endless export (${name}): the ${vp.width}×${vp.height} UI download is version 4 with endlessAt and replays bit-for-bit`, JSON.stringify({ v: dl2.exp.version, at: dl2.exp.endlessAt, ...rr }));
+    ok(dl2.exp.version === 5 && dl2.exp.endlessAt?.length === 1 && rr.ok && rr.mismatches.length === 0, `endless export (${name}): the ${vp.width}×${vp.height} UI download is version 5 with endlessAt and replays bit-for-bit`, JSON.stringify({ v: dl2.exp.version, at: dl2.exp.endlessAt, ...rr }));
     await finishCtx(c2, `endless-${name}`);
   }
 }
@@ -867,6 +871,254 @@ async function reclaimAfterHours() {
   ok((await M(R)).hash === (await M(B)).hash, 'reclaim: the room still resolves normally once the other seat readies (both show Turn 2, same hash)');
   await finishCtx(cA, 'reclaim-A');
   await finishCtx(cB, 'reclaim-B');
+}
+
+
+// ═════════════════════════════ PASS 4: SPECTATOR TAB, ROOM EXPORT, 404 + LEAVE TOKENS ═════════════════════════════
+const tokenOf = (page, code) =>
+  page.evaluate((k) => ({ local: JSON.parse(localStorage.getItem(k) ?? 'null'), session: sessionStorage.getItem(k), now: Date.now() }), `mercadia:pid:${code}`);
+
+/** One two-seat planning turn through the real UI (Charter on Council turns), both seats readied. */
+async function playRoomTurn(pagesIn) {
+  const before = (await M(pagesIn[0])).turn;
+  for (const p of pagesIn) {
+    if ((await p.locator('.charter').count()) > 0) {
+      await p.locator('.charter').first().click();
+      await sleep(250);
+    }
+  }
+  await sleep(650);
+  for (const p of pagesIn) {
+    await endBtn(p).click();
+    await p.waitForFunction(() => window.__mercadia.view.ready === true || window.__mercadia.phase !== 'planning' || window.__mercadia.view.resolutions > 0, null, { timeout: 15000 }).catch(() => {});
+    await sleep(150);
+  }
+  await Promise.all(pagesIn.map((p) => p.waitForFunction((t) => window.__mercadia.turn !== t || window.__mercadia.phase === 'ended', before, { timeout: 20000 })));
+  await sleep(150);
+}
+
+async function exportFitState(page) {
+  return page.evaluate(() => {
+    const box = (b) => { if (!b) return null; const r = b.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), l: Math.round(r.left), r: Math.round(r.right), t: Math.round(r.top), b: Math.round(r.bottom), vis: getComputedStyle(b).visibility, label: b.getAttribute('aria-label') }; };
+    const d = document.querySelector('#h-drawer');
+    const plate = document.querySelector('#hud .plate');
+    return { plate: box(document.querySelector('#hud .plate [data-act="export"]')), drawer: box(d.querySelector('[data-act="export"]')), vw: innerWidth, vh: innerHeight, scrollX: document.documentElement.scrollWidth - innerWidth, drawerScrollX: d.scrollWidth - d.clientWidth, plateScrollX: plate.scrollWidth - plate.clientWidth };
+  });
+}
+const fitOk = (fit, mobile) => {
+  const inV = (q) => q && q.l >= 0 && q.r <= fit.vw && q.t >= 0 && q.b <= fit.vh && q.vis === 'visible';
+  const minSide = mobile ? 44 : 28;
+  const plateOk = mobile ? fit.plate && fit.plate.w === 0 : inV(fit.plate) && fit.plate.w >= minSide && fit.plate.h >= minSide;
+  return plateOk && inV(fit.drawer) && fit.drawer.h >= minSide && fit.scrollX <= 1 && fit.drawerScrollX <= 1 && fit.plateScrollX <= 1;
+};
+
+/** Item 1: a second tab of the SAME browser profile joins as a spectator and must never take over the persisted seat token. */
+async function spectatorTab() {
+  const { cA, cB, A, B, code } = await makeRoom('S1', 'S2', { videos: true });
+  const a0 = await M(A);
+  await queueRoastery(A, A0TileFor(a0.seat));
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  await sleep(500);
+  const before = await M(A);
+  const tokA = await tokenOf(A, code);
+  ok(before.seat >= 0 && before.ready === true && before.draft === 1 && !!tokA.local?.id, 'spectator tab: the seated tab holds seat ' + before.seat + ' with a one-order draft, Ready set and a persisted seat token', JSON.stringify({ seat: before.seat, draft: before.draft, ready: before.ready }));
+  // Second tab, same browser context (shared localStorage), opens the room URL while the seated tab is live.
+  const T = await openPage(cA, 'spectator-tab');
+  await T.goto(`${BASE}/?dev=1&room=${code}`);
+  await T.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(600);
+  const spec = await M(T);
+  ok(spec.seat === -1, 'spectator tab: the second same-profile tab joins as a spectator (seat −1)', JSON.stringify({ seat: spec.seat, status: spec.status }));
+  await shot(T, '32-spectator-tab-open');
+  // Stay open across several heartbeats (2 s each, stale after 6 s).
+  await sleep(9000);
+  const tokT = await tokenOf(T, code);
+  const tokA2 = await tokenOf(A, code);
+  ok(tokT.local?.id === tokA.local.id && tokT.session === null, 'spectator tab: after > 4 heartbeats the persisted seat token is still the seated tab\'s (spectator wrote nothing to localStorage or its own sessionStorage)', JSON.stringify({ same: tokT.local?.id === tokA.local.id, spectatorSession: tokT.session }));
+  ok(tokA2.local.tab === tokA.local.tab && tokA2.now - tokA2.local.beat < 4500, 'spectator tab: the seated tab alone keeps the heartbeat fresh', JSON.stringify({ sinceBeatMs: tokA2.now - tokA2.local.beat }));
+  await shot(A, '33-spectator-seated-tab-still-ready');
+  // Close the seated tab, then the spectator tab.
+  pages.find((r) => r.page === A).csp = await A.evaluate(() => window.__csp ?? []);
+  pages.find((r) => r.page === T).csp = await T.evaluate(() => window.__csp ?? []);
+  await A.close();
+  await sleep(1500);
+  await T.close();
+  // Reopen the room URL with a clock 26 hours ahead (a returning browser, hours later).
+  const R = await openPage(cA, 'reopen-26h');
+  await R.addInitScript((off) => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + off;
+  }, 26 * HOUR);
+  await R.goto(`${BASE}/?dev=1&room=${code}`);
+  await R.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(700);
+  const clock = await R.evaluate(() => Date.now() - performance.timeOrigin - performance.now());
+  const after = await M(R);
+  ok(clock > 25 * HOUR, 'spectator tab: the reopened tab really runs 26 hours ahead (Date.now shifted)', String(Math.round(clock / HOUR)));
+  ok(after.seat === before.seat && after.seat !== -1, 'spectator tab: +26 h later the returning browser reclaims the exact seat ' + before.seat + ' (not spectator −1)', JSON.stringify({ before: before.seat, after: after.seat }));
+  ok(after.ready === true && after.draft === before.draft && after.turn === before.turn && after.hash === before.hash, 'spectator tab: the reclaimed seat shows Ready: true, the same draft, turn and state hash', JSON.stringify({ draft: after.draft, ready: after.ready, turn: after.turn, hash: after.hash === before.hash }));
+  await shot(R, '34-spectator-reclaimed-after-26h');
+  await queueRoastery(B, B0TileFor((await M(B)).seat));
+  await endBtn(B).click();
+  await Promise.all([R, B].map((p) => p.waitForFunction(() => window.__mercadia.turn === 2, null, { timeout: 15000 })));
+  ok((await M(R)).hash === (await M(B)).hash, 'spectator tab: the other seat readying resolves Turn 1 for the reclaimed seat (same hash on both)');
+  await finishCtx(cA, 'spectator-tab-A');
+  await finishCtx(cB, 'spectator-tab-B');
+}
+
+/** Item 2: the authority-scoped Export match for a networked room (Final Edition and after Continue in Endless). */
+async function roomExport() {
+  const { cA, cB, A, B, code } = await makeRoom('X1', 'X2', { mode: 'Standard', videos: true });
+  // API contract on the live Worker/Durable Object.
+  const fresh = await (await fetch(`${BASE}/api/rooms`, { method: 'POST' })).json();
+  const r409 = await fetch(`${BASE}/api/rooms/${fresh.code}/export`);
+  ok(r409.status === 409 && /json/.test(r409.headers.get('content-type') ?? ''), 'room export API: a room whose match has not started answers HTTP 409', String(r409.status));
+  const r404 = await fetch(`${BASE}/api/rooms/ZZQX/export`);
+  ok(r404.status === 404, 'room export API: a missing room answers HTTP 404', String(r404.status));
+  const r405 = await fetch(`${BASE}/api/rooms/${code}/export`, { method: 'POST' });
+  ok(r405.status === 405, 'room export API: only GET is allowed (POST answers 405)', String(r405.status));
+  // Play the real Standard match to Final Edition through two browsers.
+  for (let i = 0; i < 40 && (await M(A)).phase !== 'ended'; i++) await playRoomTurn([A, B]);
+  const fin = await M(A);
+  ok(fin.phase === 'ended' && fin.turn === 33 && (await M(B)).phase === 'ended', 'room export: a real 32-turn networked Standard match reached Final Edition in two browsers', JSON.stringify({ turn: fin.turn, phase: fin.phase }));
+  await sleep(600);
+  await shot(A, '35-room-final-edition-export');
+  const api = await fetch(`${BASE}/api/rooms/${code}/export`);
+  const apiBody = await api.json();
+  ok(api.status === 200 && /^application\/json/.test(api.headers.get('content-type') ?? '') && api.headers.get('cache-control') === 'no-store' && /^attachment; filename="mercadia-[A-Z]{4}-\d+\.json"$/.test(api.headers.get('content-disposition') ?? ''), 'room export API: a started match answers 200 application/json, cache-control no-store and a clean attachment filename', `${api.status} ${api.headers.get('content-type')} ${api.headers.get('cache-control')} ${api.headers.get('content-disposition')}`);
+  // Credentials that must never appear in a download.
+  const ids = [];
+  for (const p of [A, B]) {
+    const t = await tokenOf(p, code);
+    ids.push(t.local?.id, t.session);
+  }
+  const secrets = ids.filter(Boolean);
+  ok(secrets.length >= 2, 'room export: the two seats\' playerIds were read from storage for the leak scan', String(secrets.length));
+  const leakFree = (text) => secrets.every((id) => !text.includes(id)) && !/playerId|"epoch|epochs|"ready|"draft|revision|token/i.test(text);
+  // Final Edition: the real Export match button, on both a host and a non-host seat.
+  const fa = await downloadVia(A, A.locator('.gazette').getByRole('button', { name: 'Export match' }), join(RAW, 'room-final-export-A.json'));
+  const fb = await downloadVia(B, B.locator('.gazette').getByRole('button', { name: 'Export match' }), join(RAW, 'room-final-export-B.json'));
+  const rf = nodeReplay(join(RAW, 'room-final-export-A.json'));
+  ok(fa.exp.version === 5 && fa.exp.log.length === 32 && !fa.exp.endlessAt && JSON.stringify(fa.exp) === JSON.stringify(fb.exp) && JSON.stringify(fa.exp) === JSON.stringify(apiBody) && /^mercadia-\d+\.json$/.test(fa.name), 'room export: the Final Edition Export match button downloads the authority\'s version 5 export (32 turns), identical for both seats and to GET /api/rooms/:code/export', JSON.stringify({ v: fa.exp.version, n: fa.exp.log.length, name: fa.name }));
+  ok(rf.ok && rf.turnsReplayed === 32 && rf.mismatches.length === 0 && rf.finalTurn === 33 && rf.phase === 'ended', 'room export: the Final Edition room export replays bit-for-bit with scripts/replay.ts (exit 0)', JSON.stringify(rf));
+  ok(leakFree(readFileSync(join(RAW, 'room-final-export-A.json'), 'utf8')) && Object.keys(fa.exp).sort().join() === 'config,hashes,log,version', 'room export: the Final Edition download holds zero playerIds, drafts, readiness epochs or credentials (only version, config, log, hashes)');
+  ok(fa.exp.hashes[31] === fin.hash, 'room export: the last exported hash equals the hash both browsers show on Final Edition', fin.hash);
+  // Continue in Endless (host), play two Endless turns.
+  await A.getByRole('button', { name: 'Continue in Endless' }).click();
+  await Promise.all([A, B].map((p) => p.waitForFunction(() => window.__mercadia.phase === 'planning' && window.__mercadia.turn === 33, null, { timeout: 15000 })));
+  await sleep(600);
+  await playRoomTurn([A, B]);
+  await playRoomTurn([A, B]);
+  await sleep(600);
+  const post = await M(A);
+  ok(post.turn === 35 && post.phase === 'planning' && (await M(B)).turn === 35, 'room export: Continue in Endless re-opened planning and two Endless turns resolved in both browsers (Turn 35)', JSON.stringify({ turn: post.turn }));
+  // A private, unapplied Turn 35 draft on A and B marked Ready: neither may leak into the export.
+  await queueRoastery(A, A0TileFor((await M(A)).seat));
+  await endBtn(B).click();
+  await B.waitForFunction(() => window.__mercadia.view.ready === true);
+  await A.keyboard.press('Escape').catch(() => {});
+  const open = await ensureDeltaOpen(A);
+  ok(deltaOpenOk(open), 'room export: the Endless Turn Delta drawer is open, opaque, on screen and on top (1440×900)', JSON.stringify(open));
+  const fit1 = await exportFitState(A);
+  ok(fitOk(fit1, false), 'room export (1440×900): Export match is reachable on the planning bar and in the Turn Delta drawer, on screen and tappable, with zero horizontal overflow', JSON.stringify(fit1));
+  await shot(A, '36-room-endless-turn-delta-export-1440x900');
+  const ed = await downloadVia(A, A.locator('#h-drawer [data-act="export"]'), join(RAW, 'room-endless-export.json'));
+  const re = nodeReplay(join(RAW, 'room-endless-export.json'));
+  const eraw = readFileSync(join(RAW, 'room-endless-export.json'), 'utf8');
+  ok(ed.exp.version === 5 && ed.exp.log.length === 34 && JSON.stringify(ed.exp.endlessAt) === '[32]' && ed.exp.hashes.length === 34, 'room export: the post-Endless Export match (Turn Delta drawer) is version 5 with endlessAt=[32] and 34 resolved batches', JSON.stringify({ v: ed.exp.version, n: ed.exp.log.length, at: ed.exp.endlessAt }));
+  ok(re.ok && re.turnsReplayed === 34 && re.mismatches.length === 0 && re.finalTurn === 35 && re.phase === 'planning' && re.endless === true, 'room export: the post-Endless room export replays bit-for-bit with scripts/replay.ts (exit 0), Endless turns included', JSON.stringify(re));
+  ok(leakFree(eraw) && !eraw.includes('"build"'), 'room export: the post-Endless download holds zero playerIds, readiness epochs or credentials and leaves out A\'s unapplied Turn 35 draft (a queued Roastery) and B\'s Ready flag', `bytes=${eraw.length} hasBuild=${eraw.includes('"build"')}`);
+  const pd = await downloadVia(A, A.locator('#hud .plate [data-act="export"]'), join(RAW, 'room-endless-export-plate.json'));
+  ok(JSON.stringify(pd.exp) === JSON.stringify(ed.exp), 'room export: the planning-bar Export match button downloads the same authority export');
+  const bd = await downloadVia(B, (await ensureDeltaOpen(B), B.locator('#h-drawer [data-act="export"]')), join(RAW, 'room-endless-export-B.json'));
+  ok(JSON.stringify(bd.exp) === JSON.stringify(ed.exp), 'room export: the other seat (B) downloads the identical export');
+  for (const v of [3, 4]) {
+    writeFileSync(join(RAW, `legacy-v${v}-room-export.json`), JSON.stringify({ ...ed.exp, version: v }));
+    const rl = nodeReplay(join(RAW, `legacy-v${v}-room-export.json`));
+    ok(rl.ok === false && new RegExp(`Incompatible match export version ${v}: this build replays version 5 exports only`).test(rl.error ?? '') && !('mismatches' in rl), `room export: a legacy version ${v} room export is rejected with an explicit incompatible-ruleset version error`, JSON.stringify(rl));
+  }
+  copyFileSync(join(RAW, 'room-endless-export.json'), join(MEDIA, '..', 'room-endless-export.json'));
+  // 1024×768 laptop
+  await A.setViewportSize({ width: 1024, height: 768 });
+  await sleep(600);
+  await ensureDeltaOpen(A);
+  const fit2 = await exportFitState(A);
+  ok(fitOk(fit2, false), 'room export (1024×768): Export match is reachable (planning bar + Turn Delta drawer), on screen, tappable, zero horizontal overflow', JSON.stringify(fit2));
+  await shot(A, '37-room-endless-export-1024x768');
+  const l = await downloadVia(A, A.locator('#h-drawer [data-act="export"]'), join(RAW, 'room-endless-export-1024.json'));
+  ok(JSON.stringify(l.exp) === JSON.stringify(ed.exp) && nodeReplay(join(RAW, 'room-endless-export-1024.json')).ok, 'room export (1024×768): the UI download is the same authority export and replays bit-for-bit');
+  await A.setViewportSize({ width: 1440, height: 900 });
+  // 390×844 phone (a spectator tab in a phone context: the export is public, so a spectator may download it too)
+  const cM = await ctx('room-X3', { mobile: true, video: false });
+  const M3 = await openPage(cM, 'phone');
+  await M3.goto(`${BASE}/?dev=1&room=${code}`);
+  await M3.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(800);
+  ok((await M(M3)).seat === -1, 'room export (390×844): the phone joins as a spectator of the Endless room');
+  const open3 = await ensureDeltaOpen(M3);
+  ok(deltaOpenOk(open3), 'room export (390×844): the Turn Delta sheet is open and on screen', JSON.stringify(open3));
+  const fit3 = await exportFitState(M3);
+  ok(fitOk(fit3, true), 'room export (390×844): Export match is reachable in the Turn Delta sheet, ≥ 44 px tall, on screen, zero horizontal overflow', JSON.stringify(fit3));
+  await shot(M3, '38-room-endless-export-390x844');
+  const md = await downloadVia(M3, M3.locator('#h-drawer [data-act="export"]'), join(RAW, 'room-endless-export-390.json'));
+  const mr = nodeReplay(join(RAW, 'room-endless-export-390.json'));
+  ok(JSON.stringify(md.exp) === JSON.stringify(ed.exp) && mr.ok && mr.turnsReplayed === 34, 'room export (390×844): the phone download is the same version 5 authority export and replays bit-for-bit', JSON.stringify(mr));
+  await finishCtx(cM, 'room-endless-export-phone');
+  await finishCtx(cA, 'room-endless-export-A');
+  await finishCtx(cB, 'room-endless-export-B');
+}
+
+/** Item 3: a confirmed 404 forgets only that room's token; explicit Leave keeps the token so the seat can be reclaimed. */
+async function tokens404AndLeave() {
+  const { cA, cB, A, B, code } = await makeRoom('L1', 'L2', { videos: true });
+  const a0 = await M(A);
+  await queueRoastery(A, A0TileFor(a0.seat));
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  await sleep(400);
+  const key = `mercadia:pid:${code}`;
+  const t0 = await tokenOf(A, code);
+  ok(!!t0.local?.id && t0.session === t0.local.id, 'leave: the seated tab holds the seat token in localStorage and sessionStorage', JSON.stringify({ has: !!t0.local?.id }));
+  // A confirmed 404 on a room that no longer exists (never created / purged): clears only that room's token.
+  const dead = 'ZZQW';
+  const P = await openPage(cA, 'dead-room');
+  await P.goto(`${BASE}/?dev=1`);
+  await P.evaluate(([d, k]) => {
+    const rec = JSON.stringify({ id: 'stale-id', at: 1, beat: 0, tab: 'old' });
+    localStorage.setItem(`mercadia:pid:${d}`, rec);
+    sessionStorage.setItem(`mercadia:pid:${d}`, 'stale-id');
+    localStorage.setItem(`mercadia:draft:${d}`, '{}');
+  }, [dead, key]);
+  const seeded = await P.evaluate(([d]) => !!localStorage.getItem(`mercadia:pid:${d}`) && !!sessionStorage.getItem(`mercadia:pid:${d}`), [dead]);
+  const res404 = await fetch(`${BASE}/api/rooms/${dead}`);
+  await P.goto(`${BASE}/?dev=1&room=${dead}`);
+  await P.waitForFunction(() => /No such room/.test(document.body.innerText) && window.__mercadia?.view.status.text === 'Room not found', null, { timeout: 20000 });
+  await sleep(500);
+  const after404 = await P.evaluate(([d, k]) => ({ deadLocal: localStorage.getItem(`mercadia:pid:${d}`), deadSession: sessionStorage.getItem(`mercadia:pid:${d}`), otherLocal: localStorage.getItem(k) }), [dead, key]);
+  await shot(P, '39-room-not-found-clears-only-that-token');
+  ok(seeded && res404.status === 404 && after404.deadLocal === null && after404.deadSession === null, 'room 404: a confirmed HTTP 404 removed the missing room\'s token from localStorage and sessionStorage', JSON.stringify({ http: res404.status, after404 }));
+  ok(!!after404.otherLocal && JSON.parse(after404.otherLocal).id === t0.local.id, 'room 404: another room\'s token (the live room) is left untouched in localStorage', JSON.stringify({ kept: !!after404.otherLocal }));
+  pages.find((r) => r.page === P).csp = await P.evaluate(() => window.__csp ?? []);
+  await P.close();
+  // Explicit Leave: confirm the dialog; the token stays (heartbeat released only).
+  await A.locator('#hud [data-act="leave"]').click();
+  await A.getByRole('button', { name: 'Leave room' }).click();
+  await A.getByRole('button', { name: /Play Solo Now/i }).waitFor({ timeout: 10000 });
+  await sleep(500);
+  const afterLeave = await tokenOf(A, code);
+  ok(!!afterLeave.local && afterLeave.local.id === t0.local.id && afterLeave.local.beat === 0, 'leave: explicit Leave keeps the seat token and only releases its heartbeat', JSON.stringify({ kept: !!afterLeave.local, beat: afterLeave.local?.beat }));
+  await shot(A, '40-after-explicit-leave-token-kept');
+  // Return to that room in a brand-new tab: the reserved seat is reclaimed with its Ready flag and draft.
+  const R = await openPage(cA, 'reclaim-after-leave');
+  await R.goto(`${BASE}/?dev=1&room=${code}`);
+  await R.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(700);
+  const back = await M(R);
+  ok(back.seat === a0.seat && back.ready === true && back.draft === 1, 'leave: returning to the room link reclaims the reserved seat ' + a0.seat + ' (Ready, one-order draft), never a spectator', JSON.stringify({ seat: back.seat, ready: back.ready, draft: back.draft }));
+  await shot(R, '41-seat-reclaimed-after-leave');
+  await finishCtx(cA, 'leave-and-reclaim-A');
+  await finishCtx(cB, 'leave-and-reclaim-B');
 }
 
 // ═════════════════════════════ RELAY ═════════════════════════════
@@ -1142,9 +1394,9 @@ async function idleRoom() {
   await finishCtx(cB, 'idle-B');
 }
 
-const sections = { solo, hotseat, mobile, room, relay: relayChecks, endless: endlessReplay, start: startBeside, reclaim: reclaimAfterHours };
+const sections = { solo, hotseat, mobile, room, relay: relayChecks, endless: endlessReplay, start: startBeside, reclaim: reclaimAfterHours, spectator: spectatorTab, roomexport: roomExport, tokens: tokens404AndLeave };
 const jobs = [];
-for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay', 'endless', 'start', 'reclaim']) {
+for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay', 'endless', 'start', 'reclaim', 'spectator', 'roomexport', 'tokens']) {
   if (ONLY.includes(name)) jobs.push(sections[name]().catch((e) => ok(false, `${name}: section crashed`, e.stack?.split('\n').slice(0, 3).join(' / '))));
 }
 if (ONLY.includes('idle')) {
@@ -1163,7 +1415,9 @@ const strict = pages.filter((p) => /^(solo|hotseat|mobile|idle|endless|start)[-/
 for (const rec of strict) ok(rec.issues.length === 0, `hygiene ${rec.tag}: zero console errors/warnings, page errors and failed requests`, rec.issues.slice(0, 4).join(' | '));
 const roomPages = pages.filter((p) => /^room-/.test(p.tag));
 for (const rec of roomPages) {
-  const bad = rec.issues.filter((i) => !/WebSocket|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|net::ERR_/i.test(i));
+  // The dead-room page loads a room that does not exist on purpose: its HTTP 404s and refused upgrade are the test.
+  const expected404 = /\/dead-room$/.test(rec.tag) ? /404|Not Found|Failed to load resource/i : null;
+  const bad = rec.issues.filter((i) => !/WebSocket|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|net::ERR_/i.test(i) && !(expected404 && expected404.test(i)));
   ok(bad.length === 0, `hygiene ${rec.tag}: zero console errors/warnings and page errors (deliberate offline/relay socket drops excluded)`, bad.slice(0, 4).join(' | '));
 }
 
