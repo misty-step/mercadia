@@ -1446,7 +1446,7 @@ for (const rec of roomPages) {
 
 // The legacy pages hit a refused upgrade (HTTP 410) on purpose: those load failures are the test, nothing else is excused.
 for (const rec of pages.filter((p) => /^legacy-chrome\//.test(p.tag))) {
-  const bad = rec.issues.filter((i) => !/\b410\b|http 409: \S+/export|Failed to load resource|WebSocket connection to .* failed|WebSocket|ERR_/i.test(i));
+  const bad = rec.issues.filter((i) => !/\b410\b|http 409: \S+\/export|Failed to load resource|WebSocket connection to .* failed|WebSocket|ERR_/i.test(i));
   ok(bad.length === 0, `hygiene ${rec.tag}: zero page errors and unexpected console errors (only the deliberate HTTP 410 refusal excused)`, bad.slice(0, 4).join(' | '));
 }
 
