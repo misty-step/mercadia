@@ -6,6 +6,7 @@
 //
 //   ONLY=solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,legacy,idle   run sections selectively
 //   FAST=1                                      shorten the 2-minute/5-minute idle checks to 20 s (NOT acceptance-grade)
+//   SMOKE_CONCURRENCY=n                         run at most n sections at once (default: all)
 //   MEDIA=/path                                 directory for videos and screenshots (default ~/chief-evidence/media)
 //
 // Every page must finish with zero console errors/warnings, zero page errors, zero
@@ -1455,15 +1456,24 @@ async function idleRoom() {
 }
 
 const sections = { solo, hotseat, mobile, room, relay: relayChecks, endless: endlessReplay, start: startBeside, reclaim: reclaimAfterHours, spectator: spectatorTab, roomexport: roomExport, tokens: tokens404AndLeave };
-const jobs = [];
-for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay', 'endless', 'start', 'reclaim', 'spectator', 'roomexport', 'tokens']) {
-  if (ONLY.includes(name)) jobs.push(sections[name]().catch((e) => ok(false, `${name}: section crashed`, e.stack?.split('\n').slice(0, 3).join(' / '))));
-}
+// SMOKE_CONCURRENCY=n runs at most n sections at once (default: all of them, as before). On a small machine the
+// 11 sections + 2 idle watchers can starve Chrome's screenshots; limiting concurrency changes nothing they assert.
+const CONCURRENCY = Math.max(1, Number(process.env.SMOKE_CONCURRENCY) || Infinity);
+const tasks = [];
 if (ONLY.includes('idle')) {
-  jobs.push(idleSolo().catch((e) => ok(false, 'idle solo crashed', e.message)));
-  jobs.push(idleRoom().catch((e) => ok(false, 'idle room crashed', e.message)));
+  tasks.push(() => idleSolo().catch((e) => ok(false, 'idle solo crashed', e.message)));
+  tasks.push(() => idleRoom().catch((e) => ok(false, 'idle room crashed', e.message)));
 }
-await Promise.all(jobs);
+for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay', 'endless', 'start', 'reclaim', 'spectator', 'roomexport', 'tokens']) {
+  if (ONLY.includes(name)) tasks.push(() => sections[name]().catch((e) => ok(false, `${name}: section crashed`, e.stack?.split('\n').slice(0, 3).join(' / '))));
+}
+{
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) await tasks[next++]();
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker));
+}
 
 // The legacy v2 boundary runs on its own wrangler dev + persisted Durable Objects (scripts/legacy-section.mjs),
 // after the other sections, so it never competes with them for the browser or the machine.
