@@ -31,7 +31,16 @@ npm run balance   # headless seeded AI matches through the real resolution code
 ```
 
 `npm run smoke` writes screenshots/videos to `~/chief-evidence/media` (`MEDIA=…`), `FAST=1` shortens the
-idle checks, `ONLY=solo,hotseat,mobile,room,relay,idle` selects sections.
+idle checks, `ONLY=solo,hotseat,mobile,room,relay,idle` selects sections. The `legacy` section starts its own
+`wrangler dev` (scripts/wrangler.legacy.jsonc, port 8791, throwaway persisted state) and needs `npm run build` first.
+
+## Rooms from older versions
+
+A room's Durable Object stores `room` and `game` rows in SQLite `kv` in every version. v3 classifies what it finds
+(`classifyStoredRoom`): a deployed v2 (real-time) room is *legacy* and is isolated read-only: `/api/rooms/:code`,
+`/export` and the WebSocket answer HTTP 410, its storage is never written, deleted or simulated, and the client
+offers **Create New Room**. A started room persisted before `exportVersion` existed keeps playing but answers
+`409 incompatible_ruleset` on export rather than labelling old hashes as version 5.
 
 ## Layout
 
