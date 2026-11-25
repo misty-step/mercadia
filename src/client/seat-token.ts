@@ -8,6 +8,10 @@
 // A second tab in the same browser shares localStorage. To stop it stealing the seat of a
 // tab that is still playing, the playing tab keeps a heartbeat next to the token: a fresh
 // tab only adopts a token whose heartbeat has gone quiet.
+//
+// A stored token has no age limit: an active room persists on the server indefinitely, so a
+// tab reopened days later reclaims its seat. The token is dropped only by forget() (the player
+// leaves, or the room no longer exists).
 
 export interface KV {
   getItem(key: string): string | null;
@@ -17,7 +21,6 @@ export interface KV {
 
 export const HEARTBEAT_MS = 2000;
 export const STALE_MS = 6000; // three missed beats: the tab that held the seat is gone
-export const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // rooms are purged after hours of silence
 
 interface Stored {
   id: string;
@@ -64,10 +67,6 @@ export class SeatToken {
     if (mine) return mine;
     const stored = this.readLocal();
     if (!stored) return null;
-    if (now - stored.at > TOKEN_TTL_MS) {
-      safe(() => this.local?.removeItem(this.key), undefined);
-      return null;
-    }
     const heldElsewhere = stored.tab !== this.tab && now - stored.beat < STALE_MS;
     return heldElsewhere ? null : stored.id;
   }

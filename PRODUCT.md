@@ -239,6 +239,10 @@ property. Seats take Initiative order from seat 1 on Turn 1. A House may constru
 that is orthogonally adjacent to its own property, or within one tile of one of its Factors after
 that turn's Movement step.
 
+Starting positions (Factor / Watch Company): Vermilion (7,1)/(8,1), Cobalt (10,1)/(11,1), Emerald
+(10,3)/(11,3), Marigold (4,1)/(3,1). Every unit has at least one open street tile beside it, so no
+House can be boxed in on Turn 1 while the others hold position.
+
 ### The district
 
 A 12×12 isometric canal district ringed by Streetcar Avenue along the harbor and bisected by the

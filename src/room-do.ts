@@ -1,21 +1,18 @@
 // MercadiaRoom — the authoritative multiplayer room. One SQLite-backed Durable Object per code.
 //
-// Sockets use the Hibernation API. While players sit in the lobby there is no timer, so the
-// object can sleep and costs nothing. A 100 ms interval exists only while a match is running
-// and at least one human is connected; it is cleared the moment that stops being true.
+// Sockets use the Hibernation API. There is no tick, no interval and no alarm-driven simulation:
+// the world changes only inside a resolution, which runs when the last human seat's Ready is
+// recorded. Messages are handled one at a time; the state, the canonical action log and the
+// summary are persisted in a single synchronous transaction before anything is sent.
 import { DurableObject } from 'cloudflare:workers';
-import { TICK_MS } from './shared/constants';
 import { parseClientMsg, type ServerMsg } from './shared/protocol';
-import { RoomCore, isRoomCode, type Outbound, type RoomState } from './shared/room';
-import type { GameState } from './shared/types';
+import { LEGACY_ROOM_MESSAGE } from './shared/constants';
+import { IDLE_PURGE_MS, RoomCore, classifyStoredRoom, isRoomCode, parseStoredTimestampMs, roomAlarmAction, type Outbound } from './shared/room';
 import type { Env } from './worker';
 
 interface Attachment {
   playerId: string | null;
 }
-
-const CHECKPOINT_EVERY = 50; // beats (5 s)
-const IDLE_PURGE_MS = 6 * 60 * 60 * 1000;
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), {
@@ -25,8 +22,8 @@ const json = (body: unknown, status = 200): Response =>
 
 export class MercadiaRoom extends DurableObject<Env> {
   private core: RoomCore | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private beats = 0;
+  /** True when this object holds a deployed v2 (real-time) room: its storage is read-only and never touched. */
+  private legacy = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -46,63 +43,41 @@ export class MercadiaRoom extends DurableObject<Env> {
   }
 
   private restore(): void {
-    const roomRaw = this.read('room');
-    if (!roomRaw) return;
+    const stored = classifyStoredRoom(this.read('room'), this.read('game'));
+    if (stored.kind === 'legacy') {
+      // A v2 room (or anything that is not a v3 record): isolated and left byte-for-byte as it is.
+      // No write, no delete, no simulation and no v2 tick is ever transplanted into the turn engine.
+      this.core = null;
+      this.legacy = true;
+      return;
+    }
+    if (stored.kind === 'empty') return;
     try {
-      const room = JSON.parse(roomRaw) as RoomState;
-      const gameRaw = this.read('game');
-      const game = gameRaw ? (JSON.parse(gameRaw) as GameState) : null;
-      this.core = new RoomCore(room.code, room.seed, { room, game });
+      const core = new RoomCore(stored.room.code, stored.room.seed, { room: stored.room, game: stored.game });
       // Connection flags come from the sockets that actually survived.
       const live = new Set<string>();
       for (const ws of this.ctx.getWebSockets()) {
         const id = (ws.deserializeAttachment() as Attachment | null)?.playerId;
         if (id) live.add(id);
       }
-      for (const seat of this.core.room.seats) seat.connected = !!seat.playerId && live.has(seat.playerId);
-      this.syncTimer();
+      for (const seat of core.room.seats) seat.connected = !!seat.playerId && live.has(seat.playerId);
+      this.core = core;
     } catch {
+      // Stored but unusable: fail closed into the same read-only isolation as a legacy room. Never a 500.
       this.core = null;
+      this.legacy = true;
     }
   }
 
-  private saveRoom(): void {
-    if (this.core) this.write('room', JSON.stringify(this.core.room));
-  }
-
-  private saveGame(): void {
-    if (this.core?.game) this.write('game', JSON.stringify(this.core.game));
-  }
-
-  // ── Simulation loop ──
-
-  private syncTimer(): void {
-    const want = !!this.core?.running;
-    if (want && this.timer === null) {
-      this.timer = setInterval(() => this.beat(), TICK_MS);
-    } else if (!want && this.timer !== null) {
-      clearInterval(this.timer);
-      this.timer = null;
-      this.saveRoom();
-      this.saveGame(); // checkpoint on the way to idle
-    }
-  }
-
-  private beat(): void {
+  /** One transaction: room (drafts, Ready flags, epochs, log, summary, last resolved turn) and the world. */
+  private persist(): void {
     const core = this.core;
     if (!core) return;
-    try {
-      const before = core.room.status;
-      this.dispatch(core.step());
-      if (++this.beats % CHECKPOINT_EVERY === 0) this.saveGame();
-      if (core.room.status !== before) {
-        this.saveRoom();
-        this.saveGame();
-      }
-    } catch (err) {
-      console.error('room beat failed', err);
-    }
-    this.syncTimer();
+    this.ctx.storage.transactionSync(() => {
+      this.write('room', JSON.stringify(core.room));
+      if (core.game) this.write('game', JSON.stringify(core.game));
+      this.write('touched', String(Date.now()));
+    });
   }
 
   // ── Sockets ──
@@ -138,20 +113,38 @@ export class MercadiaRoom extends DurableObject<Env> {
     if (url.pathname === '/init' && request.method === 'POST') {
       const code = url.searchParams.get('code') ?? '';
       if (!isRoomCode(code)) return json({ ok: false, error: 'Bad room code' }, 400);
-      if (this.core) return json({ ok: false, error: 'Room exists' }, 409);
+      if (this.core || this.legacy) return json({ ok: false, error: 'Room exists' }, 409);
       const seed = crypto.getRandomValues(new Uint32Array(1))[0];
       this.core = new RoomCore(code, seed);
-      this.saveRoom();
+      this.persist();
       await this.ctx.storage.setAlarm(Date.now() + IDLE_PURGE_MS);
       return json({ ok: true, code }, 201);
     }
 
     if (url.pathname === '/summary') {
+      if (this.legacy) return json({ ok: false, legacy: true, code: 'legacy_room', error: LEGACY_ROOM_MESSAGE }, 410);
       if (!this.core) return json({ ok: false, error: 'No such room' }, 404);
       return json({ ok: true, ...this.core.summary() });
     }
 
+    if (url.pathname === '/export') {
+      if (this.legacy) return json({ ok: false, legacy: true, code: 'legacy_room', error: 'Legacy v2 rooms cannot be exported in v3.' }, 410);
+      if (!this.core) return json({ ok: false, error: 'No such room' }, 404);
+      const res = this.core.tryExport();
+      if (!res.ok) return json(res.code === 'not_started' ? { ok: false, error: res.error } : { ok: false, code: res.code, error: res.error }, 409);
+      const exp = res.export;
+      return new Response(JSON.stringify(exp, null, 2), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+          'content-disposition': `attachment; filename="mercadia-${this.core.room.code}-${exp.config.seed}.json"`,
+        },
+      });
+    }
+
     if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+      if (this.legacy) return json({ ok: false, legacy: true, code: 'legacy_room', error: LEGACY_ROOM_MESSAGE }, 410);
       if (!this.core) return json({ ok: false, error: 'No such room' }, 404);
       const pair = new WebSocketPair();
       const client = pair[0];
@@ -172,7 +165,12 @@ export class MercadiaRoom extends DurableObject<Env> {
     }
     const msg = parseClientMsg(typeof data === 'string' ? data : null);
     if (!msg) {
-      this.sendTo(ws, { t: 'error', err: 'Malformed message' });
+      this.sendTo(ws, { t: 'error', code: 'malformed', message: 'Malformed message' });
+      return;
+    }
+    // Heartbeats are transport only: they never reach the core.
+    if (msg.t === 'ping') {
+      this.sendTo(ws, { t: 'pong', at: msg.at });
       return;
     }
     const att = (ws.deserializeAttachment() as Attachment | null) ?? { playerId: null };
@@ -193,21 +191,18 @@ export class MercadiaRoom extends DurableObject<Env> {
         }
       }
       ws.serializeAttachment({ playerId: res.playerId } satisfies Attachment);
+      this.persist();
       this.dispatch(res.out);
-      this.saveRoom();
-      this.syncTimer();
       return;
     }
 
     if (!att.playerId) {
-      this.sendTo(ws, { t: 'error', err: 'Say hello first' });
+      this.sendTo(ws, { t: 'error', code: 'hello', message: 'Say hello first' });
       return;
     }
-    const before = core.room.status + core.room.matchNo;
-    this.dispatch(core.handle(att.playerId, msg));
-    if (msg.t !== 'cmd' && msg.t !== 'ping') this.saveRoom();
-    if (core.room.status + core.room.matchNo !== before) this.saveGame();
-    this.syncTimer();
+    const out = core.handle(att.playerId, msg);
+    this.persist();
+    this.dispatch(out);
   }
 
   private drop(ws: WebSocket): void {
@@ -218,9 +213,9 @@ export class MercadiaRoom extends DurableObject<Env> {
     for (const other of this.ctx.getWebSockets()) {
       if (other !== ws && (other.deserializeAttachment() as Attachment | null)?.playerId === att.playerId) return;
     }
-    this.dispatch(this.core.disconnect(att.playerId));
-    this.saveRoom();
-    this.syncTimer();
+    const out = this.core.disconnect(att.playerId);
+    this.persist();
+    this.dispatch(out);
   }
 
   override async webSocketClose(ws: WebSocket, code: number, _reason: string, _wasClean: boolean): Promise<void> {
@@ -236,14 +231,39 @@ export class MercadiaRoom extends DurableObject<Env> {
     this.drop(ws);
   }
 
-  /** Rooms nobody has touched for hours are erased. */
+  /**
+   * Housekeeping only (never simulation): unstarted lobbies and finished rooms nobody has touched
+   * for hours are erased. A match in progress is never erased — its seats wait for their players.
+   */
   override async alarm(): Promise<void> {
-    if (this.ctx.getWebSockets().length > 0) {
-      await this.ctx.storage.setAlarm(Date.now() + IDLE_PURGE_MS);
+    // Fail closed: anything that is not a positively validated v3 room is left byte-for-byte as it is.
+    // No delete, no write and no reschedule, whether it is a deployed v2 room, a corrupt save, or empty.
+    if (this.legacy) return;
+    // SQLite is the authority: the record is re-validated at the moment of the decision, so a save that was
+    // damaged after this object woke can never authorize deleteAll().
+    const stored = classifyStoredRoom(this.read('room'), this.read('game'));
+    if (stored.kind === 'legacy') {
+      this.legacy = true;
+      this.core = null;
       return;
     }
-    if (this.timer !== null) clearInterval(this.timer);
-    this.timer = null;
+    if (stored.kind !== 'v3' || !this.core) return;
+    // Cross-record anomaly (a lobby that carries a world) is classified legacy above, never purged.
+    const now = Date.now();
+    const rawTouched = this.read('touched');
+    const touched = parseStoredTimestampMs(rawTouched, now);
+    // A recorded but malformed or out-of-range touched time is a corrupt clock, not an idle room: leave every row
+    // as it is and do not reschedule a purge loop.
+    if (rawTouched !== null && touched === null) return;
+    const idle = touched === null ? 0 : Math.max(0, now - touched);
+    const sockets = this.ctx.getWebSockets().length;
+    // Purge needs a recorded, valid `touched` (idle time that is not positively known never counts as idle) and
+    // a room + game pair that is positively an idle lobby or a finished match.
+    if (touched === null || roomAlarmAction(stored.room, stored.game, sockets, idle) === 'keep') {
+      const wait = stored.room.status === 'playing' || sockets > 0 ? IDLE_PURGE_MS : Math.max(60_000, IDLE_PURGE_MS - idle);
+      await this.ctx.storage.setAlarm(now + wait);
+      return;
+    }
     this.core = null;
     await this.ctx.storage.deleteAll();
   }

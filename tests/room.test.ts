@@ -1,846 +1,857 @@
-import { describe, expect, it, vi } from 'vitest';
-import { AI_ORDER, AI_PERSONAS, CIVICS, COUNCIL_BEATS, LOAN_STEP, MILESTONES, MODES, SHOPS, START_CASH } from '../src/shared/constants';
-import { OPENINGS } from '../src/shared/ai';
-import { idx } from '../src/shared/map';
-import { CityView, parseClientMsg, type ClientMsg, type ServerMsg, type Snap } from '../src/shared/protocol';
-import { ledgerCashChange } from '../src/shared/sim';
-import { ROOM_CODE_ALPHABET, RoomCore, SPEEDS, cleanName, isRoomCode, makeRoomCode, type Outbound } from '../src/shared/room';
-import type { GameState } from '../src/shared/types';
-import { clone } from './helpers';
+import { describe, expect, it } from 'vitest';
+import { stateHash } from '../src/shared/game';
+import { parseClientMsg, type ClientMsg, type ServerMsg } from '../src/shared/protocol';
+import { IDLE_PURGE_MS, RoomCore, cleanName, isRoomCode, makeRoomCode, roomAlarmAction } from '../src/shared/room';
+import { replayMatch } from '../src/shared/replay';
+import type { Order } from '../src/shared/types';
+import { RoomHarness, playerOf, startedRoom, turnOf } from './harness';
 
-// Whole seeded matches are played in here: leave room for a busy machine.
-vi.setConfig({ testTimeout: 30000, hookTimeout: 60000 });
+const borrow: Order[] = [{ t: 'borrow' }];
+const snap = (h: RoomHarness) => JSON.stringify({ room: h.core.room, game: h.core.game });
+const only = <T extends ServerMsg['t']>(msgs: ServerMsg[], t: T) => msgs.filter((m): m is Extract<ServerMsg, { t: T }> => m.t === t);
+const hashNow = (h: RoomHarness) => stateHash(h.core.game!);
 
-type Msg<T extends ServerMsg['t']> = Extract<ServerMsg, { t: T }>;
-
-/** Messages of one type, optionally only those addressed to one recipient ('*' = broadcast). */
-function pick<T extends ServerMsg['t']>(out: Outbound[], t: T, to?: string): Msg<T>[] {
-  return out.filter((o) => o.msg.t === t && (to === undefined || o.to === to)).map((o) => o.msg as Msg<T>);
+/** Mark `id` Ready at its acknowledged revision/epoch (the first press of a turn). */
+function ready(h: RoomHarness, id: string, rev = 0, epoch = 0) {
+  return h.send(id, { t: 'ready', turn: turnOf(h), revision: rev, epoch });
 }
 
-function makeRoom(seed = 1234) {
-  const core = new RoomCore('QRST', seed);
-  let issued = 0;
-  const newId = (): string => `pid-${++issued}`;
-  return {
-    core,
-    join: (name?: string, playerId?: string | null) => core.join(playerId, name, newId),
-    issued: () => issued,
-  };
-}
+describe('lobby', () => {
+  it('creates a lobby with the host seat open and three AI seats', () => {
+    const c = new RoomCore('QRST', 1);
+    expect(c.lobby()).toMatchObject({ code: 'QRST', status: 'lobby', mode: 'standard', host: 0 });
+    expect(c.lobby().seats.map((s) => s.kind)).toEqual(['open', 'ai', 'ai', 'ai']);
+    expect(c.lobby().seats.filter((s) => s.kind === 'ai').map((s) => s.persona)).toEqual(['vesper', 'aurelia', 'orson']);
+    expect(c.game).toBeNull();
+  });
 
-/** A room with `n` humans seated in order; ids[0] is the host. */
-function seated(n: number, seed = 1234) {
-  const room = makeRoom(seed);
-  const ids = Array.from({ length: n }, (_, i) => room.join(`Player ${i + 1}`).playerId);
-  return { ...room, ids };
-}
+  it('room codes are four capital letters', () => {
+    let k = 0.1;
+    const code = makeRoomCode(() => (k = (k * 7919) % 1));
+    expect(isRoomCode(code)).toBe(true);
+    for (const bad of ['', 'abcd', 'ABC', 'ABCDE', 'AB1D', 'AB D']) expect(isRoomCode(bad)).toBe(false);
+  });
 
-/** A room with `n` humans whose match has started. */
-function started(n: number, opts: { mode?: 'blitz' | 'standard' | 'endless'; speed?: number; seed?: number } = {}) {
-  const room = seated(n, opts.seed);
-  const [host] = room.ids;
-  if (opts.mode) expect(room.core.handle(host, { t: 'mode', mode: opts.mode })).toHaveLength(1);
-  if (opts.speed) expect(pick(room.core.handle(host, { t: 'speed', speed: opts.speed }), 'reject')).toEqual([]);
-  expect(pick(room.core.handle(host, { t: 'start' }), 'reject')).toEqual([]);
-  return { ...room, host, game: (): GameState => room.core.game as GameState };
-}
+  it('cleans names', () => {
+    expect(cleanName('  <b>Ada</b>\n  Lovelace  ', 'x')).toBe('bAda/b Lovelace');
+    expect(cleanName('<>', 'Fallback')).toBe('Fallback');
+    expect(cleanName(42, 'Fallback')).toBe('Fallback');
+    expect(Array.from(cleanName('x'.repeat(40), 'f'))).toHaveLength(16);
+    expect(cleanName('a\u0000b', 'f')).toBe('ab');
+  });
 
-const rejectTo = (out: Outbound[], id: string): string | undefined => {
-  expect(out).toHaveLength(1);
-  expect(out[0].to).toBe(id);
-  expect(out[0].msg.t).toBe('reject');
-  return (out[0].msg as Msg<'reject'>).err;
-};
+  it('seats humans in order, host first; the fifth is a spectator', () => {
+    const h = new RoomHarness(1);
+    const a = h.join('A');
+    const b = h.join('B');
+    const c = h.join('C');
+    const d = h.join('D');
+    const e = h.join('E');
+    expect([a.seat, b.seat, c.seat, d.seat, e.seat]).toEqual([0, 1, 2, 3, -1]);
+    expect(h.core.room.host).toBe(0);
+    expect(h.core.lobby().seats.map((s) => s.kind)).toEqual(['human', 'human', 'human', 'human']);
+    const w = only(h.take(a.playerId), 'welcome')[0];
+    expect(w).toMatchObject({ seat: 0, player: -1, playerId: a.playerId });
+  });
 
-describe('Room codes and names', () => {
-  it('makes four-letter uppercase room codes and validates them', () => {
-    let k = 0;
-    const seq = [0, 0.5, 0.999999, 0.25, 0.75, 0.1, 0.9, 0.33];
-    const random = (): number => seq[k++ % seq.length];
+  it('only the host sets mode, seats and starts, and a start needs two seated Houses', () => {
+    const h = new RoomHarness(1);
+    const a = h.join('A').playerId;
+    const b = h.join('B').playerId;
+    h.take(a);
+    h.take(b);
+    for (const m of [{ t: 'mode', mode: 'blitz' }, { t: 'start' }, { t: 'aifill', on: false }, { t: 'seat', seat: 3, ai: false }] as ClientMsg[]) {
+      h.send(b, m);
+      expect(only(h.take(b), 'error')[0]).toMatchObject({ code: 'host' });
+    }
+    expect(h.core.room.status).toBe('lobby');
+    h.send(a, { t: 'seat', seat: 1, ai: false }); // a seat taken by a human cannot be changed
+    expect(only(h.take(a), 'error')[0]).toMatchObject({ code: 'lobby' });
+    // Pure PvP with a lone human cannot start
+    const solo = new RoomHarness(2);
+    const s = solo.join('Solo').playerId;
+    solo.send(s, { t: 'aifill', on: false });
+    solo.send(s, { t: 'start' });
+    expect(only(solo.take(s), 'error').pop()).toMatchObject({ code: 'lobby', message: 'Add an AI rival or invite a player first' });
+    expect(solo.core.room.status).toBe('lobby');
+  });
+
+  it('Houses are picked in the lobby and swapped, never doubled', () => {
+    const h = new RoomHarness(1);
+    const a = h.join('A').playerId;
+    const b = h.join('B').playerId;
+    h.send(a, { t: 'lobby', house: 1 });
+    expect(h.core.room.seats[1].house).toBe(1);
+    expect(only(h.take(a), 'error')).toHaveLength(1); // B is human on House 1: taken
+    h.send(a, { t: 'lobby', house: 3 });
+    expect(h.core.room.seats[0].house).toBe(3);
+    expect(h.core.room.seats[3].house).toBe(0); // the AI swapped
+    h.send(b, { t: 'lobby', house: 9 });
+    expect(only(h.take(b), 'error').pop()).toMatchObject({ message: 'Unknown House' });
+    const houses = h.core.room.seats.map((s) => s.house).sort();
+    expect(houses).toEqual([0, 1, 2, 3]);
+  });
+
+  it('the next connected human becomes host when the creator leaves the lobby', () => {
+    const h = new RoomHarness(1);
+    const a = h.join('A').playerId;
+    h.join('B');
+    h.disconnect(a);
+    expect(h.core.room.host).toBe(1);
+    expect(h.core.room.seats[0]).toMatchObject({ kind: 'open', playerId: null }); // the vacated host seat reopens
+  });
+});
+
+describe('starting a match', () => {
+  it('sends every seat its welcome and its own private state; spectators get no private view', () => {
+    const { h, ids } = startedRoom(2);
+    expect(h.core.room.status).toBe('playing');
+    expect(h.core.game!.players.map((p) => p.kind)).toEqual(['human', 'human', 'ai', 'ai']);
+    for (const [i, id] of ids.entries()) {
+      h.send(id, { t: 'hello' }); // a hello on a live socket is inert
+      const st = h.core.stateFor(id)[0] as Extract<ServerMsg, { t: 'state' }>;
+      expect(st).toMatchObject({ t: 'state', turn: 1, phase: 'planning', player: i, own: { draft: [], revision: 0, ready: false, epoch: 0 } });
+      expect(st.hash).toBe(hashNow(h));
+      expect(st.summary).toBeNull();
+      expect(st.seats).toHaveLength(4);
+      expect(st.seats.filter((s) => s.ready).map((s) => s.kind)).toEqual(['ai', 'ai']);
+    }
+    const sp = h.join('Spec');
+    expect(sp.seat).toBe(-1);
+    const st = only(h.take(sp.playerId), 'state')[0];
+    expect(st.own).toBeNull();
+    expect(st.player).toBe(-1);
+  });
+
+  it('a room that has started refuses lobby changes and a second start', () => {
+    const { h, ids } = startedRoom(2);
+    for (const m of [{ t: 'start' }, { t: 'mode', mode: 'standard' }, { t: 'lobby', name: 'x' }] as ClientMsg[]) {
+      h.send(ids[0], m);
+      expect(only(h.take(ids[0]), 'error')[0]).toMatchObject({ code: 'lobby' });
+    }
+    expect(turnOf(h)).toBe(1);
+  });
+});
+
+describe('drafts', () => {
+  it('are private to the seat: acknowledged to it, never sent to rivals or spectators', () => {
+    const { h, ids } = startedRoom(2);
+    const spec = h.join('Spec').playerId;
+    h.take(spec);
+    h.take(ids[1]);
+    h.send(ids[0], { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    expect(only(h.take(ids[0]), 'draftAck')).toEqual([{ t: 'draftAck', turn: 1, revision: 1 }]);
+    expect(h.take(ids[1])).toEqual([]);
+    expect(h.take(spec)).toEqual([]);
+    // The draft is only ever shown back to its own seat.
+    const own = (h.core.stateFor(ids[0])[0] as Extract<ServerMsg, { t: 'state' }>).own!;
+    expect(own.draft).toEqual(borrow);
+    expect(JSON.stringify(h.core.stateFor(ids[1]))).not.toContain('borrow');
+    expect(JSON.stringify(h.core.stateFor(spec))).not.toContain('borrow');
+  });
+
+  it('keep only the newest revision: older and duplicate revisions are never applied', () => {
+    const { h, ids } = startedRoom(2);
+    const A = ids[0];
+    const rev = (r: number, orders: Order[]) => h.send(A, { t: 'draft', turn: 1, revision: r, orders });
+    const ack = () => only(h.take(A), 'draftAck').pop()!.revision;
+    rev(1, borrow);
+    expect(ack()).toBe(1);
+    rev(1, [{ t: 'repay' }]); // duplicate revision with different content: not applied
+    expect(ack()).toBe(1);
+    expect(h.core.room.drafts[0].orders).toEqual(borrow);
+    rev(3, [{ t: 'borrow' }, { t: 'borrow' }]); // skipping ahead is fine
+    expect(ack()).toBe(3);
+    rev(2, []); // an older revision arrives late
+    expect(ack()).toBe(3);
+    expect(h.core.room.drafts[0].orders).toHaveLength(2);
+    rev(0, []);
+    expect(ack()).toBe(3);
+    expect(h.core.room.drafts[0].revision).toBe(3);
+  });
+
+  it('naming any turn other than the current one is rejected as offTurnDraft and never stored', () => {
+    const { h, ids } = startedRoom(2);
+    const A = ids[0];
+    for (const turn of [0, 2, 3, 99, -1]) {
+      h.send(A, { t: 'draft', turn, revision: 5, orders: borrow });
+      expect(h.take(A)).toEqual([{ t: 'error', code: 'offTurnDraft', message: `Turn ${turn} is not the current turn`, turn: 1 }]);
+    }
+    expect(h.core.room.drafts[0]).toEqual({ orders: [], revision: 0 });
+    // After a resolution, a draft for the resolved turn is off-turn too
+    h.send(A, { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    ready(h, A, 1, 0);
+    ready(h, ids[1]);
+    expect(turnOf(h)).toBe(2);
+    h.take(A);
+    h.send(A, { t: 'draft', turn: 1, revision: 2, orders: borrow });
+    expect(only(h.take(A), 'error')[0]).toMatchObject({ code: 'offTurnDraft', turn: 2 });
+    expect(h.core.room.drafts[0]).toEqual({ orders: [], revision: 0 });
+  });
+
+  it('a Ready seat cannot edit without cancelling first (readyLocked)', () => {
+    const { h, ids } = startedRoom(2);
+    const A = ids[0];
+    h.send(A, { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    ready(h, A, 1, 0);
+    h.take(A);
+    h.send(A, { t: 'draft', turn: 1, revision: 2, orders: [] });
+    expect(h.take(A)).toEqual([{ t: 'error', code: 'readyLocked', message: 'Cancel Ready before editing your draft', turn: 1, revision: 1, epoch: 1 }]);
+    expect(h.core.room.drafts[0].orders).toEqual(borrow);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 1 });
+    h.send(A, { t: 'draft', turn: 1, revision: 2, orders: [] });
+    expect(only(h.take(A), 'draftAck').pop()).toEqual({ t: 'draftAck', turn: 1, revision: 2 });
+  });
+
+  it('are refused before a match runs, from spectators, and after it ends', () => {
+    const h = new RoomHarness(1);
+    const a = h.join('A').playerId;
+    h.send(a, { t: 'draft', turn: 1, revision: 1, orders: [] });
+    expect(only(h.take(a), 'error').pop()).toMatchObject({ code: 'notPlaying' });
+    const { h: r, ids } = startedRoom(2);
+    const sp = r.join('S').playerId;
+    r.take(sp);
+    r.send(sp, { t: 'draft', turn: 1, revision: 1, orders: [] });
+    r.send(sp, { t: 'ready', turn: 1, revision: 0, epoch: 0 });
+    r.send(sp, { t: 'cancelReady', turn: 1, epoch: 0 });
+    expect(only(r.take(sp), 'error').map((e) => e.code)).toEqual(['spectator', 'spectator', 'spectator']);
+    expect(r.core.room.ready.some(Boolean)).toBe(false);
+    void ids;
+  });
+});
+
+describe('readiness epochs', () => {
+  it('start at 0, rise by exactly 1 per accepted Ready / Cancel Ready, and the Ready flag follows', () => {
+    const { h, ids } = startedRoom(2);
+    const [A] = ids;
+    const acks = () => only(h.take(A), 'readyAck');
+    ready(h, A);
+    expect(acks()).toEqual([{ t: 'readyAck', turn: 1, ready: true, epoch: 1 }]);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 1 });
+    expect(acks()).toEqual([{ t: 'readyAck', turn: 1, ready: false, epoch: 2 }]);
+    // A fresh, deliberate Ready on the unchanged draft (same revision) at the new epoch is recorded.
+    ready(h, A, 0, 2);
+    expect(acks()).toEqual([{ t: 'readyAck', turn: 1, ready: true, epoch: 3 }]);
+    expect(h.core.room.epochs[0]).toBe(3);
+    expect(h.core.room.ready[0]).toBe(true);
+  });
+
+  it('duplicate, delayed or replayed Ready / Cancel Ready change nothing and are answered with the current flag and epoch', () => {
+    const { h, ids } = startedRoom(2);
+    const [A] = ids;
+    ready(h, A); // ready@1
+    h.take(A);
+    const before = snap(h);
+    ready(h, A); // duplicate press: same epoch 0
+    expect(h.take(A)).toEqual([{ t: 'readyAck', turn: 1, ready: true, epoch: 1 }]);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 0 }); // stale cancel
+    expect(h.take(A)).toEqual([{ t: 'readyAck', turn: 1, ready: true, epoch: 1 }]);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 7 }); // future epoch
+    expect(h.take(A)).toEqual([{ t: 'readyAck', turn: 1, ready: true, epoch: 1 }]);
+    expect(snap(h)).toBe(before);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 1 }); // -> planning@2
+    h.take(A);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 1 }); // duplicate cancel never un-readies a re-readied seat
+    expect(h.take(A)).toEqual([{ t: 'readyAck', turn: 1, ready: false, epoch: 2 }]);
+    ready(h, A, 0, 2); // ready@3
+    h.take(A);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 1 }); // the old cancel, delayed
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 1 });
+    expect(only(h.take(A), 'readyAck')).toEqual([
+      { t: 'readyAck', turn: 1, ready: true, epoch: 3 },
+      { t: 'readyAck', turn: 1, ready: true, epoch: 3 },
+    ]);
+    ready(h, A, 0, 0); // the first Ready, replayed: a stale Ready never re-readies
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 3 });
+    h.take(A);
+    ready(h, A, 0, 0); // ... never re-readies a seat that has cancelled
+    ready(h, A, 0, 2);
+    expect(only(h.take(A), 'readyAck')).toEqual([
+      { t: 'readyAck', turn: 1, ready: false, epoch: 4 },
+      { t: 'readyAck', turn: 1, ready: false, epoch: 4 },
+    ]);
+    expect(h.core.room.ready[0]).toBe(false);
+    expect(h.core.room.epochs[0]).toBe(4);
+  });
+
+  it('a Ready for an unacknowledged draft revision is rejected as staleDraft: nothing recorded, epoch unchanged', () => {
+    const { h, ids } = startedRoom(2);
+    const [A] = ids;
+    h.send(A, { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    h.take(A);
+    const before = snap(h);
+    for (const rev of [0, 2, 5]) {
+      ready(h, A, rev, 0);
+      expect(h.take(A)).toEqual([{ t: 'error', code: 'staleDraft', message: 'Draft not saved yet — Ready not recorded', turn: 1, revision: 1, epoch: 0 }]);
+    }
+    expect(snap(h)).toBe(before);
+    expect(h.core.room.ready[0]).toBe(false);
+    ready(h, A, 1, 0); // acknowledged revision: recorded
+    expect(only(h.take(A), 'readyAck')[0]).toMatchObject({ ready: true, epoch: 1 });
+  });
+
+  it('public status shows the Ready flag, never the epoch', () => {
+    const { h, ids } = startedRoom(2);
+    const spec = h.join('Spec').playerId;
+    h.take(ids[1]);
+    h.take(spec);
+    ready(h, ids[0]);
+    const seatsMsgs = [...h.take(ids[1]), ...h.take(spec)];
+    expect(seatsMsgs.map((m) => m.t)).toEqual(['seats', 'seats']);
+    for (const m of seatsMsgs) {
+      expect(JSON.stringify(m)).not.toMatch(/epoch|revision|draft/);
+      expect((m as Extract<ServerMsg, { t: 'seats' }>).seats.map((s) => s.ready)).toEqual([true, false, true, true]);
+    }
+  });
+
+  it('a Charter is required on Council turns: Ready is refused with a prompt until one is drafted', () => {
+    const { h, ids } = startedRoom(1, 'blitz');
+    const [A] = ids;
+    for (let t = 1; t < 5; t++) {
+      ready(h, A);
+      expect(turnOf(h)).toBe(t + 1);
+    }
+    expect(h.core.game!.council).not.toBeNull();
+    h.take(A);
+    ready(h, A);
+    expect(h.take(A)).toEqual([{ t: 'error', code: 'needCharter', message: 'Choose a Charter', turn: 5, revision: 0, epoch: 0 }]);
+    expect(h.core.room.epochs[0]).toBe(0);
+    const key = h.core.game!.council!.offers[0][0];
+    h.send(A, { t: 'draft', turn: 5, revision: 1, orders: [{ t: 'charter', key }] });
+    ready(h, A, 1, 0);
+    expect(turnOf(h)).toBe(6);
+    expect(h.core.game!.players[0].charters).toEqual([key]);
+  });
+});
+
+describe('resolution', () => {
+  it('happens exactly once, at the moment the last human seat is Ready, and sends one message with state and summary together', () => {
+    const { h, ids } = startedRoom(2);
+    const spec = h.join('Spec').playerId;
+    for (const id of [...ids, spec]) h.take(id);
+    const h0 = hashNow(h);
+    ready(h, ids[0]);
+    expect(turnOf(h)).toBe(1);
+    expect(hashNow(h)).toBe(h0); // frozen while waiting
+    expect(h.core.room.lastResolved).toBe(0);
+    const out = ready(h, ids[1]);
+    expect(turnOf(h)).toBe(2);
+    expect(h.core.room.lastResolved).toBe(1);
+    expect(h.core.room.log).toHaveLength(1);
+    expect(h.core.room.hashes).toEqual([hashNow(h)]);
+    const resolved = out.filter((o) => o.msg.t === 'resolved');
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].to).toBe('*');
+    const m = resolved[0].msg as Extract<ServerMsg, { t: 'resolved' }>;
+    expect(m.turn).toBe(2);
+    expect(m.game.turn).toBe(2);
+    expect(m.hash).toBe(hashNow(h));
+    expect(m.summary).toMatchObject({ from: 1, to: 2 });
+    expect(m.summary).toBe(h.core.room.summary);
+    for (const id of [...ids, spec]) {
+      const got = h.take(id);
+      expect(only(got, 'resolved')).toHaveLength(1);
+      expect(only(got, 'state')).toHaveLength(0); // no separate state/summary pair to desynchronise
+      expect(JSON.stringify(only(got, 'resolved')[0])).not.toMatch(/"epoch"|"draft"|"revision"|"own"/);
+    }
+    // Everything per-turn starts fresh.
+    expect(h.core.room.ready).toEqual([false, false, false, false]);
+    expect(h.core.room.epochs).toEqual([0, 0, 0, 0]);
+    expect(h.core.room.drafts.every((d) => d.revision === 0 && d.orders.length === 0)).toBe(true);
+  });
+
+  it('applies exactly the revisions each seat had acknowledged when it was recorded Ready', () => {
+    const { h, ids } = startedRoom(2);
+    h.send(ids[0], { t: 'draft', turn: 1, revision: 1, orders: [{ t: 'borrow' }] });
+    h.send(ids[0], { t: 'draft', turn: 1, revision: 2, orders: [{ t: 'borrow' }, { t: 'borrow' }] });
+    h.send(ids[1], { t: 'draft', turn: 1, revision: 4, orders: [{ t: 'borrow' }] });
+    h.send(ids[0], { t: 'draft', turn: 1, revision: 1, orders: [] }); // late and older: ignored
+    ready(h, ids[0], 2, 0);
+    ready(h, ids[1], 4, 0);
+    expect(turnOf(h)).toBe(2);
+    expect(h.core.room.log[0][0]).toEqual([{ t: 'borrow' }, { t: 'borrow' }]);
+    expect(h.core.room.log[0][1]).toEqual([{ t: 'borrow' }]);
+    expect(h.core.game!.players[0].debt).toBe(800);
+  });
+
+  it('exactly-once under duplicate, racing and cancelling readies', () => {
+    const { h, ids } = startedRoom(2);
+    const [A, B] = ids;
+    ready(h, A);
+    ready(h, A);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 1 }); // A withdraws ...
+    expect(h.core.room.ready[0]).toBe(false);
+    ready(h, B); // ... so B's Ready completes nothing
+    expect(turnOf(h)).toBe(1);
+    ready(h, A, 0, 2); // A readies again: now complete
+    expect(turnOf(h)).toBe(2);
+    // The race is over: a Cancel Ready for Turn 1 processed after is off-turn
+    h.take(A);
+    h.take(B);
+    const hash = hashNow(h);
+    h.send(A, { t: 'cancelReady', turn: 1, epoch: 3 });
+    ready(h, B, 0, 1);
+    ready(h, B, 0, 1);
+    expect(turnOf(h)).toBe(2);
+    expect(hashNow(h)).toBe(hash);
+    expect(h.core.room.log).toHaveLength(1);
+    expect(h.core.room.lastResolved).toBe(1);
+  });
+
+  it('two last seats readying together: the second recorded Ready resolves, once', () => {
+    const { h, ids } = startedRoom(3);
+    ready(h, ids[0]);
+    ready(h, ids[2]);
+    const out = [...ready(h, ids[1]), ...ready(h, ids[1]), ...ready(h, ids[2], 0, 0)];
+    expect(out.filter((o) => o.msg.t === 'resolved')).toHaveLength(1);
+    expect(turnOf(h)).toBe(2);
+  });
+
+  it('AI Houses are always Ready and the world waits for humans: no timer, ping or reconnect resolves a turn', () => {
+    const { h, ids } = startedRoom(2);
     for (let i = 0; i < 50; i++) {
-      const code = makeRoomCode(random);
-      expect(code).toMatch(/^[A-Z]{4}$/);
-      expect(isRoomCode(code)).toBe(true);
-      for (const ch of code) expect(ROOM_CODE_ALPHABET).toContain(ch);
+      h.send(ids[0], { t: 'ping', at: i });
+      h.disconnect(ids[1]);
+      h.join('x', ids[1]);
     }
-    expect(makeRoomCode(() => 0)).toBe(ROOM_CODE_ALPHABET[0].repeat(4));
-    expect(makeRoomCode(() => 1)).toMatch(/^[A-Z]{4}$/); // a sloppy RNG that returns 1 must not break it
-    expect(new Set(ROOM_CODE_ALPHABET).size).toBe(ROOM_CODE_ALPHABET.length);
-    for (const bad of ['', 'ABC', 'ABCDE', 'abcd', 'AB1D', 'AB D', ' ABCD', 'ABCD\n', 'ÄBCD']) expect(isRoomCode(bad), bad).toBe(false);
+    expect(turnOf(h)).toBe(1);
+    expect(h.core.room.lastResolved).toBe(0);
   });
 
-  it('cleans display names: no control characters or angle brackets, single spaces, sixteen characters', () => {
-    expect(cleanName('Ada', 'x')).toBe('Ada');
-    expect(cleanName('  Ada   Lovelace  ', 'x')).toBe('Ada Lovelace');
-    expect(cleanName('<script>alert(1)</script>', 'x')).toBe('scriptalert(1)/s');
-    expect(cleanName('A\u0000d\u0007a\u001f\u007f', 'x')).toBe('Ada');
-    expect(cleanName('Ada\tLove\nlace', 'x')).toBe('AdaLovelace');
-    expect(cleanName('abcdefghijklmnopqrstuvwxyz', 'x')).toBe('abcdefghijklmnop');
-    expect(cleanName('abcdefghijklmnopqrstuvwxyz', 'x')).toHaveLength(16);
-    // When the cut lands just after a space the cap still holds. (The result keeps that trailing
-    // space — see the suspected-bug note in the report — so compare modulo trailing whitespace.)
-    expect(cleanName('Ada bLovelace/b of London', 'x').trimEnd()).toBe('Ada bLovelace/b');
-    expect(cleanName('Ada bLovelace/b of London', 'x').length).toBeLessThanOrEqual(16);
-    for (const empty of ['', '   ', '<>', '\u0001\u0002', undefined, null, 42, {}, ['Ada']]) {
-      expect(cleanName(empty, 'Merchant 1')).toBe('Merchant 1');
+  it('one human against AIs resolves on that human\'s single Ready, a whole match, one turn per Ready', () => {
+    const { h, ids } = startedRoom(1, 'blitz');
+    for (let t = 1; t <= 16; t++) {
+      expect(turnOf(h)).toBe(t);
+      const g = h.core.game!;
+      const orders: Order[] = g.council ? [{ t: 'charter', key: g.council.offers[0][0] }] : [];
+      if (orders.length) h.send(ids[0], { t: 'draft', turn: t, revision: 1, orders });
+      ready(h, ids[0], orders.length ? 1 : 0, 0);
     }
-    for (const raw of ['<<<>>>ok', 'tab\there', '\u0000x', 'Zoë', 'a'.repeat(100)]) {
-      const out = cleanName(raw, 'x');
-      expect(out).not.toMatch(/[<>\u0000-\u001f\u007f]/);
-      expect(out.length).toBeLessThanOrEqual(16);
-    }
+    expect(h.core.room.status).toBe('ended');
+    expect(h.core.game!.phase).toBe('ended');
+    expect(h.core.room.log).toHaveLength(16);
+    expect(h.core.room.lastResolved).toBe(16);
+    expect(h.core.game!.winner).toBeGreaterThanOrEqual(0);
   });
 });
 
-describe('Lobby: seats, names and Houses', () => {
-  it('opens with seat 0 free and Vesper, Aurelia and Orson in seats 1–3', () => {
-    const { core } = makeRoom(99);
-    const lobby = core.lobby();
-    expect(lobby).toMatchObject({ code: 'QRST', status: 'lobby', host: 0, mode: 'standard', speed: 1, matchNo: 0 });
-    expect(lobby.seats.map((s) => s.kind)).toEqual(['open', 'ai', 'ai', 'ai']);
-    expect(lobby.seats.map((s) => s.persona)).toEqual([null, 'vesper', 'aurelia', 'orson']);
-    expect(lobby.seats.map((s) => s.name)).toEqual(['', 'Vesper', 'Aurelia', 'Orson']);
-    expect(lobby.seats.map((s) => s.house)).toEqual([0, 1, 2, 3]);
-    expect(lobby.seats.every((s) => !s.connected)).toBe(true);
-    expect(core.game).toBeNull();
-    expect(core.running).toBe(false);
-    expect(core.step()).toEqual([]);
-    expect(core.summary()).toMatchObject({ code: 'QRST', status: 'lobby', humans: 0, connected: 0, ai: 3, open: 1, tick: 0 });
-    expect(AI_ORDER.map((p) => AI_PERSONAS[p].name)).toEqual(['Vesper', 'Aurelia', 'Orson']);
-  });
-
-  it('gives the first player seat 0, the host role and a welcome', () => {
-    const { core, join } = makeRoom();
-    const res = join('Ada');
-    expect(res.seat).toBe(0);
-    expect(res.playerId).toBe('pid-1');
-    expect(core.room.host).toBe(0);
-    expect(core.seatOf(res.playerId)).toBe(0);
-    const welcome = pick(res.out, 'welcome', res.playerId);
-    expect(welcome).toHaveLength(1);
-    expect(welcome[0]).toMatchObject({ playerId: 'pid-1', seat: 0, player: -1 });
-    expect(welcome[0].lobby.seats[0]).toEqual({ kind: 'human', name: 'Ada', house: 0, connected: true, persona: null });
-    expect(pick(res.out, 'lobby', '*')).toHaveLength(1);
-    expect(pick(res.out, 'snap')).toHaveLength(0); // nothing to draw yet
-    expect(core.lobby().seats.map((s) => s.persona)).toEqual([null, 'vesper', 'aurelia', 'orson']);
-    // A nameless player gets a seat name.
-    const anon = makeRoom().join();
-    expect(anon.out[0].msg).toMatchObject({ t: 'welcome', seat: 0 });
-    expect((anon.out[0].msg as Msg<'welcome'>).lobby.seats[0].name).toBe('Merchant 1');
-  });
-
-  it('fills seats in order, replacing AI rivals one by one; a fifth arrival spectates', () => {
-    const { core, join } = makeRoom();
-    const a = join('Ada');
-    const b = join('Ben');
-    expect(b.seat).toBe(1);
-    expect(core.lobby().seats.map((s) => s.kind)).toEqual(['human', 'human', 'ai', 'ai']);
-    // The remaining AI rivals close ranks: Vesper first, then Aurelia.
-    expect(core.lobby().seats.map((s) => s.persona)).toEqual([null, null, 'vesper', 'aurelia']);
-    expect(core.lobby().seats.map((s) => s.name)).toEqual(['Ada', 'Ben', 'Vesper', 'Aurelia']);
-    const c = join('Cy');
-    const d = join('Di');
-    expect([a.seat, b.seat, c.seat, d.seat]).toEqual([0, 1, 2, 3]);
-    expect(new Set([a.playerId, b.playerId, c.playerId, d.playerId]).size).toBe(4);
-    expect(core.lobby().seats.every((s) => s.kind === 'human' && s.connected && s.persona === null)).toBe(true);
-    expect(core.room.host).toBe(0);
-    const e = join('Eve');
-    expect(e.seat).toBe(-1);
-    expect(core.seatOf(e.playerId)).toBe(-1);
-    expect(pick(e.out, 'welcome', e.playerId)[0]).toMatchObject({ seat: -1, player: -1 });
-    expect(core.lobby().seats.map((s) => s.name)).toEqual(['Ada', 'Ben', 'Cy', 'Di']);
-    // A spectator may watch and ping, nothing else.
-    expect(rejectTo(core.handle(e.playerId, { t: 'start' }), e.playerId)).toBe('Spectators cannot act');
-    expect(rejectTo(core.handle(e.playerId, { t: 'lobby', name: 'Mallory' }), e.playerId)).toBe('Spectators cannot act');
-    expect(core.handle(e.playerId, { t: 'ping', at: 7 })).toEqual([{ to: e.playerId, msg: { t: 'pong', at: 7 } }]);
-    expect(core.handle('nobody', { t: 'start' })[0].msg.t).toBe('reject');
-    // A seat the host left open is taken before any AI rival is displaced.
-    const other = seated(1);
-    expect(pick(other.core.handle(other.ids[0], { t: 'seat', seat: 2, ai: false }), 'lobby', '*')).toHaveLength(1);
-    expect(['Ben', 'Cy', 'Di', 'Eve'].map((name) => other.join(name).seat)).toEqual([2, 1, 3, -1]);
-  });
-
-  it('renames a player and swaps Houses with an AI seat, but not with another human', () => {
-    const { core, ids } = seated(2);
-    const [ada, ben] = ids;
-    const out = core.handle(ada, { t: 'lobby', name: '  Ada <b>Lovelace</b>\u0007  ' });
-    expect(out).toHaveLength(1);
-    expect(out[0].to).toBe('*');
-    expect(pick(out, 'lobby')[0].lobby.seats[0].name).toBe('Ada bLovelace/b');
-    expect(core.lobby().seats[1].name).toBe('Player 2');
-    // An empty name keeps the old one.
-    core.handle(ada, { t: 'lobby', name: '   ' });
-    expect(core.lobby().seats[0].name).toBe('Ada bLovelace/b');
-    // House 2 belongs to an AI seat: swap.
-    expect(pick(core.handle(ada, { t: 'lobby', house: 2 }), 'lobby', '*')).toHaveLength(1);
-    expect(core.lobby().seats.map((s) => s.house)).toEqual([2, 1, 0, 3]);
-    // House 1 is Ben's.
-    expect(rejectTo(core.handle(ada, { t: 'lobby', house: 1 }), ada)).toBe('That House is taken');
-    expect(core.lobby().seats.map((s) => s.house)).toEqual([2, 1, 0, 3]);
-    for (const house of [-1, 4, 1.5, NaN]) expect(rejectTo(core.handle(ben, { t: 'lobby', house }), ben)).toBe('Unknown House');
-    // Choosing the House you already hold is harmless.
-    expect(pick(core.handle(ben, { t: 'lobby', house: 1 }), 'lobby')).toHaveLength(1);
-    expect(core.handle(ben, { t: 'lobby', house: 3, name: 'Benedict' })).toHaveLength(1);
-    expect(core.lobby().seats.map((s) => s.house).sort()).toEqual([0, 1, 2, 3]);
-    expect(core.lobby().seats[1]).toMatchObject({ name: 'Benedict', house: 3 });
-    expect(core.handle(ada, { t: 'hello' })).toEqual([]);
-  });
-
-  it('lets only the host toggle AI fill on empty seats', () => {
-    const { core, ids } = seated(2);
-    const [host, guest] = ids;
-    expect(rejectTo(core.handle(guest, { t: 'seat', seat: 3, ai: false }), guest)).toBe('Only the host fills seats');
-    expect(core.lobby().seats[3].kind).toBe('ai');
-    expect(pick(core.handle(host, { t: 'seat', seat: 3, ai: false }), 'lobby', '*')).toHaveLength(1);
-    expect(core.lobby().seats[3]).toMatchObject({ kind: 'open', name: '', persona: null });
-    expect(core.lobby().seats[2]).toMatchObject({ kind: 'ai', persona: 'vesper' });
-    core.handle(host, { t: 'seat', seat: 2, ai: false });
-    core.handle(host, { t: 'seat', seat: 3, ai: true });
-    expect(core.lobby().seats.map((s) => s.kind)).toEqual(['human', 'human', 'open', 'ai']);
-    expect(core.lobby().seats[3]).toMatchObject({ persona: 'vesper', name: 'Vesper' });
-    expect(rejectTo(core.handle(host, { t: 'seat', seat: 1, ai: true }), host)).toBe('That seat is taken');
-    expect(rejectTo(core.handle(host, { t: 'seat', seat: 9, ai: true }), host)).toBe('No such seat');
-    expect(rejectTo(core.handle(host, { t: 'seat', seat: -1, ai: true }), host)).toBe('No such seat');
-    expect(core.lobby().seats.map((s) => s.kind)).toEqual(['human', 'human', 'open', 'ai']);
-  });
-
-  it('lets only the host choose the mode and start, and needs at least two participants', () => {
-    const { core, join, ids } = seated(1);
-    const host = ids[0];
-    const guest = join('Ben').playerId;
-    expect(rejectTo(core.handle(guest, { t: 'mode', mode: 'blitz' }), guest)).toMatch(/host/i);
-    expect(core.lobby().mode).toBe('standard');
-    expect(pick(core.handle(host, { t: 'mode', mode: 'blitz' }), 'lobby', '*')[0].lobby.mode).toBe('blitz');
-    expect(rejectTo(core.handle(guest, { t: 'start' }), guest)).toMatch(/host/i);
-    expect(rejectTo(core.handle(guest, { t: 'rematch' }), guest)).toMatch(/host/i);
-    expect(core.room.status).toBe('lobby');
-    // Alone in the room, with every AI seat switched off, there is nobody to play.
-    core.disconnect(guest);
-    for (const seat of [1, 2, 3]) core.handle(host, { t: 'seat', seat, ai: false });
-    expect(core.lobby().seats.map((s) => s.kind)).toEqual(['human', 'open', 'open', 'open']);
-    expect(rejectTo(core.handle(host, { t: 'start' }), host)).toBe('Add an AI rival or invite a player first');
-    expect(core.room.status).toBe('lobby');
-    expect(core.game).toBeNull();
-    expect(rejectTo(core.handle(host, { t: 'rematch' }), host)).toBe('No match to replay');
-    expect(rejectTo(core.handle(host, { t: 'endless' }), host)).toBe('The match is still running');
-    expect(rejectTo(core.handle(host, { t: 'cmd', cmd: { c: 'borrow' } }), host)).toBe('The match is not running');
-    // One AI rival is enough.
-    core.handle(host, { t: 'seat', seat: 3, ai: true });
-    expect(pick(core.handle(host, { t: 'start' }), 'reject')).toEqual([]);
-    expect(core.room.status).toBe('playing');
-    expect(core.game?.mode).toBe('blitz');
-  });
-
-  it('frees a seat when its player leaves the lobby, and hands the host role to the next human', () => {
-    const { core, join, ids } = seated(3);
-    const [ada, ben, cy] = ids;
-    expect(core.room.host).toBe(0);
-    // Ben leaves: seat 1 goes back to an AI rival.
-    const out = core.disconnect(ben);
-    expect(out).toHaveLength(1);
-    expect(pick(out, 'lobby', '*')[0].lobby.seats[1]).toMatchObject({ kind: 'ai', connected: false, persona: 'vesper' });
-    expect(core.seatOf(ben)).toBe(-1);
-    expect(core.room.seats[1].playerId).toBeNull();
-    expect(core.room.host).toBe(0);
-    // The host leaves: seat 0 opens up, and Cy (seat 2) becomes host.
-    core.disconnect(ada);
-    expect(core.lobby().seats[0]).toMatchObject({ kind: 'open', name: '', connected: false });
-    expect(core.room.host).toBe(2);
-    expect(pick(core.handle(cy, { t: 'mode', mode: 'endless' }), 'lobby')[0].lobby).toMatchObject({ mode: 'endless', host: 2 });
-    // A newcomer takes the open seat but not the crown.
-    const dee = join('Dee');
-    expect(dee.seat).toBe(0);
-    expect(core.room.host).toBe(2);
-    expect(rejectTo(core.handle(dee.playerId, { t: 'start' }), dee.playerId)).toMatch(/host/i);
-    // Coming back with an old id does not resurrect the old seat: Ben is a new arrival.
-    const again = join('Ben', ben);
-    expect(again.playerId).not.toBe(ben);
-    expect(again.seat).toBe(1);
-    // When Cy leaves too, the role passes on again.
-    core.disconnect(cy);
-    expect(core.room.host).toBe(0);
-    expect(core.disconnect('unknown-id')).toEqual([]);
-    expect(core.disconnect(cy)).toEqual([]);
-  });
-});
-
-describe('Starting a match', () => {
-  it('starts with AI fill: status playing, seats mapped to players past the open seat, a full snapshot for all', () => {
-    const { core, ids } = seated(1, 4321);
-    const host = ids[0];
-    core.handle(host, { t: 'seat', seat: 1, ai: false });
-    const out = core.handle(host, { t: 'start' });
-    expect(core.room.status).toBe('playing');
-    expect(core.room.matchNo).toBe(1);
-    expect(core.room.playerOf).toEqual([0, -1, 1, 2]);
-    const game = core.game as GameState;
-    expect(game.tick).toBe(0);
-    expect(game.mode).toBe('standard');
-    expect(game.seed).not.toBe(4321);
-    expect(game.players.map((p) => p.kind)).toEqual(['human', 'ai', 'ai']);
-    expect(game.players.map((p) => p.persona)).toEqual([null, 'vesper', 'aurelia']);
-    expect(game.players.map((p) => p.name)).toEqual(['Player 1', 'Vesper', 'Aurelia']);
-    expect(game.players.map((p) => p.house)).toEqual([0, 2, 3]);
-    // Broadcasts: the lobby, a welcome carrying the player index, and a full snapshot.
-    expect(pick(out, 'lobby', '*')[0].lobby).toMatchObject({ status: 'playing', matchNo: 1 });
-    expect(pick(out, 'welcome')).toHaveLength(1);
-    expect(pick(out, 'welcome', host)[0]).toMatchObject({ seat: 0, player: 0 });
-    const snaps = pick(out, 'snap', '*');
-    expect(snaps).toHaveLength(1);
-    expect(snaps[0].full).toBe(true);
-    expect(snaps[0].k).toBe(0);
-    expect(snaps[0].meta).toMatchObject({ seed: game.seed, mode: 'standard', qt: MODES.standard.quarterTicks, tq: MODES.standard.quarters });
-    expect(snaps[0].meta?.players).toEqual(game.players.map((p) => ({ name: p.name, house: p.house, kind: p.kind, persona: p.persona })));
-    expect(snaps[0].b).toEqual([]);
-    expect(snaps[0].c.length).toBeGreaterThan(0);
-    expect(core.running).toBe(true);
-    expect(core.summary()).toMatchObject({ status: 'playing', humans: 1, connected: 1, ai: 2, open: 1, quarter: 1 });
-  });
-
-  it('seats two humans with two AI rivals, or four humans with none', () => {
-    const duo = started(2);
-    expect(duo.core.room.playerOf).toEqual([0, 1, 2, 3]);
-    expect(duo.game().players.map((p) => p.kind)).toEqual(['human', 'human', 'ai', 'ai']);
-    const personas = duo.game().players.filter((p) => p.kind === 'ai').map((p) => p.persona);
-    expect(personas).toEqual(['vesper', 'aurelia']);
-    expect(new Set(personas).size).toBe(personas.length);
-    // Deliberate pacing: nobody has built before the first AI seat's opening delay…
-    const o = OPENINGS.standard;
-    for (let i = 0; i < o.firstMove - 1; i++) duo.core.step();
-    expect(duo.game().buildings).toEqual([]);
-    // …and the seats stagger: the second AI House is still reading the street.
-    for (let i = 0; i < o.stagger; i++) duo.core.step();
-    expect(duo.game().buildings.some((b) => b.owner === 2)).toBe(true);
-    expect(duo.game().buildings.some((b) => b.owner === 3)).toBe(false);
-    for (let i = duo.game().tick; i < 240; i++) duo.core.step();
-    expect(duo.game().tick).toBe(240);
-    // The AI rivals have opened for business; the idle humans have not.
-    expect(duo.game().buildings.some((b) => b.owner === 2)).toBe(true);
-    expect(duo.game().buildings.some((b) => b.owner === 3)).toBe(true);
-    expect(duo.game().buildings.some((b) => b.owner < 2)).toBe(false);
-
-    const quad = seated(4);
-    const out = quad.core.handle(quad.ids[0], { t: 'start' });
-    const game = quad.core.game as GameState;
-    expect(game.players.map((p) => p.kind)).toEqual(['human', 'human', 'human', 'human']);
-    expect(game.players.every((p) => p.persona === null)).toBe(true);
-    expect(quad.core.room.playerOf).toEqual([0, 1, 2, 3]);
-    quad.ids.forEach((id, i) => expect(pick(out, 'welcome', id)[0]).toMatchObject({ seat: i, player: i }));
-    for (let i = 0; i < 120; i++) quad.core.step();
-    expect(game.tick).toBe(120);
-    expect(game.buildings).toEqual([]);
-  });
-
-  it('closes the lobby once play begins: no seat changes, and latecomers spectate with a full snapshot', () => {
-    const { core, join, ids, host } = started(2);
-    for (const msg of [
-      { t: 'lobby', name: 'New Name' },
-      { t: 'seat', seat: 3, ai: false },
-      { t: 'mode', mode: 'blitz' },
-      { t: 'start' },
-    ] as ClientMsg[]) {
-      expect(rejectTo(core.handle(host, msg), host), msg.t).toBe('The match has already started');
+describe('off-turn Ready and Cancel Ready', () => {
+  /** Turn N resolved to N+1 (and further): replay messages naming old / future turns. */
+  function offTurnReplies(extraTurns: number) {
+    const { h, ids } = startedRoom(2);
+    const [A, B] = ids;
+    h.send(A, { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    ready(h, A, 1, 0);
+    ready(h, B);
+    for (let i = 0; i < extraTurns; i++) {
+      ready(h, A);
+      ready(h, B);
     }
-    expect(core.lobby().seats[0].name).toBe('Player 1');
-    expect(core.lobby().mode).toBe('standard');
-    for (let i = 0; i < 25; i++) core.step();
-    const late = join('Late');
-    expect(late.seat).toBe(-1);
-    expect(pick(late.out, 'welcome', late.playerId)[0]).toMatchObject({ seat: -1, player: -1 });
-    const snap = pick(late.out, 'snap', late.playerId);
-    expect(snap).toHaveLength(1);
-    expect(snap[0]).toMatchObject({ full: true, k: 25 });
-    expect(snap[0].meta?.players).toHaveLength(4);
-    expect(core.lobby().seats.map((s) => s.kind)).toEqual(['human', 'human', 'ai', 'ai']);
-    expect(rejectTo(core.handle(late.playerId, { t: 'cmd', cmd: { c: 'borrow' } }), late.playerId)).toBe('Spectators cannot act');
-    expect(core.game?.players.every((p) => p.debt === 0)).toBe(true);
-    expect(ids).toHaveLength(2);
-  });
-});
+    h.take(A);
+    h.take(B);
+    return { h, A, B };
+  }
 
-describe('Commands in a room', () => {
-  it('applies a seated player’s valid command and rejects an invalid one to that player only', () => {
-    const { core, ids, game } = started(2);
-    const [ada, ben] = ids;
-    const lot = idx(3, 6);
-    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: lot, kind: 'roastery' } })).toEqual([]);
-    expect(game().buildings).toHaveLength(1);
-    expect(game().buildings[0]).toMatchObject({ tile: lot, kind: 'roastery', owner: 0 });
-    expect(game().players[0].ledger.construction).toBe(SHOPS.roastery.cost);
-    const shop = game().buildings[0].id;
-    // Ben tries the same lot, then Ada's shop.
-    expect(rejectTo(core.handle(ben, { t: 'cmd', cmd: { c: 'build', tile: lot, kind: 'bistro' } }), ben)).toBe('Lot is already built on');
-    expect(rejectTo(core.handle(ben, { t: 'cmd', cmd: { c: 'price', id: shop, stance: 0 } }), ben)).toBe('Not your property');
-    expect(rejectTo(core.handle(ben, { t: 'cmd', cmd: { c: 'sell', id: shop } }), ben)).toBe('Not your property');
-    expect(game().buildings).toHaveLength(1);
-    expect(game().buildings[0].stance).toBe(1);
-    expect(core.handle(ben, { t: 'cmd', cmd: { c: 'build', tile: idx(4, 6), kind: 'park' } })).toEqual([]);
-    expect(game().buildings[1]).toMatchObject({ kind: 'park', owner: 1 });
-    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'price', id: shop, stance: 3 } })).toEqual([]);
-    expect(game().buildings[0].stance).toBe(3);
-    // The next beat tells everyone, with the feedback events.
-    const snap = pick(core.step(), 'snap', '*')[0];
-    expect(snap.b?.map((b) => b.id).sort()).toEqual(game().buildings.slice(0, 2).map((b) => b.id).sort());
-    expect(snap.fx?.filter((f) => f.k === 'build')).toHaveLength(2);
-  });
-
-  it('survives hostile command payloads without throwing or changing the game', () => {
-    const { core, ids, game } = started(2);
-    const [ada] = ids;
-    const before = JSON.stringify(game());
-    const hostile: unknown[] = [
-      { c: 'build', tile: '12', kind: 'park' },
-      { c: 'build', tile: 1e9, kind: 'park' },
-      { c: 'build', tile: idx(3, 6), kind: '__proto__' },
-      { c: 'build', tile: idx(3, 6), kind: 'constructor' },
-      { c: 'build' },
-      { c: 'price', id: 'x', stance: 2 },
-      { c: 'price', id: {}, stance: {} },
-      { c: 'sell', id: null },
-      { c: 'upgrade' },
-      { c: 'teleport', id: 1 },
-      { c: '__proto__' },
-      { c: 'repay' },
+  it.each([0, 1, 2])('naming Turn 1 while Turn %i + 2 is current: one state for the CURRENT turn with its own attached summary, to that seat only', (extra) => {
+    const { h, A, B } = offTurnReplies(extra);
+    const cur = turnOf(h);
+    expect(cur).toBe(2 + extra);
+    const before = snap(h);
+    const hash = hashNow(h);
+    const replays: ClientMsg[] = [
+      { t: 'ready', turn: 1, revision: 1, epoch: 0 },
+      { t: 'ready', turn: 1, revision: 0, epoch: 5 },
+      { t: 'cancelReady', turn: 1, epoch: 1 },
+      { t: 'cancelReady', turn: 1, epoch: 0 },
+      { t: 'ready', turn: cur + 1, revision: 0, epoch: 0 },
+      { t: 'cancelReady', turn: cur + 7, epoch: 0 },
+      { t: 'ready', turn: 0, revision: 0, epoch: 0 },
+      { t: 'cancelReady', turn: -3, epoch: 0 },
+      { t: 'ready', turn: 999999, revision: 0, epoch: 0 },
     ];
-    for (const cmd of hostile) {
-      let out: Outbound[] = [];
-      expect(() => (out = core.handle(ada, { t: 'cmd', cmd } as ClientMsg)), JSON.stringify(cmd)).not.toThrow();
-      expect(out, JSON.stringify(cmd)).toHaveLength(1);
-      expect(out[0]).toMatchObject({ to: ada, msg: { t: 'reject' } });
-    }
-    expect(JSON.stringify(game())).toBe(before);
-    expect(rejectTo(core.handle(ada, { t: 'bogus' } as unknown as ClientMsg), ada)).toBe('Unknown message');
-  });
-
-  it('routes commands by player index, not seat number, when a seat was left open', () => {
-    const { core, ids } = seated(3);
-    const [ada, ben, cy] = ids;
-    core.disconnect(ben);
-    core.handle(ada, { t: 'seat', seat: 1, ai: false });
-    expect(core.lobby().seats.map((s) => s.kind)).toEqual(['human', 'open', 'human', 'ai']);
-    const out = core.handle(ada, { t: 'start' });
-    expect(core.room.playerOf).toEqual([0, -1, 1, 2]);
-    expect(pick(out, 'welcome', cy)[0]).toMatchObject({ seat: 2, player: 1 });
-    expect(core.handle(cy, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'bistro' } })).toEqual([]);
-    // A future-era tool is refused with its unlock notice, by player index too.
-    expect(rejectTo(core.handle(cy, { t: 'cmd', cmd: { c: 'build', tile: idx(4, 6), kind: 'arcade' } }), cy)).toBe('Arcade unlocks in Era II: Transit & Trade');
-    const game = core.game as GameState;
-    expect(game.buildings[0].owner).toBe(1);
-    expect(game.players[1]).toMatchObject({ name: 'Player 3', kind: 'human', house: 2 });
-    expect(game.players[2]).toMatchObject({ kind: 'ai', house: 3 });
-    expect(game.players[1].cash).toBeLessThan(game.players[0].cash);
-  });
-});
-
-describe('Stepping the simulation', () => {
-  it('advances by the room pace each beat — 1, 2, or 3 ticks per 2 beats at 1.5× — and broadcasts a delta', () => {
-    const { core, host, game } = started(1);
-    const beat = (): Snap => {
-      const out = core.step();
+    for (const m of replays) {
+      const out = h.send(A, m);
       expect(out).toHaveLength(1);
-      expect(out[0].to).toBe('*');
-      const snap = out[0].msg as Snap;
-      expect(snap.t).toBe('snap');
-      expect(snap.full).toBe(false);
-      expect(snap.meta).toBeUndefined();
-      expect(snap.k).toBe(game().tick);
-      expect(snap.sp).toBe(core.room.speed);
-      expect(game().fx).toEqual([]); // feedback is drained into the snapshot
-      return snap;
-    };
-    for (let i = 1; i <= 10; i++) expect(beat().k).toBe(i);
-    expect(pick(core.handle(host, { t: 'speed', speed: 2 }), 'lobby')[0].lobby.speed).toBe(2);
-    for (let i = 1; i <= 10; i++) expect(beat().k).toBe(10 + 2 * i);
-    core.handle(host, { t: 'speed', speed: 1.5 });
-    const ticks: number[] = [];
-    for (let i = 0; i < 10; i++) ticks.push(beat().k);
-    expect(ticks[9]).toBe(30 + 15);
-    for (let i = 1; i < 10; i += 2) expect(ticks[i] - (i > 1 ? ticks[i - 2] : 30)).toBe(3);
-    const steps = ticks.map((k, i) => k - (i ? ticks[i - 1] : 30));
-    expect(steps.every((n) => n === 1 || n === 2)).toBe(true);
+      expect(out[0].to).toBe(A);
+      const st = out[0].msg as Extract<ServerMsg, { t: 'state' }>;
+      expect(st.t).toBe('state');
+      expect(st.turn).toBe(cur);
+      expect(st.game.turn).toBe(cur);
+      expect(st.hash).toBe(hash);
+      expect(st.phase).toBe('planning');
+      // The summary is the one attached to the current state, whatever turn the message named.
+      expect(st.summary).toBe(h.core.room.summary);
+      expect(st.summary).toMatchObject({ from: cur - 1, to: cur });
+      expect(st.own).toEqual({ draft: [], revision: 0, ready: false, epoch: 0 });
+      expect(st.player).toBe(0);
+      expect(st.seats.map((s) => s.ready)).toEqual([false, false, true, true]);
+    }
+    expect(snap(h)).toBe(before); // no flag, epoch, draft, turn or hash changed; nothing resolved
+    expect(h.take(B)).toEqual([]); // nothing sent to anyone else
+    expect(h.take(A)).toHaveLength(replays.length);
   });
 
-  it('keeps every Ledger reconciled with its Treasury on every beat when 2× starts on an odd tick', () => {
-    // The room as two clients see it: a full snapshot at the start, then every broadcast delta.
-    const room = seated(2);
-    const [ada, ben] = room.ids;
-    const { core } = room;
-    const startSnap = pick(core.handle(ada, { t: 'start' }), 'snap', '*')[0];
-    const game = core.game as GameState;
-    const view = new CityView();
-    view.apply(clone(startSnap));
-    const beat = (): Snap => {
-      const snap = pick(core.step(), 'snap', '*')[0];
-      view.apply(clone(snap));
-      game.players.forEach((p, i) => {
-        expect(view.ledgers[i]).toEqual({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger });
-        // Ledger drawer: "Opening §900 + match change = § in hand" against the Treasury chip.
-        expect(Math.round(START_CASH + ledgerCashChange(view.ledgers[i].total)), `tick ${game.tick} player ${i}`).toBe(view.players[i].cash);
-        expect(view.players[i].debt).toBe(p.debt);
-        expect(view.players[i].milestones).toEqual(p.milestones);
-      });
-      return snap;
-    };
-    while (game.tick < 83) beat();
-    expect(pick(core.handle(ada, { t: 'speed', speed: 2 }), 'reject')).toEqual([]);
-    for (let i = 0; i < 5; i++) beat();
-    expect(game.tick).toBe(93);
-    // Adjacent Pocket Parks: Block Baron and Civic Benefactor (+§120) on the next beat
-    // (Milestones are judged every fifth tick: 95 falls inside it).
-    const before = view.players[0].cash;
-    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'park' } })).toEqual([]);
-    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: idx(4, 6), kind: 'park' } })).toEqual([]);
-    const parks = beat();
-    expect(parks.k % 10).not.toBe(0);
-    expect(parks.lg).toBeDefined();
-    expect(view.players[0].milestones[1]).toBeGreaterThanOrEqual(0);
-    expect(view.players[0].milestones[2]).toBeGreaterThanOrEqual(0);
-    expect(view.ledgers[0].total.dividends).toBe(MILESTONES[2].cash);
-    expect(view.players[0].cash).toBe(before - 2 * CIVICS.park.cost + MILESTONES[2].cash);
-    // A §400 loan for Ada, and Ben borrows too: both reconcile on the same beat.
-    expect(core.handle(ada, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
-    expect(core.handle(ben, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
-    const loans = beat();
-    expect(loans.k % 10).not.toBe(0);
-    expect(loans.lg).toBeDefined();
-    expect(view.ledgers[0].total.borrowed).toBe(LOAN_STEP);
-    expect(view.ledgers[1].total.borrowed).toBe(LOAN_STEP);
-    expect(view.players[0].cash).toBe(before - 2 * CIVICS.park.cost + MILESTONES[2].cash + LOAN_STEP);
-    expect(view.players[0].debt).toBe(LOAN_STEP);
-    // The rest of the Era, AI Houses trading: no broadcast lands on a multiple of ten, none is stale.
-    let ledgers = 0;
-    while (game.phase === 'playing' && game.quarter === 1) {
-      const snap = beat();
-      if (game.phase === 'playing' && game.quarter === 1) expect(snap.k % 2).toBe(1);
-      if (snap.lg) ledgers++;
-    }
-    expect(ledgers).toBeGreaterThan(MODES.standard.quarterTicks / 2 / 10 - 10);
-    expect(game.players[0].totalLedger.interest).toBeGreaterThan(0);
+  it('carries the seat\'s current-turn draft, Ready flag and epoch', () => {
+    const { h, A } = offTurnReplies(1);
+    h.send(A, { t: 'draft', turn: 3, revision: 1, orders: borrow });
+    ready(h, A, 1, 0);
+    h.send(A, { t: 'cancelReady', turn: 3, epoch: 1 });
+    ready(h, A, 1, 2); // ready @ epoch 3
+    h.take(A);
+    const out = h.send(A, { t: 'ready', turn: 2, revision: 1, epoch: 0 });
+    const st = out[0].msg as Extract<ServerMsg, { t: 'state' }>;
+    expect(st.own).toEqual({ draft: borrow, revision: 1, ready: true, epoch: 3 });
+    expect(st.seats[0].ready).toBe(true);
+    expect(h.core.room.epochs[0]).toBe(3);
   });
 
-  it('lets only the host set the pace, and only to 1×, 1.5× or 2×', () => {
-    const { core, ids } = seated(2);
-    const [host, guest] = ids;
-    expect(SPEEDS).toEqual([1, 1.5, 2]);
-    expect(rejectTo(core.handle(guest, { t: 'speed', speed: 2 }), guest)).toBe('Only the host sets the pace');
-    for (const speed of [0, 0.5, 3, 10, -1, NaN, Infinity]) {
-      expect(rejectTo(core.handle(host, { t: 'speed', speed }), host)).toBe('Unknown pace');
-    }
-    expect(core.room.speed).toBe(1);
-    for (const speed of SPEEDS) {
-      expect(pick(core.handle(host, { t: 'speed', speed }), 'lobby', '*')[0].lobby.speed).toBe(speed);
-    }
-    // The pace can be changed mid-match too.
-    core.handle(host, { t: 'start' });
-    expect(pick(core.handle(host, { t: 'speed', speed: 1 }), 'reject')).toEqual([]);
-    expect(rejectTo(core.handle(guest, { t: 'speed', speed: 2 }), guest)).toBe('Only the host sets the pace');
-    expect(core.room.speed).toBe(1);
+  it('a state for the first turn (no summary yet) attaches null, never a summary chosen by the named turn', () => {
+    const { h, ids } = startedRoom(2);
+    const out = h.send(ids[0], { t: 'ready', turn: 5, revision: 0, epoch: 0 });
+    expect((out[0].msg as Extract<ServerMsg, { t: 'state' }>).summary).toBeNull();
+    expect((out[0].msg as Extract<ServerMsg, { t: 'state' }>).turn).toBe(1);
   });
 
-  it('stands still while nobody is connected: idle rooms cost nothing', () => {
-    const { core, join, host, game } = started(1);
-    for (let i = 0; i < 20; i++) core.step();
-    expect(game().tick).toBe(20);
-    expect(core.running).toBe(true);
-    core.disconnect(host);
-    expect(core.running).toBe(false);
-    const frozen = JSON.stringify(game());
-    for (let i = 0; i < 50; i++) expect(core.step()).toEqual([]);
-    expect(JSON.stringify(game())).toBe(frozen);
-    expect(core.summary()).toMatchObject({ humans: 1, connected: 0, tick: 20 });
-    // The player returns and the city picks up where it stopped.
-    expect(join(undefined, host).seat).toBe(0);
-    expect(core.running).toBe(true);
-    expect(pick(core.step(), 'snap')[0].k).toBe(21);
-    // A spectator alone keeps the match on screen; when they leave too, it stops.
-    const watcher = join('Watcher');
-    expect(watcher.seat).toBe(-1);
-    core.disconnect(host);
-    expect(core.running).toBe(true);
-    expect(pick(core.step(), 'snap')[0].k).toBe(22);
-    expect(core.disconnect(watcher.playerId)).toEqual([]);
-    expect(core.running).toBe(false);
-    expect(core.step()).toEqual([]);
-    expect(game().tick).toBe(22);
+  it('after the match ended, Ready and Cancel Ready get the current (ended) state and change nothing', () => {
+    const { h, ids } = startedRoom(1, 'blitz');
+    for (let t = 1; t <= 16; t++) {
+      const g = h.core.game!;
+      if (g.council) h.send(ids[0], { t: 'draft', turn: t, revision: 1, orders: [{ t: 'charter', key: g.council.offers[0][0] }] });
+      ready(h, ids[0], g.council ? 1 : 0, 0);
+    }
+    h.take(ids[0]);
+    const before = snap(h);
+    const out = [...h.send(ids[0], { t: 'ready', turn: 17, revision: 0, epoch: 0 }), ...h.send(ids[0], { t: 'cancelReady', turn: 16, epoch: 0 }), ...h.send(ids[0], { t: 'ready', turn: 16, revision: 0, epoch: 0 })];
+    expect(out.every((o) => o.msg.t === 'state' && o.msg.phase === 'ended' && o.to === ids[0])).toBe(true);
+    expect(snap(h)).toBe(before);
+    h.send(ids[0], { t: 'draft', turn: 17, revision: 1, orders: [] });
+    expect(only(h.take(ids[0]), 'error').pop()).toMatchObject({ code: 'notPlaying' });
   });
 });
 
-describe('Reconnect and host migration', () => {
-  it('holds a seat through a mid-match disconnect and restores it by playerId with a full snapshot', () => {
-    const { core, join, ids, issued, game } = started(2);
-    const [ada, ben] = ids;
-    core.handle(ben, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'roastery' } });
-    for (let i = 0; i < 30; i++) core.step();
-    const out = core.disconnect(ben);
-    expect(pick(out, 'lobby', '*')[0].lobby.seats[1]).toMatchObject({ kind: 'human', name: 'Player 2', connected: false });
-    expect(core.room.seats[1].playerId).toBe(ben);
-    expect(core.seatOf(ben)).toBe(1);
-    // The match goes on for Ada; Ben's House is not handed to an AI.
-    for (let i = 0; i < 30; i++) core.step();
-    expect(game().tick).toBe(60);
-    expect(game().players[1].kind).toBe('human');
-    expect(game().buildings.filter((b) => b.owner === 1)).toHaveLength(1);
-    const ids0 = issued();
-    const back = join('Renamed', ben);
-    expect(issued()).toBe(ids0); // no new identity was minted
-    expect(back.playerId).toBe(ben);
+describe('reconnect, spectators and heartbeats', () => {
+  it('a reconnecting seat gets one full state: its draft, Ready flag and epoch, every seat\'s status, the latest summary', () => {
+    const { h, ids } = startedRoom(2);
+    const [A, B] = ids;
+    h.send(A, { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    ready(h, A, 1, 0);
+    h.disconnect(A);
+    expect(h.core.room.seats[0].connected).toBe(false);
+    const hash = hashNow(h);
+    h.take(A);
+    h.take(B);
+    const back = h.join(undefined, A);
+    expect(back.seat).toBe(0);
+    expect(back.playerId).toBe(A);
+    const got = h.take(A);
+    expect(got.map((m) => m.t)).toEqual(['welcome', 'lobby', 'state', 'seats']);
+    const st = only(got, 'state')[0];
+    expect(st.own).toEqual({ draft: borrow, revision: 1, ready: true, epoch: 1 });
+    expect(st.seats[0]).toMatchObject({ ready: true, connected: true });
+    expect(hashNow(h)).toBe(hash);
+    expect(turnOf(h)).toBe(1);
+    // B sees only public presence
+    expect(h.take(B).every((m) => m.t === 'lobby' || m.t === 'seats')).toBe(true);
+  });
+
+  it('a seat that returns after its turn resolved gets the new turn: empty revision-0 draft, Planning at epoch 0, the N→N+1 summary', () => {
+    const { h, ids } = startedRoom(2);
+    const [A, B] = ids;
+    h.send(A, { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    ready(h, A, 1, 0);
+    h.disconnect(A);
+    ready(h, B);
+    expect(turnOf(h)).toBe(2);
+    expect(h.core.game!.players[0].debt).toBe(400); // A's revision 1 was applied
+    h.join(undefined, A);
+    const st = only(h.take(A), 'state')[0];
+    expect(st.turn).toBe(2);
+    expect(st.summary).toMatchObject({ from: 1, to: 2 });
+    expect(st.own).toEqual({ draft: [], revision: 0, ready: false, epoch: 0 });
+    expect(st.hash).toBe(hashNow(h));
+    // Its cached Turn 1 work, if it were ever resent, is refused and answered with the current state.
+    h.send(A, { t: 'draft', turn: 1, revision: 2, orders: borrow });
+    expect(only(h.take(A), 'error')[0]).toMatchObject({ code: 'offTurnDraft', turn: 2 });
+    const out = h.send(A, { t: 'ready', turn: 1, revision: 1, epoch: 1 });
+    expect(out).toHaveLength(1);
+    expect(out[0].msg).toMatchObject({ t: 'state', turn: 2 });
+    expect(h.core.room.ready[0]).toBe(false);
+    expect(h.core.room.epochs[0]).toBe(0);
+  });
+
+  it('seats are reserved: never auto-readied, timed out or handed to an AI when their player leaves', () => {
+    const { h, ids } = startedRoom(2);
+    h.disconnect(ids[1]);
+    ready(h, ids[0]);
+    expect(turnOf(h)).toBe(1);
+    expect(h.core.room.seats[1]).toMatchObject({ kind: 'human', playerId: ids[1], connected: false });
+    expect(h.core.game!.players[1].kind).toBe('human');
+    const back = h.join(undefined, ids[1]);
     expect(back.seat).toBe(1);
-    expect(pick(back.out, 'welcome', ben)[0]).toMatchObject({ playerId: ben, seat: 1, player: 1 });
-    expect(pick(back.out, 'lobby', '*')[0].lobby.seats[1]).toMatchObject({ connected: true, name: 'Player 2' });
-    const snap = pick(back.out, 'snap', ben);
-    expect(snap).toHaveLength(1);
-    expect(snap[0]).toMatchObject({ full: true, k: 60 });
-    expect(snap[0].meta?.players[1].name).toBe('Player 2');
-    expect(snap[0].b?.length).toBe(game().buildings.length);
-    expect(pick(back.out, 'snap', '*')).toHaveLength(0); // Ada is not sent the whole city again
-    // Ben is back in control of his House.
-    expect(core.handle(ben, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
-    expect(game().players[1].debt).toBeGreaterThan(0);
-    expect(ada).not.toBe(ben);
+    ready(h, ids[1]);
+    expect(turnOf(h)).toBe(2);
   });
 
-  it('passes the host role to the next connected human mid-match', () => {
-    const { core, join, ids } = started(3);
-    const [ada, ben, cy] = ids;
-    expect(core.room.host).toBe(0);
-    expect(rejectTo(core.handle(ben, { t: 'speed', speed: 2 }), ben)).toMatch(/host/i);
-    const out = core.disconnect(ada);
-    expect(core.room.host).toBe(1);
-    expect(pick(out, 'lobby', '*')[0].lobby.host).toBe(1);
-    expect(pick(core.handle(ben, { t: 'speed', speed: 2 }), 'reject')).toEqual([]);
-    expect(core.room.speed).toBe(2);
-    // Ada returns to her seat but the role stays with Ben.
-    expect(join(undefined, ada).seat).toBe(0);
-    expect(core.room.host).toBe(1);
-    expect(rejectTo(core.handle(ada, { t: 'speed', speed: 1 }), ada)).toMatch(/host/i);
-    // Ben drops: back to Ada, the first connected human. Then Ada drops: Cy.
-    core.disconnect(ben);
-    expect(core.room.host).toBe(0);
-    core.disconnect(ada);
-    expect(core.room.host).toBe(2);
-    expect(pick(core.handle(cy, { t: 'rematch' }), 'reject')).toEqual([]);
-    // With everyone gone the role simply waits for whoever comes back first.
-    core.disconnect(cy);
-    expect(core.room.host).toBe(2);
-    expect(join(undefined, ben).seat).toBe(1);
-    expect(core.room.host).toBe(1);
+  it('an unknown playerId joins a running match as a spectator: no seat, no drafts, no epochs', () => {
+    const { h, ids } = startedRoom(2);
+    h.send(ids[0], { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    const sp = h.join('Late', 'someone-else');
+    expect(sp.seat).toBe(-1);
+    const all = h.delivered.filter((d) => d.to === sp.playerId).map((d) => d.msg);
+    expect(all.map((m) => m.t)).toEqual(['welcome', 'lobby', 'state', 'seats']);
+    expect(JSON.stringify(all)).not.toMatch(/"epoch"|"revision"|"draft"|borrow/);
+    expect(only(all, 'state')[0].own).toBeNull();
+    ready(h, ids[0], 1, 0);
+    ready(h, ids[1]);
+    const later = h.take(sp.playerId);
+    expect(only(later, 'resolved')).toHaveLength(1);
+    expect(later.every((m) => ['seats', 'resolved', 'lobby', 'state', 'welcome'].includes(m.t))).toBe(true);
+    expect(JSON.stringify(later)).not.toMatch(/"epoch"|"draft"|"revision"/);
   });
-});
 
-describe('Match end, rematch and Endless', () => {
-  const playOut = (core: RoomCore): { beats: number; last: Outbound[] } => {
-    let beats = 0;
-    let last: Outbound[] = [];
-    while (core.room.status === 'playing' && beats < 5000) {
-      last = core.step();
-      beats++;
+  it('heartbeats are transport only: they never touch state, readiness or the hash', () => {
+    const { h, ids } = startedRoom(2);
+    ready(h, ids[0]);
+    h.take(ids[0]);
+    const before = snap(h);
+    for (let i = 0; i < 100; i++) {
+      const out = h.send(ids[i % 2], { t: 'ping', at: i });
+      expect(out).toEqual([{ to: ids[i % 2], msg: { t: 'pong', at: i } }]);
     }
-    return { beats, last };
-  };
-
-  it('plays a Blitz room to the final bell: status ended, result in the last snapshot, a lobby broadcast', () => {
-    const { core, host, game } = started(1, { mode: 'blitz', speed: 2 });
-    const { beats, last } = playOut(core);
-    const total = MODES.blitz.quarters * MODES.blitz.quarterTicks;
-    expect(MODES.blitz.quarters).toBe(4);
-    // Four eras at pace 2×, plus three Era Councils that run their full real-time countdown
-    // (the lone human never picks): the Council clock does not speed up with the pace.
-    expect(beats).toBe(total / 2 + 3 * COUNCIL_BEATS);
-    expect(game().players.every((p) => p.charters.length === 3)).toBe(true);
-    expect(game().tick).toBe(total);
-    expect(game().phase).toBe('ended');
-    expect(core.room.status).toBe('ended');
-    expect(last.map((o) => [o.to, o.msg.t])).toEqual([['*', 'snap'], ['*', 'lobby']]);
-    const snap = pick(last, 'snap')[0];
-    expect(snap.q).toEqual([MODES.blitz.quarters, 1, 0]);
-    expect(snap.res).toEqual(game().result);
-    expect(snap.res?.winner).toBeGreaterThanOrEqual(0);
-    expect(snap.fx).toContainEqual({ k: 'end' });
-    expect(pick(last, 'lobby')[0].lobby.status).toBe('ended');
-    // The room is at rest.
-    expect(core.running).toBe(false);
-    expect(core.step()).toEqual([]);
-    expect(game().tick).toBe(total);
-    expect(rejectTo(core.handle(host, { t: 'cmd', cmd: { c: 'borrow' } }), host)).toBe('The match is not running');
-    expect(core.summary()).toMatchObject({ status: 'ended', quarter: 4, era: 4, council: false, tick: total });
+    h.send('nobody', { t: 'ping', at: 5 });
+    expect(snap(h)).toBe(before);
   });
 
-  it('starts a rematch for the host: a fresh city, a new seed, welcomes and a full snapshot', () => {
-    const { core, ids, game } = started(2, { mode: 'blitz', speed: 2 });
-    const [ada, ben] = ids;
-    core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'roastery' } });
-    playOut(core);
-    const first = game();
-    expect(rejectTo(core.handle(ben, { t: 'rematch' }), ben)).toBe('Only the host calls a rematch');
-    expect(core.game).toBe(first);
-    const out = core.handle(ada, { t: 'rematch' });
-    const second = game();
-    expect(second).not.toBe(first);
-    expect(second.tick).toBe(0);
-    expect(second.phase).toBe('playing');
-    expect(second.buildings).toEqual([]);
-    expect(second.seed).not.toBe(first.seed);
-    expect(second.mode).toBe('blitz');
-    expect(second.players.map((p) => p.name)).toEqual(first.players.map((p) => p.name));
-    expect(core.room.matchNo).toBe(2);
-    expect(core.room.status).toBe('playing');
-    expect(pick(out, 'lobby', '*')[0].lobby).toMatchObject({ status: 'playing', matchNo: 2 });
-    expect(pick(out, 'welcome', ada)[0]).toMatchObject({ seat: 0, player: 0 });
-    expect(pick(out, 'welcome', ben)[0]).toMatchObject({ seat: 1, player: 1 });
-    const snap = pick(out, 'snap', '*');
-    expect(snap).toHaveLength(1);
-    expect(snap[0]).toMatchObject({ full: true, k: 0, q: [1, 0, 0], res: null });
-    expect(snap[0].meta?.seed).toBe(second.seed);
-    // And it plays.
-    expect(pick(core.step(), 'snap')[0].k).toBe(2);
-    expect(core.running).toBe(true);
-    // A rematch may also be called before the bell; each one is a new match number and seed.
-    core.handle(ada, { t: 'rematch' });
-    expect(core.room.matchNo).toBe(3);
-    expect(game().seed).not.toBe(second.seed);
-    expect(game().tick).toBe(0);
-  });
-
-  it('continues an ended match in Endless for the host', () => {
-    const { core, ids, game } = started(2, { mode: 'blitz', speed: 2 });
-    const [ada, ben] = ids;
-    expect(rejectTo(core.handle(ada, { t: 'endless' }), ada)).toBe('The match is still running');
-    playOut(core);
-    const limit = game().tick;
-    expect(rejectTo(core.handle(ben, { t: 'endless' }), ben)).toBe('Only the host extends the match');
-    expect(core.room.status).toBe('ended');
-    const out = core.handle(ada, { t: 'endless' });
-    expect(out.map((o) => [o.to, o.msg.t])).toEqual([['*', 'lobby'], ['*', 'snap']]);
-    expect(pick(out, 'lobby')[0].lobby.status).toBe('playing');
-    expect(pick(out, 'snap')[0]).toMatchObject({ full: true, k: limit, q: [5, 0, 1], res: null, cn: null });
-    expect(core.room.status).toBe('playing');
-    expect(core.room.matchNo).toBe(1);
-    expect(game().endless).toBe(true);
-    expect(core.running).toBe(true);
-    // It runs through two more era closes without ending again, and without another Council.
-    for (let i = 0; i < MODES.blitz.quarterTicks + 20; i++) expect(core.step()).toHaveLength(1);
-    expect(game().tick).toBe(limit + 2 * MODES.blitz.quarterTicks + 40);
-    expect(game().quarter).toBe(7);
-    expect(game().phase).toBe('playing');
-    expect(core.room.status).toBe('playing');
-    expect(core.handle(ben, { t: 'cmd', cmd: { c: 'borrow' } })).toEqual([]);
+  it('messages from unknown sockets are refused', () => {
+    const { h } = startedRoom(2);
+    const out = h.send('ghost', { t: 'ready', turn: 1, revision: 0, epoch: 0 });
+    expect(out).toEqual([{ to: 'ghost', msg: { t: 'error', code: 'spectator', message: 'Spectators cannot act' } }]);
   });
 });
 
-describe('Persistence', () => {
-  it('round-trips through serialize → JSON → restore and then steps identically', () => {
-    const { core, ids, game } = started(2, { speed: 2, seed: 777 });
-    const [ada, ben] = ids;
-    core.handle(ada, { t: 'cmd', cmd: { c: 'build', tile: idx(3, 6), kind: 'roastery' } });
-    for (let i = 0; i < 150; i++) core.step();
-    const saved = clone(core.serialize());
-    expect(saved.room).toEqual(core.room);
-    expect(saved.game).toEqual(game());
-    const restored = new RoomCore('IGNORED', 0, saved);
-    expect(restored.room.code).toBe('QRST');
-    expect(restored.lobby()).toEqual(core.lobby());
-    expect(restored.running).toBe(true);
-    expect(restored.seatOf(ben)).toBe(1);
-    for (let i = 0; i < 200; i++) {
-      const a = core.step();
-      const b = restored.step();
-      expect(b).toHaveLength(a.length);
+describe('persistence and rematch', () => {
+  it('a restored core (JSON round-trip, as the Durable Object does) carries on identically', () => {
+    const { h, ids } = startedRoom(2);
+    h.send(ids[0], { t: 'draft', turn: 1, revision: 1, orders: borrow });
+    ready(h, ids[0], 1, 0);
+    const copy = JSON.parse(snap(h)) as ReturnType<RoomCore['serialize']>;
+    const h2 = new RoomHarness(0, 'ABCD', new RoomCore('ABCD', 0, copy));
+    ready(h2, ids[1]);
+    ready(h, ids[1]);
+    expect(h2.core.game!.turn).toBe(2);
+    expect(stateHash(h2.core.game!)).toBe(hashNow(h));
+    expect(h2.core.room.log).toEqual(h.core.room.log);
+    // A duplicate Ready after the restore is still idempotent
+    const out = h2.send(ids[0], { t: 'ready', turn: 1, revision: 1, epoch: 1 });
+    expect(out).toHaveLength(1);
+  });
+
+  it('the host can rematch or continue in Endless after the final turn; others cannot', () => {
+    const { h, ids } = startedRoom(1, 'blitz');
+    h.send(ids[0], { t: 'rematch' });
+    expect(only(h.take(ids[0]), 'error').pop()).toMatchObject({ code: 'lobby' });
+    for (let t = 1; t <= 16; t++) {
+      const g = h.core.game!;
+      if (g.council) h.send(ids[0], { t: 'draft', turn: t, revision: 1, orders: [{ t: 'charter', key: g.council.offers[0][0] }] });
+      ready(h, ids[0], g.council ? 1 : 0, 0);
     }
-    expect(restored.game?.tick).toBe(150 * 2 + 200 * 2);
-    expect(JSON.stringify(restored.game)).toBe(JSON.stringify(game()));
-    expect(restored.room).toEqual(core.room);
-    // Commands and reconnects work against the restored room.
-    expect(restored.handle(ben, { t: 'cmd', cmd: { c: 'build', tile: idx(4, 6), kind: 'park' } })).toEqual([]);
-    expect(restored.game?.buildings.some((b) => b.kind === 'park' && b.owner === 1)).toBe(true);
-    restored.disconnect(ben);
-    const back = restored.join(ben, undefined, () => 'fresh');
-    expect(back).toMatchObject({ playerId: ben, seat: 1 });
-    expect(pick(back.out, 'snap', ben)[0].full).toBe(true);
-    // A lobby survives the trip as well.
-    const lobby = seated(2, 5);
-    const copy = new RoomCore('X', 0, clone(lobby.core.serialize()));
-    expect(copy.game).toBeNull();
-    expect(copy.lobby()).toEqual(lobby.core.lobby());
-    expect(pick(copy.handle(lobby.ids[0], { t: 'start' }), 'snap')).toHaveLength(1);
-    lobby.core.handle(lobby.ids[0], { t: 'start' });
-    expect(JSON.stringify(copy.game)).toBe(JSON.stringify(lobby.core.game));
+    expect(h.core.room.status).toBe('ended');
+    const snapshot = JSON.stringify(h.core.room.log);
+    h.send(ids[0], { t: 'endless' });
+    expect(h.core.room.status).toBe('playing');
+    expect(turnOf(h)).toBe(17);
+    expect(h.core.game!.endless).toBe(true);
+    expect(h.core.room.log).toHaveLength(16);
+    ready(h, ids[0]);
+    expect(turnOf(h)).toBe(18);
+    expect(h.core.room.log).toHaveLength(17);
+    expect(JSON.stringify(h.core.room.log.slice(0, 16))).toBe(snapshot);
+    // The continuation is part of the canonical record: the room's log replays bit-for-bit through it.
+    expect(h.core.room.endlessAt).toEqual([16]);
+    const rep = replayMatch(h.core.room.config!, h.core.room.log, h.core.room.endlessAt);
+    expect(rep.hashes).toEqual(h.core.room.hashes);
+    expect(stateHash(rep.game)).toBe(hashNow(h));
+  });
+
+  it('a rematch starts a fresh match with a new seed', () => {
+    const { h, ids } = startedRoom(1, 'blitz');
+    const first = h.core.room.config!.seed;
+    for (let t = 1; t <= 16; t++) {
+      const g = h.core.game!;
+      if (g.council) h.send(ids[0], { t: 'draft', turn: t, revision: 1, orders: [{ t: 'charter', key: g.council.offers[0][0] }] });
+      ready(h, ids[0], g.council ? 1 : 0, 0);
+    }
+    h.send(ids[0], { t: 'rematch' });
+    expect(h.core.room.matchNo).toBe(2);
+    expect(h.core.room.config!.seed).not.toBe(first);
+    expect(turnOf(h)).toBe(1);
+    expect(h.core.room.log).toEqual([]);
+    expect(h.core.room.lastResolved).toBe(0);
+    expect(playerOf(h, ids[0])).toBe(0);
   });
 });
 
-describe('parseClientMsg', () => {
-  it('accepts every valid message type and returns it intact', () => {
-    const valid: ClientMsg[] = [
-      { t: 'hello' },
-      { t: 'hello', name: 'Ada', playerId: 'pid-1' },
-      { t: 'lobby' },
-      { t: 'lobby', name: 'Ada', house: 2 },
-      { t: 'seat', seat: 1, ai: false },
-      { t: 'mode', mode: 'blitz' },
-      { t: 'mode', mode: 'standard' },
-      { t: 'mode', mode: 'endless' },
-      { t: 'start' },
-      { t: 'speed', speed: 1.5 },
-      { t: 'cmd', cmd: { c: 'build', tile: 5, kind: 'park' } },
-      { t: 'cmd', cmd: { c: 'borrow' } },
-      { t: 'rematch' },
-      { t: 'endless' },
-      { t: 'ping', at: 123456 },
-    ];
-    for (const msg of valid) expect(parseClientMsg(JSON.stringify(msg)), JSON.stringify(msg)).toEqual(msg);
-    expect(new Set(valid.map((m) => m.t)).size).toBe(10);
-    // A frame of exactly the size limit is still read.
-    const pad = { t: 'hello', name: '' };
-    pad.name = 'x'.repeat(4096 - JSON.stringify(pad).length);
-    expect(JSON.stringify(pad)).toHaveLength(4096);
-    expect(parseClientMsg(JSON.stringify(pad))).toEqual(pad);
-  });
-
-  it('rejects malformed JSON, unknown types, wrong field types and oversize frames', () => {
+describe('wire parsing', () => {
+  it('accepts well-formed frames and rejects malformed ones', () => {
+    const ok = (m: unknown) => parseClientMsg(JSON.stringify(m));
+    expect(ok({ t: 'ready', turn: 3, revision: 2, epoch: 1 })).toEqual({ t: 'ready', turn: 3, revision: 2, epoch: 1 });
+    expect(ok({ t: 'cancelReady', turn: 3, epoch: 1 })).toEqual({ t: 'cancelReady', turn: 3, epoch: 1 });
+    expect(ok({ t: 'draft', turn: 1, revision: 1, orders: [{ t: 'borrow' }] })).toEqual({ t: 'draft', turn: 1, revision: 1, orders: [{ t: 'borrow' }] });
+    expect(ok({ t: 'ping', at: 5 })).toEqual({ t: 'ping', at: 5 });
+    expect(ok({ t: 'start' })).toEqual({ t: 'start' });
+    expect(ok({ t: 'hello', playerId: 'abc', lastTurn: 4 })).toMatchObject({ t: 'hello', playerId: 'abc', lastTurn: 4 });
     const bad: unknown[] = [
-      'not json',
-      '',
-      '{"t":"hello"',
-      'null',
-      '42',
-      '"start"',
-      '[]',
-      '[{"t":"start"}]',
-      '{}',
-      '{"t":5}',
-      '{"t":"nope"}',
-      '{"t":"constructor"}',
-      '{"T":"start"}',
-      '{"t":"hello","name":5}',
-      '{"t":"hello","playerId":{}}',
-      '{"t":"lobby","name":["Ada"]}',
-      '{"t":"lobby","house":"2"}',
-      '{"t":"seat","seat":"1","ai":true}',
-      '{"t":"seat","seat":1}',
-      '{"t":"seat","seat":1,"ai":"yes"}',
-      '{"t":"mode"}',
-      '{"t":"mode","mode":"marathon"}',
-      '{"t":"speed"}',
-      '{"t":"speed","speed":"2"}',
-      '{"t":"cmd"}',
-      '{"t":"cmd","cmd":"build"}',
-      '{"t":"cmd","cmd":{}}',
-      '{"t":"cmd","cmd":{"c":5}}',
-      '{"t":"cmd","cmd":null}',
-      '{"t":"ping"}',
-      '{"t":"ping","at":"now"}',
-      { t: 'start' },
-      undefined,
+      { t: 'ready', turn: 1, revision: 1 },
+      { t: 'ready', turn: 1.5, revision: 1, epoch: 0 },
+      { t: 'ready', turn: '1', revision: 1, epoch: 0 },
+      { t: 'ready', turn: 1e12, revision: 1, epoch: 0 },
+      { t: 'cancelReady', turn: 1 },
+      { t: 'draft', turn: 1, revision: 1, orders: [{ t: 'nope' }] },
+      { t: 'draft', turn: 1, revision: 1 },
+      { t: 'mode', mode: 'tycoon' },
+      { t: 'seat', seat: 1 },
+      { t: 'zzz' },
+      [],
       null,
       7,
-      new Uint8Array([123, 125]),
     ];
-    for (const raw of bad) expect(parseClientMsg(raw), String(raw)).toBeNull();
-    const big = JSON.stringify({ t: 'hello', name: 'x'.repeat(5000) });
-    expect(big.length).toBeGreaterThan(4096);
-    expect(parseClientMsg(big)).toBeNull();
-    const pad = { t: 'hello', name: '' };
-    pad.name = 'x'.repeat(4097 - JSON.stringify(pad).length);
-    expect(parseClientMsg(JSON.stringify(pad))).toBeNull();
+    for (const b of bad) expect(ok(b), JSON.stringify(b)).toBeNull();
+    expect(parseClientMsg(null)).toBeNull();
+    expect(parseClientMsg('')).toBeNull();
+    expect(parseClientMsg('{nope')).toBeNull();
+    expect(parseClientMsg('x'.repeat(70000))).toBeNull();
+  });
+});
+
+describe('room retention alarm (PRODUCT.md "Seat reclaim")', () => {
+  const long = IDLE_PURGE_MS * 10;
+  it('never purges a started match, even with every socket away for a very long time', () => {
+    const { h } = startedRoom(2);
+    expect(h.core.room.status).toBe('playing');
+    expect(roomAlarmAction(h.core.room, h.core.game, 0, long)).toBe('keep');
+    expect(roomAlarmAction(h.core.room, h.core.game, 0, IDLE_PURGE_MS)).toBe('keep');
+    expect(roomAlarmAction(h.core.room, h.core.game, 2, long)).toBe('keep');
+  });
+  it('purges only unstarted lobbies and finished rooms that have sat idle with nobody connected', () => {
+    const lobby = new RoomCore('QRST', 1).room;
+    expect(lobby.status).toBe('lobby');
+    expect(roomAlarmAction(lobby, null, 0, IDLE_PURGE_MS - 1)).toBe('keep');
+    expect(roomAlarmAction(lobby, null, 0, IDLE_PURGE_MS)).toBe('purge');
+    expect(roomAlarmAction(lobby, null, 1, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, { phase: 'ended' }, 0, IDLE_PURGE_MS - 1)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, { phase: 'ended' }, 0, IDLE_PURGE_MS)).toBe('purge');
+  });
+  it('purges on the room AND its game together: a lobby with any game row, or an ended room without an ended game, is kept', () => {
+    const { h } = startedRoom(2);
+    const lobby = new RoomCore('QRST', 1).room;
+    expect(roomAlarmAction(lobby, h.core.game, 0, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'lobby' }, { phase: 'ended' }, 0, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, null, 0, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, { phase: 'planning' }, 0, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'playing' }, null, 0, long)).toBe('keep');
+  });
+  it('fails closed: a missing or unrecognised status is never purged', () => {
+    for (const status of [undefined, null, '', 'paused', 'LOBBY', 3]) {
+      expect(roomAlarmAction({ status } as never, null, 0, long)).toBe('keep');
+    }
+    expect(roomAlarmAction({} as never, null, 0, long)).toBe('keep');
+  });
+});
+
+describe('authority-scoped public export (GET /api/rooms/:code/export)', () => {
+  /** Play a started room to its final turn (the host readies every turn, adopting a Charter when a Council is due). */
+  function playToEnd(h: RoomHarness, id: string): void {
+    for (let guard = 0; h.core.room.status === 'playing' && guard < 80; guard++) {
+      const g = h.core.game!;
+      const orders: Order[] = g.council ? [{ t: 'charter', key: g.council.offers[0][0] }] : [];
+      if (orders.length) h.send(id, { t: 'draft', turn: g.turn, revision: 1, orders });
+      ready(h, id, orders.length ? 1 : 0, 0);
+    }
+  }
+  const PUBLIC_KEYS = ['config', 'hashes', 'log', 'version'];
+
+  it('is null before the match starts (the room answers 409) and for an unstarted lobby', () => {
+    const h = new RoomHarness(3);
+    h.join('Host');
+    expect(h.core.exportMatch()).toBeNull();
+  });
+
+  it('carries only version, config, log and hashes: no playerIds, tokens, drafts, Ready flags or epochs', () => {
+    const { h, ids } = startedRoom(2, 'standard');
+    // Resolve Turn 1, then leave private, unapplied Turn 2 state behind: a draft with a distinctive order and one Ready seat.
+    ready(h, ids[0]);
+    ready(h, ids[1]);
+    expect(turnOf(h)).toBe(2);
+    h.send(ids[0], { t: 'draft', turn: 2, revision: 1, orders: [{ t: 'recruit', kind: 'watch' }, { t: 'borrow' }] });
+    ready(h, ids[0], 1, 0);
+    const exp = h.core.exportMatch()!;
+    expect(Object.keys(exp).sort()).toEqual(PUBLIC_KEYS);
+    expect(exp.version).toBe(5);
+    expect(exp.log).toHaveLength(1);
+    expect(exp.hashes).toHaveLength(1);
+    expect(Object.keys(exp.config).sort()).toEqual(['mode', 'players', 'seed']);
+    for (const p of exp.config.players) expect(Object.keys(p).sort()).toEqual(['house', 'kind', 'name', 'persona']);
+    const wire = JSON.stringify(exp);
+    for (const id of ids) expect(wire).not.toContain(id);
+    for (const word of ['playerId', 'epoch', 'ready', 'draft', 'revision', 'token', 'borrow']) expect(wire.toLowerCase()).not.toContain(word.toLowerCase());
+    expect(JSON.parse(wire)).toEqual(exp); // plain JSON, nothing lost or aliased
+    // Exporting never mutates the room.
+    const before = snap(h);
+    h.core.exportMatch();
+    expect(snap(h)).toBe(before);
+  });
+
+  it('a finished Standard room export replays bit-for-bit through replayMatch', () => {
+    const { h, ids } = startedRoom(1, 'standard');
+    playToEnd(h, ids[0]);
+    expect(h.core.room.status).toBe('ended');
+    const exp = h.core.exportMatch()!;
+    expect(exp.log).toHaveLength(h.core.game!.turn - 1);
+    expect(exp.endlessAt).toBeUndefined();
+    const rep = replayMatch(exp.config, exp.log, exp.endlessAt ?? []);
+    expect(rep.hashes).toEqual(exp.hashes);
+    expect(rep.hashes).toEqual(h.core.room.hashes);
+    expect(stateHash(rep.game)).toBe(hashNow(h));
+  });
+
+  it('a room that continued in Endless exports endlessAt and the Endless turns, and replays bit-for-bit', () => {
+    const { h, ids } = startedRoom(2, 'standard');
+    const [a, b] = ids;
+    for (let guard = 0; h.core.room.status === 'playing' && guard < 80; guard++) {
+      const g = h.core.game!;
+      for (const id of [a, b]) {
+        const orders: Order[] = g.council ? [{ t: 'charter', key: g.council.offers[playerOf(h, id)][0] }] : [];
+        if (orders.length) h.send(id, { t: 'draft', turn: g.turn, revision: 1, orders });
+        ready(h, id, orders.length ? 1 : 0, 0);
+      }
+    }
+    expect(h.core.room.status).toBe('ended');
+    const finished = h.core.exportMatch()!;
+    h.send(a, { t: 'endless' });
+    for (let i = 0; i < 2; i++) {
+      h.send(a, { t: 'draft', turn: turnOf(h), revision: 1, orders: [{ t: 'borrow' }] });
+      ready(h, a, 1, 0);
+      ready(h, b);
+    }
+    h.send(a, { t: 'draft', turn: turnOf(h), revision: 1, orders: [{ t: 'borrow' }] }); // an unapplied private draft
+    const exp = h.core.exportMatch()!;
+    expect(Object.keys(exp).sort()).toEqual(['config', 'endlessAt', 'hashes', 'log', 'version']);
+    expect(exp.endlessAt).toEqual([finished.log.length]);
+    expect(exp.log).toHaveLength(finished.log.length + 2);
+    expect(exp.log.slice(0, finished.log.length)).toEqual(finished.log);
+    const rep = replayMatch(exp.config, exp.log, exp.endlessAt);
+    expect(rep.hashes).toEqual(exp.hashes);
+    expect(stateHash(rep.game)).toBe(hashNow(h));
+    // The unapplied Turn N draft and the player ids stay out of the download.
+    const wire = JSON.stringify(exp);
+    for (const id of ids) expect(wire).not.toContain(id);
+    expect(exp.log.length).toBe(h.core.room.log.length);
+  });
+
+  it('survives the Durable Object storage round-trip identically (restore, then export)', () => {
+    const { h, ids } = startedRoom(1, 'standard');
+    ready(h, ids[0]);
+    const restored = new RoomCore('ABCD', 5, { room: JSON.parse(JSON.stringify(h.core.room)), game: JSON.parse(JSON.stringify(h.core.game)) });
+    expect(restored.exportMatch()).toEqual(h.core.exportMatch());
   });
 });

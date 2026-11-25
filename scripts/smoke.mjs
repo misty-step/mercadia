@@ -1,1594 +1,1560 @@
-// MERCADIA v2 smoke check. Needs the Worker running (npm run dev) and a Chrome/Chromium binary.
-//   node scripts/smoke.mjs            BASE=http://127.0.0.1:8787  CHROME=/usr/bin/google-chrome
-//   ONLY=api,solo,guide,dev,mobile,ledger,multi node scripts/smoke.mjs   run some sections only
-// Drives the real wrangler dev path: the API; a solo Standard match (objective, Founding Guide,
-// Era locks, Era Council + Dynasty Charters, Milestones, heraldry on the HUD and on the canvas,
-// the Mercadia Chronicle, layout budgets, the Final Edition, Endless); a 390×844 phone; and two
-// browser contexts sharing one multiplayer room over WebSockets (live sync, Era Council charter
-// sync and countdown, reconnect, closed-tab seat reclaim, spectator notice, host migration) —
-// with zero console errors, page errors or failed requests.
-import { mkdirSync } from 'node:fs';
+// Acceptance smoke: drives the REAL app (wrangler dev: Worker + Durable Object rooms + built client)
+// in real Chrome via playwright-core. It maps to PRODUCT.md "Acceptance checks" 1–17 and the QA bar.
+//
+//   npm run build && npm run dev        (in another shell)
+//   npm run smoke                       BASE=http://127.0.0.1:8787  CHROME=/usr/bin/google-chrome
+//
+//   ONLY=solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,legacy,idle   run sections selectively
+//   FAST=1                                      shorten the 2-minute/5-minute idle checks to 20 s (NOT acceptance-grade)
+//   SMOKE_CONCURRENCY=n                         run at most n sections at once (default: all)
+//   MEDIA=/path                                 directory for videos and screenshots (default ~/chief-evidence/media)
+//
+// Every page must finish with zero console errors/warnings, zero page errors, zero
+// securitypolicyviolation events and zero failed network/WebSocket requests.
 import { chromium } from 'playwright-core';
+import { execFileSync } from 'node:child_process';
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { legacySection } from './legacy-section.mjs';
 
 const BASE = process.env.BASE ?? 'http://127.0.0.1:8787';
 const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
-const OUT = process.env.OUT ?? 'smoke-artifacts';
-const ONLY = (process.env.ONLY ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-const wants = (section) => ONLY.length === 0 || ONLY.includes(section);
-mkdirSync(OUT, { recursive: true });
-const started = Date.now();
+const FAST = process.env.FAST === '1';
+const MEDIA = process.env.MEDIA ?? join(homedir(), 'chief-evidence', 'media');
+const RAW = join(MEDIA, '.raw');
+const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,legacy,idle').split(',');
+const IDLE_MS = FAST ? 20_000 : 125_000;
+const HEARTBEAT_MS = FAST ? 30_000 : 300_000;
+mkdirSync(MEDIA, { recursive: true });
+rmSync(RAW, { recursive: true, force: true });
+mkdirSync(RAW, { recursive: true });
 
-const receipts = [];
-const problems = [];
-const ok = (name, detail = '') => {
-  receipts.push({ check: name, ok: true, detail });
-  console.log(`  ok  ${name}${detail ? ' — ' + detail : ''}`);
+const results = [];
+let failures = 0;
+// Seat tokens must never reach stdout or smoke-results.json, on pass or on fail. Callers pass booleans and counts;
+// this is the backstop: any UUID, `mercadia:pid:` payload or `"id":` seat-token object in a detail is masked.
+const scrub = (text) =>
+  String(text)
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<redacted-id>')
+    .replace(/\{[^{}]*"id"\s*:[^{}]*\}/g, '<redacted-token>')
+    .replace(/mercadia:pid:[A-Z]{4}["']?\s*[:=]\s*\S+/g, 'mercadia:pid:<redacted>');
+const ok = (cond, name, detail = '') => {
+  const d = scrub(detail);
+  results.push({ name, pass: !!cond, detail: d });
+  if (!cond) failures++;
+  console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond || !d ? '' : '  — ' + d}`);
 };
-const check = (cond, name, detail = '') => {
-  if (cond) return ok(name, detail);
-  receipts.push({ check: name, ok: false, detail });
-  problems.push(`${name}${detail ? ' — ' + detail : ''}`);
-  console.log(`FAIL  ${name}${detail ? ' — ' + detail : ''}`);
-};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const OBJECTIVE = 'Lead your House across 4 Eras — highest Crown Index wins';
-const BRASS = '#D4A34A';
-const CANAL = '#3E8E9E';
-const HOUSE_COLOR = { vermilion: '#D6453A', cobalt: '#2667B8', marigold: '#D48C1C', emerald: '#248A63' };
-const HOUSE_CREST = { vermilion: 'compass', cobalt: 'anchor', marigold: 'sunburst', emerald: 'laurel' };
-const ERA2 = ['arcade', 'nightmarket', 'tramstop'];
-const ERA3 = ['boutique', 'cinema', 'plaza'];
+const browser = await chromium.launch({ executablePath: CHROME, args: ['--no-sandbox'] });
+const pages = []; // for the final hygiene check
+const droppedBlank = []; // recorded clips that never showed a rendered frame; removed from the media directory at the end
 
-// ── API ──
-if (wants('api')) {
-  console.log('API');
-  const health = await fetch(`${BASE}/api/health`);
-  const healthBody = await health.json();
-  check(health.status === 200 && healthBody.ok === true && healthBody.game === 'mercadia' && /^2\./.test(healthBody.version ?? ''), 'GET /api/health', JSON.stringify(healthBody));
-  const made = await fetch(`${BASE}/api/rooms`, { method: 'POST' });
-  const madeBody = await made.json();
-  check(made.status === 201 && /^[A-Z]{4}$/.test(madeBody.code ?? '') && madeBody.wsPath === `/ws/rooms/${madeBody.code}`, 'POST /api/rooms', JSON.stringify(madeBody));
-  const summary = await fetch(`${BASE}/api/rooms/${madeBody.code}`);
-  const summaryBody = await summary.json();
-  check(summary.status === 200 && summaryBody.status === 'lobby', 'GET /api/rooms/:code', `status=${summaryBody.status} ai=${summaryBody.ai} open=${summaryBody.open}`);
-  const missing = await fetch(`${BASE}/api/rooms/ZZZZ`);
-  check(missing.status === 404, 'GET /api/rooms/ZZZZ is 404', String(missing.status));
-  const page404 = await fetch(`${BASE}/some/deep/link`);
-  check(page404.status === 200 && (page404.headers.get('content-type') ?? '').includes('text/html'), 'unknown paths fall through to the SPA', String(page404.status));
+async function ctx(name, { mobile = false, video = true } = {}) {
+  const context = await browser.newContext({
+    viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 },
+    deviceScaleFactor: mobile ? 2 : 1,
+    isMobile: mobile,
+    hasTouch: mobile,
+    recordVideo: video ? { dir: RAW, size: mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 } } : undefined,
+  });
+  await context.addInitScript(() => {
+    window.__csp = [];
+    document.addEventListener('securitypolicyviolation', (e) => window.__csp.push(`${e.violatedDirective} ${e.blockedURI}`));
+  });
+  return { context, name };
 }
 
-// ── Browsers ──
-// mercadia.test resolves to this machine, so the page can be loaded under a non-local hostname
-// to prove the dev hook is gated there.
-const PORT = new URL(BASE).port || '80';
-const browser = await chromium.launch({ executablePath: CHROME, args: ['--no-sandbox', '--mute-audio', '--host-resolver-rules=MAP mercadia.test 127.0.0.1'] });
-const errors = [];
-const watch = (page, label) => {
+async function openPage(c, tag) {
+  const page = await c.context.newPage();
+  const rec = { tag: `${c.name}/${tag}`, issues: [], page };
   page.on('console', (m) => {
-    if (m.type() === 'error') errors.push(`[${label}] console.error: ${m.text()}`);
+    if (m.type() === 'error' || m.type() === 'warning') rec.issues.push(`console.${m.type()}: ${m.text()}`);
   });
-  page.on('pageerror', (e) => errors.push(`[${label}] pageerror: ${e.message}`));
-  page.on('requestfailed', (r) => errors.push(`[${label}] requestfailed: ${r.url()} ${r.failure()?.errorText ?? ''}`));
-};
-/** Two animation frames (or 250 ms, should the page not be painting). */
-const frames = (page) =>
-  page
-    .evaluate(() => new Promise((r) => { const t = setTimeout(() => r(false), 250); requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); r(true); })); }))
-    .catch(() => false);
-/**
- * The game publishes state first and paints it on the next frame: the HUD is rebuilt, feedback
- * events are played (toasts, the new building's Inspector), an armed tool is dropped. A check
- * that samples the page the instant a state flag flips can land ahead of that frame. So every
- * waitForFunction on a page settles for two frames before it returns: what the script reads
- * next is what a player would see.
- */
-const steady = (page) => {
-  const wait = page.waitForFunction.bind(page);
-  page.waitForFunction = async (...args) => {
-    const handle = await wait(...args);
-    await frames(page);
-    return handle;
-  };
+  page.on('pageerror', (e) => rec.issues.push(`pageerror: ${e.message}`));
+  page.on('requestfailed', (r) => rec.issues.push(`requestfailed: ${r.url()} ${r.failure()?.errorText}`));
+  page.on('response', (r) => {
+    if (r.status() >= 400) rec.issues.push(`http ${r.status()}: ${r.url()}`);
+  });
+  pages.push(rec);
   return page;
-};
-const ready = (page) => page.waitForFunction(() => window.__mercadia && window.__mercadia.state().ready, null, { timeout: 20000 });
-const open = async (label, path = '/', ctxOpts = {}) => {
-  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, ...ctxOpts });
-  const page = steady(await ctx.newPage());
-  watch(page, label);
-  await page.goto(path.startsWith('http') ? path : BASE + path);
-  await ready(page);
-  return page;
-};
-const state = (page) => page.evaluate(() => window.__mercadia.state());
-const info = (page) => page.evaluate(() => ({ phase: window.__mercadia.phase, kind: window.__mercadia.kind, me: window.__mercadia.me, seat: window.__mercadia.seat, room: window.__mercadia.roomCode, frames: window.__mercadia.frames, tool: window.__mercadia.tool }));
-const hook = (page, name) => page.evaluate((name) => { const v = window.__mercadia[name]; return typeof v === 'function' ? v.call(window.__mercadia) : v; }, name);
-const sleep = (page, ms) => page.waitForTimeout(ms);
+}
+
 /**
- * A screenshot taken while a server countdown is running (the multiplayer Era Council sits for
- * 18 s): it may not eat the countdown, so it gives up after `budget` ms and says so. The
- * picture is evidence, never a gate.
+ * Decode a recorded clip with ffmpeg `signalstats` and report whether it ever shows real rendered UI: a blank clip
+ * (a page closed before its first paint is all-white, luma 252-255) has no frame whose luma range (YMAX-YMIN)
+ * reaches BLANK_RANGE, while any frame holding text, ink or House colour spans well over 100.
+ * Returns { frames, maxRange, minYmin, maxYmax, blank } or null when ffmpeg cannot decode it.
  */
-const shot = async (page, path, budget = 4000) => {
+const BLANK_RANGE = 24;
+function videoStats(file) {
+  let out;
   try {
-    await page.screenshot({ path, timeout: budget });
-    return true;
-  } catch (e) {
-    console.log(`  note  screenshot ${path} skipped: ${String(e.message ?? e).split('\n')[0]}`);
-    return false;
-  }
-};
-/** Let lazily requested webfonts land before a reload or a close, so the navigation aborts nothing in flight. */
-const settle = async (page) => {
-  await page.evaluate(() => document.fonts.ready.then(() => true));
-  await page.waitForLoadState('networkidle').catch(() => undefined);
-};
-/** The free lot nearest the middle of the open map area. */
-const freeLot = (page, avenue = null) =>
-  page.evaluate((avenue) => {
-    const m = window.__mercadia;
-    const strip = innerWidth <= 720 ? (document.getElementById('chronicle')?.getBoundingClientRect().bottom ?? 0) : 0;
-    const top = Math.max(strip, document.getElementById('board')?.getBoundingClientRect().bottom ?? 0) + 30;
-    const bottom = innerWidth <= 720 ? innerHeight - 230 : innerHeight - 110;
-    const right = innerWidth <= 720 ? innerWidth : innerWidth - 270;
-    const left = innerWidth <= 720 ? 20 : 330;
-    let best = null;
-    for (const t of m.freeLots()) {
-      const p = m.tileScreen(t);
-      if (p.y < top || p.y > bottom || p.x < left || p.x > right) continue;
-      if (avenue !== null && m.avenueSide(t) !== avenue) continue;
-      const d = Math.hypot(p.x - right / 2, p.y - (top + bottom) / 2);
-      if (!best || d < best.d) best = { t, x: p.x, y: p.y, d };
-    }
-    return best;
-  }, avenue);
-/** Pick a dock tool, then click a free lot (or the given tile). */
-const build = async (page, kind, tile = null) => {
-  await page.click(`#dock [data-kind="${kind}"]`);
-  const target = tile === null ? await freeLot(page) : { t: tile, ...(await page.evaluate((t) => window.__mercadia.tileScreen(t), tile)) };
-  await page.mouse.move(target.x, target.y);
-  await page.waitForTimeout(120);
-  await page.mouse.click(target.x, target.y);
-  return target.t;
-};
-/**
- * Wait for a building to stand, then for two more frames: on a desktop the client opens the
- * new building's Inspector when its build event is played, a frame after the city shows it.
- * Without the pause a click made straight after could be overtaken by that late selection.
- */
-const built = async (page, tile, kind, owner = 0) => {
-  await page.waitForFunction(([t, k, o]) => window.__mercadia.state().buildings.some((b) => b.tile === t && b.kind === k && b.owner === o), [tile, kind, owner], { timeout: 6000 });
-  await frames(page);
-};
-/**
- * Build two Pocket Parks of my own on adjacent lots, through the dock and the canvas. A rival
- * may claim a lot between the pick and the click (the AI Houses open around tick 100), so each
- * park is picked fresh and placed with a check; a lost lot just means another pick.
- * Returns the two adjacent park tiles, or null.
- */
-const adjacentParks = async (page) => {
-  const myParks = () => page.evaluate(() => { const m = window.__mercadia; return m.state().buildings.filter((b) => b.owner === m.me && b.kind === 'park').map((b) => b.tile); });
-  const pairOf = (tiles) => {
-    for (const t of tiles) for (const u of tiles) if (t < u && Math.abs((t % 12) - (u % 12)) + Math.abs(Math.floor(t / 12) - Math.floor(u / 12)) === 1) return [t, u];
+    out = execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-vf', 'signalstats,metadata=print:file=-', '-an', '-f', 'null', '-'], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  } catch {
     return null;
+  }
+  let frames = 0;
+  let maxRange = 0;
+  let minYmin = 255;
+  let maxYmax = 0;
+  let cur = {};
+  const flush = () => {
+    if (cur.YMIN === undefined || cur.YMAX === undefined) return;
+    frames++;
+    maxRange = Math.max(maxRange, cur.YMAX - cur.YMIN);
+    minYmin = Math.min(minYmin, cur.YMIN);
+    maxYmax = Math.max(maxYmax, cur.YMAX);
   };
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const have = await myParks();
-    const done = pairOf(have);
-    if (done) return done;
-    const target = await page.evaluate((have) => {
-      const m = window.__mercadia;
-      const free = new Set(m.freeLots());
-      const okAt = (t) => { const p = m.tileScreen(t); return p.y > 190 && p.y < innerHeight - 130 && p.x > 340 && p.x < innerWidth - 290; };
-      const adj = (t) => [t - 1, t + 1, t - 12, t + 12].filter((u) => u >= 0 && u < 144 && Math.abs((u % 12) - (t % 12)) + Math.abs(Math.floor(u / 12) - Math.floor(t / 12)) === 1);
-      for (const h of have) for (const u of adj(h)) if (free.has(u) && okAt(u)) return u;
-      for (const t of free) if (okAt(t) && adj(t).some((u) => free.has(u) && okAt(u))) return t;
-      return -1;
-    }, have);
-    if (target < 0) return null;
-    await page.keyboard.press('Escape');
-    await page.keyboard.press('Escape');
-    if ((await page.evaluate(() => window.__mercadia.tool)) !== 'park') await page.click('#dock [data-kind="park"]');
-    const at = await page.evaluate((t) => window.__mercadia.tileScreen(t), target);
-    await page.mouse.move(at.x, at.y);
-    await page.waitForTimeout(120);
-    await page.mouse.click(at.x, at.y);
-    const stood = await page.waitForFunction((t) => { const m = window.__mercadia; return m.state().buildings.some((b) => b.tile === t && b.kind === 'park' && b.owner === m.me); }, target, { timeout: 2500 }).then(() => true, () => false);
-    if (!stood) {
-      // Say why, so a refused build is never silently retried away.
-      const why = await page.evaluate((t) => { const m = window.__mercadia; const b = m.state().buildings.find((x) => x.tile === t); return `${b ? `lot taken by player ${b.owner} (${b.kind})` : 'lot still free'} · tool=${m.tool} · toast="${document.querySelector('#toasts .toast.bad')?.textContent ?? ''}"`; }, target);
-      console.log(`  note  park on lot ${target} was not built (attempt ${attempt + 1}): ${why}`);
+  for (const line of out.split('\n')) {
+    if (line.startsWith('frame:')) {
+      flush();
+      cur = {};
+      continue;
+    }
+    const m = /^lavfi\.signalstats\.(YMIN|YMAX)=(\d+(?:\.\d+)?)/.exec(line);
+    if (m) cur[m[1]] = Number(m[2]);
+  }
+  flush();
+  return { frames, maxRange, minYmin, maxYmax, blank: frames === 0 || maxRange < BLANK_RANGE };
+}
+
+async function finishCtx(c, videoName, pagesToName = []) {
+  // Read the live pages' CSP violations BEFORE the context closes (a closed page cannot be asked).
+  for (const rec of pages) {
+    if (!c.context.pages().includes(rec.page)) continue;
+    try {
+      rec.csp = await rec.page.evaluate(() => window.__csp ?? []);
+    } catch (e) {
+      rec.csp = null;
+      rec.issues.push(`csp-capture-failed: ${e.message}`);
     }
   }
-  return pairOf(await myParks());
-};
-const text = (page, sel) => page.evaluate((sel) => document.querySelector(sel)?.textContent?.trim() ?? '', sel);
-const visible = (page, sel) =>
-  page.evaluate((sel) => {
-    const el = document.querySelector(sel);
-    if (!el) return false;
-    const r = el.getBoundingClientRect();
-    const cs = getComputedStyle(el);
-    return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none' && r.left >= -0.5 && r.right <= innerWidth + 0.5 && r.top >= -0.5 && r.bottom <= innerHeight + 0.5;
-  }, sel);
-/** Run the solo simulation forward in small chunks, logging every Chronicle dispatch on the way. */
-const warpBy = async (page, ticks, { hold = false, log = null } = {}) => {
-  let left = ticks;
-  let moved = 0;
-  let last = null;
-  while (left > 0) {
-    const step = Math.min(100, left);
-    last = await page.evaluate(([n, hold]) => {
-      const m = window.__mercadia;
-      const t0 = m.state().tick;
-      m.warp(n, hold);
-      const s = m.state();
-      return { moved: s.tick - t0, phase: s.phase, tick: s.tick, ch: m.chronicle() };
-    }, [step, hold]);
-    if (log) for (const d of last.ch) log.set(d.n, d);
-    moved += last.moved;
-    left -= step;
-    if (last.phase === 'ended' || (hold && last.phase === 'council')) break;
+  const paths = [];
+  for (const p of c.context.pages()) {
+    const v = p.video();
+    if (v) paths.push(v);
   }
-  await frames(page); // let the frame loop play what the warp produced (toasts, selections, a dropped tool)
-  return { moved, phase: last?.phase, tick: last?.tick };
-};
-const collect = async (page, log) => {
-  for (const d of await page.evaluate(() => window.__mercadia.chronicle())) log.set(d.n, d);
-};
-/** Persistent HUD panels: which are clipped by the viewport, which overlap, and how much city they cover. */
-const PANELS = ['#clock', '#chronicle', '#guide', '#board', '#treasury', '#docktabs', '#dock', '#spectator'];
-const layout = (page, sels = PANELS) =>
-  page.evaluate((sels) => {
-    const rects = [];
-    for (const sel of sels) {
-      const el = document.querySelector(sel);
-      if (!el || el.hidden) continue;
-      const cs = getComputedStyle(el);
-      const r = el.getBoundingClientRect();
-      if (cs.display === 'none' || cs.visibility === 'hidden' || r.width < 1 || r.height < 1) continue;
-      rects.push({ sel, l: r.left, t: r.top, r: r.right, b: r.bottom });
+  await c.context.close();
+  let i = 0;
+  for (const v of paths) {
+    try {
+      const src = await v.path();
+      const name = pagesToName[i] ?? `${videoName}${paths.length > 1 ? '-' + (i + 1) : ''}`;
+      copyFileSync(src, join(MEDIA, `${name}.webm`));
+    } catch {
+      // ignore
     }
-    const clipped = rects.filter((q) => q.l < -0.5 || q.t < -0.5 || q.r > innerWidth + 0.5 || q.b > innerHeight + 0.5).map((q) => q.sel);
-    const overlaps = [];
-    for (let i = 0; i < rects.length; i++)
-      for (let j = i + 1; j < rects.length; j++) {
-        const a = rects[i];
-        const b = rects[j];
-        const w = Math.min(a.r, b.r) - Math.max(a.l, b.l);
-        const h = Math.min(a.b, b.b) - Math.max(a.t, b.t);
-        if (w > 1 && h > 1) overlaps.push(`${a.sel}×${b.sel}`);
-      }
-    // Union area on a 2 px raster.
-    const S = 2;
-    const W = Math.ceil(innerWidth / S);
-    const H = Math.ceil(innerHeight / S);
-    const grid = new Uint8Array(W * H);
-    for (const q of rects) {
-      const x0 = Math.max(0, Math.floor(q.l / S));
-      const x1 = Math.min(W, Math.ceil(q.r / S));
-      const y0 = Math.max(0, Math.floor(q.t / S));
-      const y1 = Math.min(H, Math.ceil(q.b / S));
-      for (let y = y0; y < y1; y++) grid.fill(1, y * W + x0, y * W + x1);
-    }
-    let on = 0;
-    for (let i = 0; i < grid.length; i++) on += grid[i];
-    return { shown: rects.map((q) => q.sel), clipped, overlaps, coverage: (on / grid.length) * 100, size: `${innerWidth}×${innerHeight}` };
-  }, sels);
-/** Count canvas pixels close to any of the given colours in a box around each tile. */
-const housePixels = (page, tiles, colors, tol = 26) =>
-  page.evaluate(([tiles, colors, tol]) => {
-    const cv = document.querySelector('#stage canvas');
-    const g = cv.getContext('2d');
-    const k = cv.width / cv.clientWidth;
-    const rgb = colors.map((c) => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)]);
-    let n = 0;
-    for (const t of tiles) {
-      const p = window.__mercadia.tileScreen(t);
-      const x0 = Math.max(0, Math.round((p.x - 46) * k));
-      const y0 = Math.max(0, Math.round((p.y - 112) * k));
-      const w = Math.min(cv.width - x0, Math.round(92 * k));
-      const h = Math.min(cv.height - y0, Math.round(142 * k));
-      if (w <= 0 || h <= 0) continue;
-      const d = g.getImageData(x0, y0, w, h).data;
-      for (let i = 0; i < d.length; i += 4) {
-        for (const c of rgb) {
-          if (Math.abs(d[i] - c[0]) + Math.abs(d[i + 1] - c[1]) + Math.abs(d[i + 2] - c[2]) <= tol) {
-            n++;
-            break;
-          }
-        }
-      }
-    }
-    return n;
-  }, [tiles, colors, tol]);
-/** Ticks since the last rivalry headline (they are rationed to one per quiet window). */
-const rivalQuiet = (page) =>
+    i++;
+  }
+}
+
+const shot = (page, name) => page.screenshot({ path: join(MEDIA, `${name}.png`) });
+
+/**
+ * Click a real UI control that triggers a browser download, capture Playwright's real download event,
+ * save the file and parse it. No window.__mercadia shortcut: this is exactly what a player gets.
+ */
+async function downloadVia(page, locator, file) {
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 10000 }), locator.click()]);
+  await dl.saveAs(file);
+  return { exp: JSON.parse(readFileSync(file, 'utf8')), name: dl.suggestedFilename() };
+}
+
+/** Make sure the Turn Delta drawer is open, fully faded in, on screen and on top; returns its measured state. */
+async function ensureDeltaOpen(page) {
+  const pressed = await page.evaluate(() => document.querySelector('#hud [data-act="delta"]')?.getAttribute('aria-pressed') === 'true' && document.querySelector('#h-drawer')?.classList.contains('open'));
+  if (!pressed) await page.locator('#hud [data-act="delta"]').click();
+  await page.waitForFunction(
+    () => {
+      const d = document.querySelector('#h-drawer');
+      if (!d || !d.classList.contains('open')) return false;
+      if (!/^Turn \d+ → \d+$/.test(document.querySelector('#h-dh')?.textContent.trim() ?? '')) return false;
+      const r = d.getBoundingClientRect();
+      const last = window.__drawerRect;
+      window.__drawerRect = `${r.x},${r.y},${r.width},${r.height}`;
+      const inside = r.width > 0 && r.height > 0 && r.left >= -1 && r.top >= -1 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1;
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 120));
+      return getComputedStyle(d).opacity === '1' && inside && !!hit && d.contains(hit) && last === window.__drawerRect;
+    },
+    null,
+    { timeout: 8000, polling: 120 },
+  );
+  await sleep(150);
+  return page.evaluate(() => {
+    const d = document.querySelector('#h-drawer');
+    const r = d.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 120));
+    return { opacity: getComputedStyle(d).opacity, rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }, vw: innerWidth, vh: innerHeight, onTop: d.contains(hit), heading: document.querySelector('#h-dh').textContent.trim() };
+  });
+}
+const deltaOpenOk = (st) => st.opacity === '1' && st.rect.w > 100 && st.rect.h > 100 && st.rect.x >= -1 && st.rect.y >= -1 && st.rect.x + st.rect.w <= st.vw + 1 && st.rect.y + st.rect.h <= st.vh + 1 && st.onTop;
+
+// ── helpers over the real UI ──
+const M = (page) =>
   page.evaluate(() => {
     const m = window.__mercadia;
-    const r = m.chronicle().filter((d) => d.cat === 'promo' || d.cat === 'rival');
-    return m.state().tick - (r.length ? r[r.length - 1].tick : -9999);
+    const g = m.view.game;
+    return { turn: m.turn, hash: m.hash, cash: g.players[Math.max(0, m.seat)].cash, units: g.units.map((u) => `${u.id}:${u.tile}`).join(','), draft: m.draft.length, seat: m.seat, resolutions: m.view.resolutions, ready: m.view.ready, label: m.view.endTurn.label, status: m.view.status.text, notices: m.view.notices.map((n) => n.text), phase: m.phase };
   });
-const boardCrests = (page) =>
-  page.evaluate(() => [...document.querySelectorAll('#board .row')].map((r) => ({ p: Number(r.dataset.p), house: r.dataset.house, crest: r.querySelector('.hcrest')?.dataset.crest ?? '', shown: (r.querySelector('.hcrest')?.getBoundingClientRect().width ?? 0) >= 10, stars: r.querySelectorAll('.mstar.on').length })));
-const crestsOk = (rows, CREST) => rows.length === 4 && new Set(rows.map((r) => r.crest)).size === 4 && rows.every((r) => r.shown && CREST[r.house] === r.crest);
-const PHONE = { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 };
+const tileClick = async (page, tile, opts = {}) => {
+  const pos = await page.evaluate((t) => window.__mercadia.tileScreenPos(t), tile);
+  if (!pos) throw new Error(`tile ${tile} off screen`);
+  await page.mouse.click(pos.x, pos.y, opts);
+};
+const endBtn = (page) => page.getByRole('button', { name: /^(End Turn|Cancel Ready|Saving draft|Choose a Charter|Reconnecting|Resolving)/ }).last();
+const startSolo = async (page, query = '') => {
+  await page.goto(`${BASE}/?dev=1${query}`);
+  await page.getByRole('button', { name: /Play Solo Now/i }).click();
+  await page.waitForFunction(() => window.__mercadia?.phase === 'planning');
+  await sleep(400);
+};
+const turnOf = async (page) => (await M(page)).turn;
+const waitTurn = (page, n, timeout = 15000) => page.waitForFunction((t) => window.__mercadia?.turn === t, n, { timeout });
 
-// ───────────────────────────── Solo ─────────────────────────────
-if (wants('solo')) {
-  console.log('Solo');
-  const solo = await open('solo');
-  const log = new Map(); // every Chronicle dispatch seen in this match, by serial number
-  const attract = await state(solo);
-  check(attract.citizens >= 45 && attract.trams >= 2, 'title screen floats over a live city', `citizens=${attract.citizens} trams=${attract.trams} players=${attract.players.length}`);
-  await solo.screenshot({ path: `${OUT}/01-title.png` });
-  const titleCopy = await solo.evaluate(() => ({ obj: document.querySelector('#title .objective')?.textContent ?? '', blurb: document.querySelector('#title .modeblurb')?.textContent ?? '' }));
-  check(titleCopy.obj === OBJECTIVE && /4 deliberate eras/.test(titleCopy.blurb), 'the Title states the objective and that Standard is 4 deliberate eras', `"${titleCopy.obj}" · "${titleCopy.blurb}"`);
-  // Hotkeys must not leak through the Title screen.
-  await solo.locator('#stage').focus().catch(() => undefined);
-  for (const key of ['1', '5', '9', 'Space']) await solo.keyboard.press(key);
-  const titleInfo = await info(solo);
-  check(titleInfo.phase === 'title' && titleInfo.tool === null, 'build and speed hotkeys are ignored on the Title screen', `phase=${titleInfo.phase} tool=${titleInfo.tool}`);
-  // Sound toggle: aria-pressed and a label that says what the next press does.
-  const soundOf = () => solo.evaluate(() => { const b = document.querySelector('#title [data-act="sound"]'); return { p: b.getAttribute('aria-pressed'), l: b.getAttribute('aria-label'), t: b.title }; });
-  const sound0 = await soundOf();
-  await solo.click('#title [data-act="sound"]');
-  const sound1 = await soundOf();
-  await solo.click('#title [data-act="sound"]');
-  check(sound0.p === 'false' && sound0.l === 'Mute sound (M)' && sound1.p === 'true' && sound1.l === 'Unmute sound (M)' && sound1.t === 'Unmute sound (M)', 'Sound button carries aria-pressed and a dynamic label', `${sound0.p}/"${sound0.l}" → ${sound1.p}/"${sound1.l}"`);
+// ═════════════════════════════ SOLO ═════════════════════════════
+async function solo() {
+  const c = await ctx('solo');
+  const page = await openPage(c, 'desktop');
+  await startSolo(page);
+  await shot(page, '01-solo-turn1-1440x900');
 
-  // ── Match start: objective, Era chip, speeds, a breathable opening ──
-  await solo.click('#title [data-act="solo"]');
-  await solo.waitForFunction(() => window.__mercadia.phase === 'playing' && window.__mercadia.kind === 'solo');
-  // Watch for the first AI building from the very first tick (deliberate pacing: none before tick 100).
-  await solo.evaluate(() => {
-    window.__firstAi = null;
-    const iv = setInterval(() => {
-      const st = window.__mercadia.state();
-      if (st.buildings.some((b) => b.owner !== 0)) {
-        window.__firstAi = st.tick;
-        clearInterval(iv);
-      }
-    }, 40);
-  });
-  const s0 = await state(solo);
-  check(s0.players.length === 4 && s0.players[0].kind === 'human' && s0.players.filter((p) => p.kind === 'ai').length === 3 && s0.mode === 'standard', 'Play Solo Now starts a Standard match: You vs 3 AI Houses', s0.players.map((p) => p.name).join(', '));
-  const opening = await solo.evaluate(() => ({ banner: document.querySelector('#banner')?.textContent ?? '', shown: document.querySelector('#banner')?.classList.contains('show'), guide: document.querySelector('#guide .g-obj')?.textContent ?? '', tick: window.__mercadia.state().tick }));
-  check(opening.banner.includes(OBJECTIVE) && opening.shown && opening.guide === OBJECTIVE, 'the match opens on its one-line objective', `banner "${opening.banner.replace(/\s+/g, ' ')}" at tick ${opening.tick}`);
-  const chip = await solo.evaluate(() => ({ era: document.querySelector('#clock [data-f="era"]').textContent.trim(), of: document.querySelector('#clock [data-f="eraof"]').textContent.trim(), bars: document.querySelectorAll('#clock [data-f="erabar"] u').length }));
-  check(chip.era === 'Era I · Founding' && chip.of === 'of IV' && chip.bars === 4 && (await hook(solo, 'era')) === 1 && (await hook(solo, 'eraName')) === 'Founding Charter', 'the clock chip reads "Era I · Founding" of IV over a four-era progress bar', `"${chip.era}" ${chip.of}, ${chip.bars} segments`);
-  check(s0.buildings.length === 0 && s0.tick < 60, 'no AI building stands when the match opens', `buildings=${s0.buildings.length} tick=${s0.tick}`);
-  const speeds = await solo.evaluate(() => ({ pause: !!document.querySelector('#clock [data-act="pause"]'), v: [...document.querySelectorAll('#clock [data-act="speed"]')].map((b) => b.dataset.v).join(',') }));
-  await solo.click('#clock [data-act="speed"][data-v="0.5"]');
-  const half = { speed: await hook(solo, 'speed'), on: await solo.evaluate(() => document.querySelector('#clock [data-act="speed"][data-v="0.5"]').classList.contains('on')) };
-  const tHalf = (await state(solo)).tick;
-  await sleep(solo, 2000);
-  const halfMoved = (await state(solo)).tick - tHalf;
-  await solo.click('#clock [data-act="speed"][data-v="1"]');
-  check(speeds.pause && speeds.v === '0.5,1,2,3' && half.speed === 0.5 && half.on && halfMoved >= 6 && halfMoved <= 14 && (await hook(solo, 'speed')) === 1, 'solo speed controls: Pause, 0.5×, 1×, 2×, 3× — and 0.5× really halves the clock', `buttons ${speeds.v}; ${halfMoved} ticks in 2 s at 0.5×`);
-  const tips = await solo.evaluate(() => [...document.querySelectorAll('#dock .tool')].map((b) => ({ k: b.dataset.kind, t: b.title })));
-  check(
-    tips.length === 9 && tips.every((t) => /§\d+/.test(t.t) && t.t.length > 40) && tips.slice(0, 6).every((t) => /Peak hours/.test(t.t) && /Demand bars/.test(t.t)) && /Boost radius: 1 tile/.test(tips[6].t) && /tramway avenue/.test(tips[7].t) && /Boost radius: 2 tiles/.test(tips[8].t),
-    'all 9 dock tools carry a tooltip: cost, peak hours, demand bars, boost radius',
-    tips[0].t.split('\n')[0] + ' … ' + tips[8].t.split('\n')[0],
-  );
-  const borrowLabel = (await text(solo, '#treasury [data-act="borrow"]')).replace(/\s+/g, ' ');
-  check(/Borrow §400\s*·\s*18%\/era/.test(borrowLabel), 'Borrow button states the exact per-era rate', borrowLabel);
-  const soundPlay = await solo.evaluate(() => { const b = document.querySelector('#clock [data-act="sound"]'); return `${b.getAttribute('aria-pressed')}|${b.getAttribute('aria-label')}|${b.title}`; });
-  check(soundPlay === 'false|Mute sound (M)|Mute sound (M)', 'in-match Sound button: aria-pressed + "Mute sound (M)"', soundPlay);
+  // 2. End Turn advances exactly once (mouse, Enter, Space; double-click; held key)
+  // (done after the planning checks so the earlier checks run on Turn 1)
 
-  // ── Era locks ──
-  const locks = await solo.evaluate(() => [...document.querySelectorAll('#dock .tool')].map((b) => { const lock = b.querySelector('.lock'); const r = lock.getBoundingClientRect(); return { k: b.dataset.kind, locked: b.dataset.locked ?? '', badge: lock.hidden ? '' : lock.textContent.trim(), shown: !lock.hidden && r.width > 8 && r.height > 6, tip: b.title.split('\n')[0], aria: b.getAttribute('aria-label') }; }));
-  const lockedNow = locks.filter((l) => l.locked);
-  check(
-    lockedNow.length === 6 && ERA2.every((k) => locks.find((l) => l.k === k).badge === 'Era II' && locks.find((l) => l.k === k).shown) && ERA3.every((k) => locks.find((l) => l.k === k).badge === 'Era III' && locks.find((l) => l.k === k).shown) && ['roastery', 'bistro', 'park'].every((k) => locks.find((l) => l.k === k).locked === ''),
-    'Era I: exactly six future-era tools stay on the dock under visible Era II / Era III lock badges',
-    lockedNow.map((l) => `${l.k}:${l.badge}`).join(' '),
-  );
-  check(lockedNow.every((l) => /unlocks in Era (II|III): /.test(l.tip) && /locked/.test(l.aria)), 'every locked tool says when it unlocks (tooltip and label)', lockedNow[0].tip + ' | ' + lockedNow[5].tip);
-  const hookLocks = { unlocks: await hook(solo, 'unlocks'), locked: await hook(solo, 'locked') };
-  check(hookLocks.unlocks.join() === 'roastery,bistro,park' && hookLocks.locked.join() === 'arcade,boutique,cinema,nightmarket,tramstop,plaza', '__mercadia.unlocks / locked agree with the dock', `unlocks ${hookLocks.unlocks.join(',')}`);
-  await solo.click('#dock [data-kind="arcade"]');
-  const lockClick = await solo.evaluate(() => ({ n: document.querySelectorAll('#toasts .toast.lockmsg').length, t: document.querySelector('#toasts .toast.lockmsg')?.textContent ?? '', tool: window.__mercadia.tool }));
-  await solo.keyboard.press('5'); // Cinema
-  const lockKey = await solo.evaluate(() => ({ n: document.querySelectorAll('#toasts .toast.lockmsg').length, t: document.querySelector('#toasts .toast.lockmsg')?.textContent ?? '', tool: window.__mercadia.tool }));
-  check(lockClick.n === 1 && lockClick.t === 'Arcade unlocks in Era II: Transit & Trade' && lockClick.tool === null && lockKey.n === 1 && lockKey.t === 'Cinema unlocks in Era III: Grand Boulevard' && lockKey.tool === null, 'a locked tool (click or hotkey) answers with ONE concise unlock notice and arms nothing', `click → "${lockClick.t}" · key 5 → "${lockKey.t}"`);
-  // Hotkey arms an unlocked tool during play; Escape drops it.
-  await solo.keyboard.press('1');
-  const armed = (await info(solo)).tool;
-  await solo.keyboard.press('Escape');
-  check(armed === 'roastery' && (await info(solo)).tool === null, 'hotkey 1 arms the Roastery in a live match, Esc disarms', `tool=${armed}`);
+  // 3. Undo: a Factor move and the construction that depends on it
+  const m0 = await M(page);
+  await tileClick(page, 19); // select the Factor (7,1): selecting one of your units arms Move
+  await sleep(300);
+  await tileClick(page, 17); // (5,1): two tiles west
+  await sleep(200);
+  await page.getByRole('button', { name: /Roastery, §180/ }).click();
+  await tileClick(page, 4); // lot (4,0), only reachable after the move
+  await sleep(300);
+  let st = await page.evaluate(() => ({ d: window.__mercadia.draft, a: window.__mercadia.view.actions, c: window.__mercadia.view.projectedCash }));
+  ok(st.d.length === 2 && st.d[0].t === 'move' && st.d[1].t === 'build', 'undo: move + dependent build queued', JSON.stringify(st.d));
+  ok(st.a.used === 2 && st.c === m0.cash - 180, 'undo: Actions 2 used, projected cash −§180', JSON.stringify(st));
+  await shot(page, '02-solo-queued-move-and-build');
+  await page.getByRole('button', { name: /^Orders/ }).click();
+  await sleep(300);
+  await shot(page, '03-solo-orders-drawer');
+  const names = await page.locator('[data-act="undo"]').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')));
+  // The per-row Undo of the FIRST order (the move)
+  await page.locator('[data-act="undo"][data-arg="0"]').click();
+  await sleep(300);
+  st = await page.evaluate(() => ({ d: window.__mercadia.draft, a: window.__mercadia.view.actions, c: window.__mercadia.view.projectedCash, h: window.__mercadia.hash }));
+  ok(st.d.length === 0, 'undo: removing the move removed the dependent build too', `${JSON.stringify(st.d)} buttons=${names.join('|')}`);
+  ok(st.a.used === 0 && st.c === m0.cash && st.h === m0.hash, 'undo: Actions and projected cash restored, world hash unchanged');
+  await page.keyboard.press('Escape');
 
-  // ── Founding Guide ──
-  const g1 = await solo.evaluate(() => {
-    const m = window.__mercadia;
-    const el = document.getElementById('guide');
-    const r = el.getBoundingClientRect();
-    const clock = document.getElementById('clock').getBoundingClientRect();
-    const free = m.freeLots();
-    const g = m.guide();
-    return {
-      step: el.dataset.step, hidden: el.hidden, g, title: el.querySelector('[data-f="gtitle"]').textContent, hint: el.querySelector('[data-f="ghint"]').textContent,
-      rect: [Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom)], clockBottom: clock.bottom,
-      coversCentre: r.left <= innerWidth / 2 && r.right >= innerWidth / 2 && r.top <= innerHeight / 2 && r.bottom >= innerHeight / 2,
-      upperLeft: r.right < innerWidth / 2 && r.bottom < innerHeight / 2 && r.top >= clock.bottom - 1,
-      lotsVacant: g.lots.every((t) => free.includes(t)),
-      guided: [...document.querySelectorAll('#dock .tool.guided')].map((b) => b.dataset.kind).join(','),
-      dismiss: !!el.querySelector('[data-act="dismiss"]'),
-    };
-  });
-  check(!g1.hidden && g1.step === '1' && g1.g.step === 1 && g1.title === 'Claim a prime corner' && g1.dismiss && g1.upperLeft && !g1.coversCentre, 'Founding Guide step 1 docks below the clock in the upper left, clear of the city centre', `"${g1.title}" at [${g1.rect.join(', ')}], clock bottom ${Math.round(g1.clockBottom)}`);
-  check(g1.g.lots.length >= 3 && g1.lotsVacant && g1.guided === 'roastery,bistro', 'step 1 rings prime vacant starter lots and points at the Era I shops', `lots ${g1.g.lots.join(',')} · guided ${g1.guided}`);
-  await solo.screenshot({ path: `${OUT}/02-era1-onboarding.png` });
-  // A ringed lot with a free neighbour sharing an edge, both in the open map area.
-  const plan = await solo.evaluate(() => {
-    const m = window.__mercadia;
-    const free = m.freeLots();
-    const open = (t) => { const p = m.tileScreen(t); return p.x > 340 && p.x < innerWidth - 290 && p.y > 150 && p.y < innerHeight - 120; };
-    for (const lot of m.guide().lots) {
-      if (!open(lot)) continue;
-      const x = lot % 12;
-      const y = Math.floor(lot / 12);
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || ny < 0 || nx > 11 || ny > 11) continue;
-        const n = ny * 12 + nx;
-        if (free.includes(n) && open(n)) return { lot, next: n };
-      }
+  // 4. Budgets
+  const unitsTab = page.getByRole('button', { name: /^Units/ }).first();
+  await unitsTab.click();
+  for (let i = 0; i < 4; i++) await page.getByRole('button', { name: /^Factor, §90/ }).first().click();
+  await page.getByRole('button', { name: /^Study orders/ }).click();
+  await page.getByRole('button', { name: /^Fine Roasting/ }).click();
+  await sleep(200);
+  st = await page.evaluate(() => ({ a: window.__mercadia.view.actions, n: window.__mercadia.draft.length }));
+  ok(st.a.used === 5 && st.n === 5, 'budgets: five orders fill the five Actions', JSON.stringify(st));
+  await page.getByRole('button', { name: /^Build orders/ }).click();
+  await page.getByRole('button', { name: /Pocket Park/ }).first().click({ force: true });
+  await sleep(300);
+  const reason = await page.evaluate(() => document.body.innerText);
+  ok(/No Actions left/.test(reason), 'budgets: a sixth order is refused with the reason "No Actions left"');
+  await shot(page, '04-solo-actions-spent');
+  await page.keyboard.press('Escape');
+  // Treasury limit: clear and queue Bistros until cash runs out
+  await page.getByRole('button', { name: /^Orders/ }).click();
+  await page.getByRole('button', { name: /Clear all/ }).click();
+  await page.getByRole('button', { name: /^Close/ }).first().click().catch(() => {});
+  await page.getByRole('button', { name: /^Build orders/ }).click();
+  for (const t of [6, 30, 31]) {
+    await page.getByRole('button', { name: /Bistro, §280|Bistro/ }).first().click();
+    await tileClick(page, t);
+    await sleep(150);
+  }
+  await page.getByRole('button', { name: /Roastery/ }).first().click({ force: true });
+  await sleep(300);
+  const txt = await page.evaluate(() => document.body.innerText);
+  ok(/Not enough §/.test(txt), 'budgets: exceeding the treasury shows "Not enough §" with the figures');
+  await shot(page, '05-solo-treasury-refused');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: /^Orders/ }).click();
+  await page.getByRole('button', { name: /Clear all/ }).click();
+  await page.getByRole('button', { name: /^Close/ }).first().click().catch(() => {});
+
+  // 2. End Turn: click, Enter, Space, double-click, held key
+  await page.getByRole('button', { name: /^Build orders/ }).click();
+  await page.getByRole('button', { name: /Roastery/ }).first().click();
+  await tileClick(page, 31);
+  await sleep(200);
+  let t = await turnOf(page);
+  await endBtn(page).click();
+  await waitTurn(page, t + 1);
+  ok((await turnOf(page)) === t + 1, 'end turn: one click advances exactly one turn', `turn ${t} → ${await turnOf(page)}`);
+  const delta = await page.evaluate(() => ({ from: window.__mercadia.summary?.from, to: window.__mercadia.summary?.to }));
+  ok(delta.from === t && delta.to === t + 1, 'end turn: the Turn Delta covers exactly N→N+1', JSON.stringify(delta));
+  await sleep(500);
+  await shot(page, '06-solo-turn-delta');
+  await page.keyboard.press('Escape');
+  await page.locator('body').click({ position: { x: 5, y: 5 } }).catch(() => {});
+  await sleep(700);
+  t = await turnOf(page);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur && document.activeElement.blur());
+  await page.keyboard.press('Enter');
+  await sleep(1000);
+  ok((await turnOf(page)) === t + 1, 'end turn: Enter (nothing focused) advances exactly one turn', `${t} → ${await turnOf(page)}`);
+  t = await turnOf(page);
+  await sleep(700);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur && document.activeElement.blur());
+  await page.keyboard.press(' ');
+  await sleep(1000);
+  ok((await turnOf(page)) === t + 1, 'end turn: Space (nothing focused) advances exactly one turn', `${t} → ${await turnOf(page)}`);
+  t = await turnOf(page);
+  await sleep(700);
+  await endBtn(page).dblclick();
+  await sleep(1000);
+  ok((await turnOf(page)) === t + 1, 'end turn: a double-click advances exactly one turn', `${t} → ${await turnOf(page)}`);
+  t = await turnOf(page);
+  await sleep(700);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur && document.activeElement.blur());
+  await page.keyboard.down('Enter');
+  for (let i = 0; i < 6; i++) await page.keyboard.down('Enter'); // auto-repeat
+  await page.keyboard.up('Enter');
+  await sleep(1000);
+  ok((await turnOf(page)) === t + 1, 'end turn: a held key advances exactly one turn', `${t} → ${await turnOf(page)}`);
+  // focused End Turn via keyboard activates once
+  t = await turnOf(page);
+  await sleep(700);
+  await endBtn(page).focus();
+  await page.keyboard.press('Enter');
+  await sleep(1000);
+  ok((await turnOf(page)) === t + 1, 'end turn: a focused End Turn activates once by native keyboard semantics', `${t} → ${await turnOf(page)}`);
+  // a focused control other than End Turn never ends the turn
+  t = await turnOf(page);
+  await sleep(700);
+  await page.getByRole('button', { name: /^Fit board/ }).focus();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press(' ');
+  await sleep(500);
+  ok((await turnOf(page)) === t, 'end turn: Enter/Space on another focused control does not end the turn');
+
+  // export + replay equivalence (acceptance 12) — replayed headlessly in node by the harness
+  await ensureDeltaOpen(page);
+  const { exp } = await downloadVia(page, page.locator('#h-drawer [data-act="export"]'), join(RAW, 'solo-export.json'));
+  ok(exp && exp.version === 5 && exp.log.length >= 6, 'replay: the real Export match button downloads a version 5 export with the seed and canonical action log', exp ? `v${exp.version} ${exp.log.length} turns` : 'null');
+  const rs = nodeReplay(join(RAW, 'solo-export.json'));
+  ok(rs.ok && rs.mismatches.length === 0 && rs.turnsReplayed === exp.log.length, 'replay: the solo UI download replays bit-for-bit in headless Node', JSON.stringify(rs));
+  await finishCtx(c, 'solo-desktop-walkthrough');
+}
+
+// 1. Frozen planning: two minutes untouched (hover, inspect, pan, drawers), nothing changes
+async function idleSolo() {
+  const c = await ctx('idle', { video: false });
+  const page = await openPage(c, 'frozen');
+  await startSolo(page);
+  const before = await M(page);
+  const t0 = Date.now();
+  let i = 0;
+  while (Date.now() - t0 < IDLE_MS) {
+    const tile = [31, 30, 6, 19, 20, 44, 55, 66][i++ % 8];
+    const pos = await page.evaluate((t) => window.__mercadia.tileScreenPos(t), tile);
+    if (pos) {
+      await page.mouse.move(pos.x, pos.y);
+      if (i % 3 === 0) await page.mouse.click(pos.x, pos.y);
     }
-    return null;
-  });
-  check(!!plan, 'a ringed starter lot with an adjacent free lot is in the open map area', JSON.stringify(plan));
-  const vermilion = ['#D6453A', '#9F2B23'];
-  const pxBefore = await housePixels(solo, [plan.lot, plan.next], vermilion);
-  const cash0 = (await state(solo)).players[0].cash;
-  await build(solo, 'roastery', plan.lot);
-  await built(solo, plan.lot, 'roastery');
-  const s1 = await state(solo);
-  check(s1.players[0].cash === cash0 - 180, 'building a Roastery on a ringed lot costs §180', `cash ${cash0} → ${s1.players[0].cash}, lot ${plan.lot}`);
-  await solo.waitForFunction(() => document.getElementById('guide').dataset.step === '2', null, { timeout: 4000 });
-  const g2 = await solo.evaluate(() => ({ title: document.querySelector('#guide [data-f="gtitle"]').textContent, inspector: document.getElementById('inspector').hidden, lots: window.__mercadia.guide().lots.length }));
-  check(g2.title === 'Inspect your opening street' && g2.inspector && g2.lots === 0, 'the first shop advances the guide to step 2 (the Inspector waits for the player’s own click)', `"${g2.title}"`);
-  const mine = await solo.evaluate((t) => window.__mercadia.tileScreen(t), plan.lot);
-  await solo.mouse.click(mine.x, mine.y - 4);
-  await solo.waitForFunction((t) => window.__mercadia.selectedTile === t && !document.getElementById('inspector').hidden, plan.lot, { timeout: 3000 });
-  await solo.waitForFunction(() => document.getElementById('guide').dataset.step === '3', null, { timeout: 4000 });
-  const insp = await solo.evaluate(() => ({ diag: document.querySelector('#inspector .diag')?.textContent ?? '', crest: document.querySelector('#inspector .head .hcrest')?.dataset.crest ?? '', stance: document.querySelectorAll('#inspector [data-act="stance"]').length, title: document.querySelector('#guide [data-f="gtitle"]').textContent }));
-  check(insp.diag.length > 8 && insp.crest === 'compass' && insp.stance === 4 && /Shape your block/.test(insp.title), 'clicking the shop opens the Inspector — live diagnosis, price stance, the owner’s crest — and the guide moves to step 3', `diagnosis "${insp.diag}" · crest ${insp.crest}`);
-  await solo.click('#inspector [data-act="stance"][data-v="0"]');
-  await solo.waitForFunction((t) => window.__mercadia.state().buildings.find((b) => b.tile === t)?.stance === 0, plan.lot);
-  ok('inspector sets the Budget price stance');
-  await solo.click('#inspector [data-act="stance"][data-v="1"]');
-
-  // Blueprint previews: synergy badges on the hover card.
-  await solo.click('#dock [data-kind="park"]');
-  const nextAt = await solo.evaluate((t) => window.__mercadia.tileScreen(t), plan.next);
-  await solo.mouse.move(nextAt.x, nextAt.y);
-  await solo.waitForFunction(() => !document.getElementById('lotcard').hidden, null, { timeout: 3000 });
-  const parkCard = await text(solo, '#lotcard');
-  check(/\+20% Park Aura to \d+ lots?/.test(parkCard), 'arming a Park shows what its aura will reach on the hover card', parkCard.replace(/\s+/g, ' '));
-  await solo.keyboard.press('Escape');
-  await solo.click('#dock [data-kind="bistro"]');
-  let hov = await freeLot(solo);
-  await solo.mouse.move(hov.x, hov.y);
-  await sleep(solo, 200);
-  const shopCard = await text(solo, '#lotcard');
-  check(/(rival Bistro|No Bistro nearby|of your own nearby)/.test(shopCard), 'hovering a lot with a shop tool shows competition badges', shopCard.replace(/\s+/g, ' ').slice(0, 90));
-  await solo.keyboard.press('Escape');
-
-  // Step 3: a Pocket Park beside the shop — the guide retires for good, and the pair is an enclave.
-  await build(solo, 'park', plan.next);
-  await built(solo, plan.next, 'park');
-  await solo.waitForFunction(() => document.getElementById('guide').hidden, null, { timeout: 4000 });
-  const retired = await solo.evaluate(() => ({ stored: localStorage.getItem('mercadia:guide'), g: window.__mercadia.guide() }));
-  check(retired.stored === 'done' && retired.g.step === 0 && retired.g.dismissed && !retired.g.visible, 'placing a Pocket Park completes the guide: it retires and the retirement is persisted', `localStorage mercadia:guide=${retired.stored}`);
-  await sleep(solo, 900);
-  await solo.keyboard.press('Escape');
-  await solo.mouse.move(700, 880);
-  await sleep(solo, 300);
-  const pxAfter = await housePixels(solo, [plan.lot, plan.next], vermilion);
-  check(pxBefore < 40 && pxAfter >= pxBefore + 150, 'canvas ownership: House-vermilion kerb, enclave trim and banner pixels appear on the two adjacent owned lots', `vermilion pixels around lots ${plan.lot}+${plan.next}: ${pxBefore} → ${pxAfter}`);
-  await solo.screenshot({ path: `${OUT}/03-heraldry-ownership.png` });
-  // Block Baron: two adjacent lots are an enclave.
-  await solo.waitForFunction(() => window.__mercadia.milestones[0].earned.includes('baron'), null, { timeout: 5000 });
-  await collect(solo, log);
-  const baron = [...log.values()].find((d) => d.cat === 'milestone' && d.player === 0 && /Block Baron/.test(d.head));
-  check(!!baron && baron.pill === '+4 Prestige · ★1' && baron.tier === 1, 'Dynasty Milestone: an adjacent 2-lot enclave earns Block Baron with a loud dispatch', baron ? `"${baron.head}" [${baron.pill}]` : 'no dispatch');
-
-  // ── Chronicle: banner, feed stripes, click-to-focus ──
-  const banner = await solo.evaluate(() => { const d = document.querySelector('#chronicle .dispatch'); return { head: d.querySelector('.d-head').textContent, pill: d.querySelector('.d-pill').textContent, pillShown: !d.querySelector('.d-pill').hidden, mode: d.dataset.mode, cat: d.dataset.cat, badge: !!d.querySelector('.d-badge svg') }; });
-  check(banner.head.length > 6 && banner.pillShown && banner.pill.length > 2 && banner.badge, 'the Active Dispatch Banner shows a crest or icon, a bold headline and an impact pill', `[${banner.cat}/${banner.mode}] "${banner.head}" [${banner.pill}]`);
-  if (!(await solo.evaluate(() => document.getElementById('chronicle').classList.contains('open')))) await solo.click('#chronicle [data-act="feed"]');
-  await solo.waitForFunction(() => !document.getElementById('cfeed').hidden && document.querySelectorAll('#cfeed .cline').length >= 3, null, { timeout: 4000 });
-  await solo.click('#clock [data-act="pause"]'); // hold the feed still while it is read
-  await sleep(solo, 200);
-  await collect(solo, log);
-  const readFeed = () => solo.evaluate(() => [...document.querySelectorAll('#cfeed .cline')].map((el) => ({ n: Number(el.dataset.n), cat: el.dataset.cat, stripe: el.style.getPropertyValue('--stripe').trim().toUpperCase(), border: getComputedStyle(el).borderLeftWidth, color: getComputedStyle(el).borderLeftColor, head: el.querySelector('.c-head').textContent, pill: el.querySelector('.c-pill')?.textContent ?? '', focus: el.classList.contains('focusable'), tile: Number(el.dataset.tile ?? -1) })));
-  const feed = await readFeed();
-  const stripeFor = (d) => (d.cat === 'event' ? CANAL : ['rival', 'promo', 'build'].includes(d.cat) && log.get(d.n)?.player >= 0 ? HOUSE_COLOR[s0.players[log.get(d.n).player].house] : BRASS);
-  check(feed.length >= 3 && feed.length <= 4 && feed.every((d) => d.border === '3px' && d.stripe === stripeFor(d).toUpperCase()), 'the Recent Chronicle Feed lists 3–4 dispatches with 3 px category stripes (brass, canal, House colour)', feed.map((d) => `${d.cat}:${d.stripe}`).join(' '));
-  const focusLine = feed.find((d) => d.focus && (d.tile === plan.next || d.tile === plan.lot)) ?? feed.find((d) => d.focus);
-  check(!!focusLine, 'a dispatch tied to a lot carries a focus affordance', focusLine ? `"${focusLine.head}" → lot ${focusLine.tile}` : feed.map((d) => d.head).join(' | '));
-  if (focusLine) {
-    // Drag the city away, then let the dispatch bring the lot back to the middle of the free area.
-    await solo.mouse.move(700, 500);
-    await solo.mouse.down();
-    await solo.mouse.move(980, 690, { steps: 6 });
-    await solo.mouse.up();
-    const away = await solo.evaluate((t) => window.__mercadia.tileScreen(t), focusLine.tile);
-    await solo.click(`#cfeed .cline[data-n="${focusLine.n}"]`, { timeout: 5000 });
-    await sleep(solo, 900);
-    const back = await solo.evaluate((t) => { const p = window.__mercadia.tileScreen(t); return { x: p.x, y: p.y, sel: window.__mercadia.selectedTile }; }, focusLine.tile);
-    const centre = { x: (1440 - 120) / 2, y: 64 + (900 - 64 - 84) / 2 };
-    const moved = Math.hypot(away.x - back.x, away.y - back.y);
-    check(moved > 120 && Math.abs(back.x - centre.x) < 40 && Math.abs(back.y - centre.y) < 40, 'click-to-focus glides the camera so the lot sits at the centre of the free city area', `lot ${focusLine.tile}: (${Math.round(away.x)},${Math.round(away.y)}) → (${Math.round(back.x)},${Math.round(back.y)}), centre (${centre.x},${centre.y})`);
-    await solo.click('#clock [data-act="fit"]');
-    await sleep(solo, 300);
+    if (i % 4 === 0) await page.keyboard.press('t');
+    if (i % 5 === 0) await page.keyboard.press('o');
+    if (i % 6 === 0) await page.mouse.wheel(0, i % 2 ? 80 : -80);
+    await sleep(2500);
   }
-  await solo.click('#clock [data-act="pause"]'); // resume
+  const after = await M(page);
+  ok(before.turn === after.turn && before.cash === after.cash && before.units === after.units && before.hash === after.hash, `frozen: after ${Math.round((Date.now() - t0) / 1000)} s of hovering, inspecting, panning and drawers the turn, cash, units and state hash are unchanged`, JSON.stringify({ before, after }));
+  await finishCtx(c, 'idle');
+}
 
-  // ── Layout budget ──
-  await solo.keyboard.press('Escape');
-  const lay1440 = await layout(solo);
-  check(lay1440.clipped.length === 0 && lay1440.overlaps.length === 0, '1440×900: no persistent panel is clipped or overlaps another', `${lay1440.shown.join(' ')} · clipped [${lay1440.clipped}] overlaps [${lay1440.overlaps}]`);
-  check(lay1440.coverage <= 15, '1440×900: the persistent HUD leaves ≥ 85% of the viewport to the city (feed open)', `HUD union covers ${lay1440.coverage.toFixed(2)}%`);
-  await solo.setViewportSize({ width: 1024, height: 768 });
-  await sleep(solo, 500);
-  const lay1024 = await layout(solo);
-  check(lay1024.clipped.length === 0 && lay1024.overlaps.length === 0, '1024×768: no persistent panel is clipped or overlaps another', `${lay1024.shown.join(' ')} · clipped [${lay1024.clipped}] overlaps [${lay1024.overlaps}] · covers ${lay1024.coverage.toFixed(1)}%`);
-  // The Treasury at medium widths: Borrow, Repay and the Ledger button all inside the panel.
-  const treasuryFit = (page) =>
-    page.evaluate(() => {
-      const el = document.getElementById('treasury');
-      const r = el.getBoundingClientRect();
-      const btns = [...el.querySelectorAll('.acts .btn')].map((b) => { const q = b.getBoundingClientRect(); return { act: b.dataset.act, l: q.left, r: q.right, w: q.width, cut: b.scrollWidth > b.clientWidth }; });
-      const acts = el.querySelector('.acts');
-      return { sw: el.scrollWidth, cw: el.clientWidth, actsSw: acts.scrollWidth, actsCw: acts.clientWidth, right: r.right, btns, inside: btns.every((b) => b.l >= r.left - 0.5 && b.r <= r.right + 0.5 && b.w >= 24), cut: btns.filter((b) => b.cut).map((b) => b.act) };
-    });
-  const fits = [];
-  for (const [w, h] of [[1024, 768], [1120, 768], [1180, 768]]) {
-    await solo.setViewportSize({ width: w, height: h });
-    await sleep(solo, 250);
-    const f = await treasuryFit(solo);
-    fits.push({ w, ...f, ok: f.sw <= f.cw && f.actsSw <= f.actsCw && f.inside && f.cut.length === 0 });
-  }
-  const ledgerBtn = fits[0].btns.find((b) => b.act === 'ledger');
-  check(fits.every((f) => f.ok), '1024×768 (and up to 1180 wide): the Treasury holds Borrow, Repay and Ledger with no right-edge protrusion', fits.map((f) => `${f.w}px: scrollWidth ${f.sw} ≤ clientWidth ${f.cw}`).join(' · ') + ` · Ledger button ends at x=${ledgerBtn.r.toFixed(1)}, panel at ${fits[0].right.toFixed(1)}`);
-  await solo.setViewportSize({ width: 1024, height: 768 });
-  await sleep(solo, 250);
-  await solo.screenshot({ path: `${OUT}/04-1024x768.png` });
-  await solo.setViewportSize({ width: 1440, height: 900 });
-  await sleep(solo, 400);
-  await solo.click('#clock [data-act="fit"]');
 
-  // Conflicting toast lifetime: a refusal is dismissed the moment the next action succeeds.
-  for (let i = 0; i < 4; i++) {
-    const cash = (await state(solo)).players[0].cash;
-    if (cash < 180) break;
-    const kind = cash >= 280 ? 'bistro' : 'roastery';
-    const t = await build(solo, kind);
-    await built(solo, t, kind);
-    await solo.keyboard.press('Escape');
-  }
-  await build(solo, 'bistro');
-  await solo.waitForFunction(() => document.querySelectorAll('#toasts .toast.bad').length === 1, null, { timeout: 3000 });
-  const refusal = await text(solo, '#toasts .toast.bad');
-  await solo.click('#treasury [data-act="borrow"]');
-  const staleToasts = await solo.evaluate(() => document.querySelectorAll('#toasts .toast.bad').length);
-  check(/Not enough cash/.test(refusal) && staleToasts === 0, 'a refusal toast is cleared at once when the next action succeeds', `"${refusal}" → ${staleToasts} left after Borrow`);
-  await solo.keyboard.press('Escape');
-  const t0 = (await state(solo)).tick;
-  await solo.waitForFunction((t) => window.__mercadia.state().tick > t + 15, t0, { timeout: 15000 });
-  const s2 = await state(solo);
-  check(s2.citizens >= 45 && s2.citizens <= 120, 'citizens walk the streets', `tick ${s2.tick}, citizens=${s2.citizens}`);
-  check((await hook(solo, 'dev')) === true, 'dev hooks are live on a local host');
-
-  // A Promo Blitz of my own makes a rivalry headline carrying my House.
-  // (Rivalry headlines are rationed to one per quiet window, so hold the clock and wait one out.)
-  await solo.click('#clock [data-act="pause"]');
-  for (let i = 0; i < 6; i++) {
-    const q = await rivalQuiet(solo);
-    if (q > 160) break;
-    await warpBy(solo, 165 - q, { log });
-  }
-  const shopAt = await solo.evaluate((t) => window.__mercadia.tileScreen(t), plan.lot);
-  await solo.mouse.click(shopAt.x, shopAt.y - 4);
-  await solo.waitForFunction((t) => window.__mercadia.selectedTile === t, plan.lot, { timeout: 3000 });
-  await solo.click('#inspector [data-act="promo"]');
-  await solo.waitForFunction(() => window.__mercadia.chronicle().some((d) => d.cat === 'promo' && d.player === 0), null, { timeout: 4000 });
-  await solo.click('#clock [data-act="pause"]'); // resume
-  await collect(solo, log);
-  const promo = [...log.values()].find((d) => d.cat === 'promo' && d.player === 0);
-  const promoBanner = await solo.evaluate(() => { const d = document.querySelector('#chronicle .dispatch'); return { cat: d.dataset.cat, crest: d.querySelector('.d-badge .hcrest')?.dataset.crest ?? '', head: d.querySelector('.d-head').textContent, pill: d.querySelector('.d-pill').textContent }; });
-  check(promo && promo.tile === plan.lot && /Promo Blitz! Vermilion/.test(promo.head) && /Roastery pull ×2\.4 · 20s/.test(promo.pill) && promoBanner.cat === 'promo' && promoBanner.crest === 'compass', 'firing a Promo Blitz prints a loud dispatch under my House crest with its exact pull', `"${promoBanner.head}" [${promoBanner.pill}]`);
-
-  // AI Houses respect the Era locks through the Founding era; twilight keeps ownership bright.
-  await warpBy(solo, Math.max(0, 1200 - (await state(solo)).tick), { log });
-  await sleep(solo, 700);
-  const s3 = await state(solo);
-  const aiKinds = [...new Set(s3.buildings.filter((b) => b.owner !== 0).map((b) => b.kind))];
-  check(s3.buildings.some((b) => b.owner !== 0) && aiKinds.every((k) => ['roastery', 'bistro', 'park'].includes(k)) && s3.buildings.every((b) => b.level <= 2), 'AI Houses build rival shops in Era I and respect the Era locks (no future-era build, no Level 3)', `tick ${s3.tick}: ${s3.buildings.filter((b) => b.owner !== 0).length} AI buildings of ${aiKinds.join(', ')}`);
-  const firstAi = await solo.evaluate(() => window.__firstAi);
-  check(firstAi !== null && firstAi >= 100, 'deliberate AI pacing: no AI House built before its opening delay (tick 100) — no tick-1 click spam', `first AI building seen at tick ${firstAi}`);
-  await solo.keyboard.press('Escape');
-  await solo.mouse.move(700, 880);
-  await sleep(solo, 300);
-  const dusk = { part: await text(solo, '#clock [data-f="part"]'), px: await housePixels(solo, [plan.lot, plan.next], vermilion) };
-  check(dusk.part === 'Twilight' && dusk.px >= 120, 'ownership stays bright at dusk: House-vermilion banner and kerb pixels survive the twilight grade', `${dusk.part}: ${dusk.px} vermilion pixels around lots ${plan.lot}+${plan.next}`);
-  await solo.screenshot({ path: `${OUT}/05-twilight-ownership.png` });
-
-  // Shop Inspector diagnosis, Crown breakdown.
-  const rowTitle = await solo.evaluate(() => document.querySelector('#board .row')?.getAttribute('title') ?? '');
-  await solo.click('#board [data-act="breakdown"]');
-  const parts = await solo.evaluate(() => [...document.querySelectorAll('#board .row')].map((r) => ({ crown: Number(r.querySelector('[data-f="crown"]').textContent), nums: [...r.querySelectorAll('.parts b')].map((b) => Number(b.textContent)), shown: getComputedStyle(r.querySelector('.parts')).display !== 'none' })));
-  const mlist = await solo.evaluate(() => [...document.querySelectorAll('#board .mlist .ml')].map((el) => `${el.classList.contains('done') ? '★' : '·'}${el.querySelector('b').textContent}`));
-  check(/Crown \d+ = Worth \d+ .* \+ Share -?\d+ .* \+ Prestige \d+/.test(rowTitle) && parts.every((p) => p.shown && p.nums.length === 3 && p.nums[0] + p.nums[1] + p.nums[2] === p.crown), 'leaderboard breaks every Crown Index into Worth + Share + Prestige (tooltip and toggle)', parts.map((p) => `${p.nums.join('+')}=${p.crown}`).join('  '));
-  check(mlist.length === 4 && mlist.includes('★Block Baron'), 'the expanded breakdown lists all four Dynasty Milestones', mlist.join(' '));
-  await solo.click('#board [data-act="breakdown"]');
-
-  // Destructive Leave needs two clicks.
-  await solo.click('#clock [data-act="leave"]');
-  await sleep(solo, 200);
-  const afterOne = { phase: (await info(solo)).phase, label: await text(solo, '#clock [data-act="leave"]') };
-  check(afterOne.phase === 'playing' && afterOne.label === 'Leave?', 'one click on Leave only arms it: the match goes on', `phase=${afterOne.phase} label="${afterOne.label}"`);
-  await sleep(solo, 4200);
-  const lapsed = { phase: (await info(solo)).phase, label: await text(solo, '#clock [data-act="leave"]') };
-  check(lapsed.phase === 'playing' && lapsed.label === '', 'the Leave confirmation lapses after four seconds', `phase=${lapsed.phase} label="${lapsed.label}"`);
-
-  // ── Era Council (solo) ──
-  await solo.keyboard.press('1'); // an armed tool must not survive into the Council
-  const hold = await warpBy(solo, 5000, { hold: true, log });
-  await solo.waitForFunction(() => !document.getElementById('council').hidden, null, { timeout: 5000 });
-  // The card is shown by the warp's own HUD pass; the armed tool is dropped and the clock chip
-  // relabelled by the next frame. Wait for that frame rather than sample ahead of it.
-  await solo.waitForFunction(() => window.__mercadia.tool === null && document.activeElement === document.querySelector('#council .council') && document.querySelector('#clock [data-f="part"]').textContent === 'Era Council', null, { timeout: 3000 }).catch(() => undefined);
-  const c0 = await solo.evaluate(() => {
+// Rendered-DOM state of the hotseat table delta (computed style + bounding boxes), read from the live page.
+const tableDeltaState = (page) =>
+  page.evaluate(() => {
+    const rect = (e) => {
+      const r = e.getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+    };
+    const visible = (e) => {
+      const cs = getComputedStyle(e);
+      const r = e.getBoundingClientRect();
+      return cs.visibility === 'visible' && cs.display !== 'none' && Number(cs.opacity) > 0 && r.width > 0 && r.height > 0;
+    };
+    const hud = document.querySelector('#hud');
+    const drawer = document.querySelector('#h-drawer');
+    const head = drawer.querySelector('#h-dh');
+    const end = document.querySelector('#end-turn');
+    const hr = head.getBoundingClientRect();
     const m = window.__mercadia;
-    const card = document.querySelector('#council .council');
-    const r = card.getBoundingClientRect();
     return {
-      phase: m.state().phase, tick: m.state().tick, era: m.era, tool: m.tool, council: m.council(),
-      rect: [Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom)],
-      centred: Math.abs((r.left + r.right) / 2 - innerWidth / 2) < 12 && Math.abs((r.top + r.bottom) / 2 - innerHeight / 2) < 60,
-      inView: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && card.scrollWidth <= card.clientWidth + 1,
-      title: card.querySelector('h2').textContent,
-      unlocks: [...card.querySelectorAll('.unlock')].map((u) => u.dataset.kind),
-      rows: [...card.querySelectorAll('.srow')].map((row) => ({ p: Number(row.dataset.p), crest: row.querySelector('.hcrest')?.dataset.crest ?? '', crown: row.querySelector('.cr').textContent, delta: row.querySelector('.dl').textContent, pick: row.querySelector('[data-f="pick"]').dataset.key ?? '' })),
-      cards: [...card.querySelectorAll('.charter')].map((b) => ({ key: b.dataset.key, name: b.querySelector('.ch-name').textContent, pill: b.querySelector('.ch-pill').textContent, sealed: b.classList.contains('sealed') })),
-      advance: card.querySelector('[data-act="advance"]')?.disabled,
-      advanceText: card.querySelector('[data-act="advance"]')?.textContent ?? '',
-      focus: document.activeElement === card,
-      part: document.querySelector('#clock [data-f="part"]').textContent,
+      handoffLayer: !!document.querySelector('.handoff-layer'),
+      hudVisibility: getComputedStyle(hud).visibility,
+      hudInert: hud.inert,
+      hudRect: rect(hud),
+      drawerOpen: drawer.classList.contains('open') && !drawer.inert,
+      drawerVisibility: getComputedStyle(drawer).visibility,
+      drawerRect: rect(drawer),
+      heading: head.textContent.trim(),
+      headingVisible: visible(head),
+      headingInViewport: hr.left >= 0 && hr.top >= 0 && hr.right <= innerWidth && hr.bottom <= innerHeight,
+      text: drawer.innerText,
+      draftLen: m.draft.length,
+      cta: end ? { label: end.innerText.replace(/\s*Enter\s*$/, '').trim(), visible: visible(end), enabled: !end.disabled } : null,
+      turn: m.turn,
+      res: m.view.resolutions,
     };
   });
-  check(hold.phase === 'council' && c0.phase === 'council' && c0.tick === 1500 && c0.era === 1 && c0.council.era === 1 && c0.council.next === 2, 'warp(n, hold) stops exactly at the Era I close with the Era Council in session', `tick ${c0.tick}, phase ${c0.phase}`);
-  check(c0.centred && c0.inView && c0.title === 'Era II: Transit & Trade' && c0.focus && c0.tool === null && c0.part === 'Era Council', 'the Era Council modal is a centred, unclipped card that takes focus itself and drops the armed tool', `card [${c0.rect.join(', ')}] "${c0.title}" · focus on card=${c0.focus} · tool=${c0.tool} · clock "${c0.part}"`);
-  check(c0.unlocks.join() === 'arcade,nightmarket,tramstop', 'the Council celebrates the newly unlocked tier', c0.unlocks.join(', '));
-  check(c0.rows.length === 4 && new Set(c0.rows.map((r) => r.crest)).size === 4 && c0.rows.every((r) => /^\d+$/.test(r.crown) && /^[+−]\d+$/.test(r.delta)) && c0.rows.filter((r) => r.p !== 0).every((r) => r.pick !== '') && c0.rows.find((r) => r.p === 0).pick === '', 'Era standings: four Houses with crests, Crown and era deltas; the AI Houses have sealed their charters', c0.rows.map((r) => `${r.crest} ${r.crown} ${r.delta} ${r.pick || 'deliberating'}`).join(' | '));
-  check(c0.cards.length === 3 && new Set(c0.cards.map((c) => c.key)).size === 3 && c0.cards.every((c) => !c.sealed && c.pill.length > 8) && c0.cards.map((c) => c.key).join() === c0.council.offers[0].join() && c0.advance === true && c0.advanceText === 'Advance to Era II', 'exactly three distinct Dynasty Charters are offered, and Advance waits for a choice', c0.cards.map((c) => `${c.name} [${c.pill}]`).join(' · '));
-  await solo.screenshot({ path: `${OUT}/06-era-council.png` });
-  // The city is paused and the Council owns the keyboard.
-  await sleep(solo, 1300);
-  for (const key of ['1', '2', 'Space', 'Escape']) await solo.keyboard.press(key);
-  await solo.evaluate(() => document.querySelector('#dock [data-kind="roastery"]').click());
-  const paused = await solo.evaluate(() => ({ tick: window.__mercadia.state().tick, tool: window.__mercadia.tool, open: !document.getElementById('council').hidden, paused: window.__mercadia.paused }));
-  check(paused.tick === 1500 && paused.tool === null && paused.open && paused.paused === false, 'the Council pauses the simulation cleanly: the tick holds, hotkeys do nothing, no tool can be armed, Esc does not close it', `tick ${paused.tick} after 1.3 s, tool=${paused.tool}`);
-  // Choose deterministically from what is on offer, preferring a charter whose effect shows in the HUD.
-  const pickKey = ['transit', 'credit', 'artisanry', 'heralds', 'provisioners', 'canal'].find((k) => c0.council.offers[0].includes(k));
-  await solo.click(`#council .charter[data-key="${pickKey}"]`);
-  await solo.waitForFunction((k) => window.__mercadia.council()?.picks[0] === k, pickKey, { timeout: 3000 });
-  const sealed = await solo.evaluate(() => ({ sealed: [...document.querySelectorAll('#council .charter.sealed')].map((b) => b.dataset.key).join(), pressed: document.querySelector('#council .charter.sealed')?.getAttribute('aria-pressed'), mine: document.querySelector('#council .srow.me [data-f="pick"]').dataset.key, advance: document.querySelector('#council [data-act="advance"]').disabled, tick: window.__mercadia.state().tick }));
-  check(sealed.sealed === pickKey && sealed.pressed === 'true' && sealed.mine === pickKey && sealed.advance === false && sealed.tick === 1500, 'choosing a charter seals the card and enables Advance (still paused)', `sealed ${sealed.sealed}`);
-  await solo.click('#council [data-act="advance"]');
-  await solo.waitForFunction(() => window.__mercadia.state().phase === 'playing' && document.getElementById('council').hidden, null, { timeout: 4000 });
-  await collect(solo, log);
-  const after = await solo.evaluate(() => ({ era: window.__mercadia.era, chip: document.querySelector('#clock [data-f="era"]').textContent.trim(), badges: [...document.querySelectorAll('#treasury .charters .cbadge')].map((b) => b.dataset.key).join(), charters: window.__mercadia.charters, unlocks: window.__mercadia.unlocks.join(), locks: [...document.querySelectorAll('#dock .tool[data-locked]')].map((b) => `${b.dataset.kind}:${b.querySelector('.lock').textContent.trim()}`).join(' '), tick: window.__mercadia.state().tick }));
-  check(after.era === 2 && after.chip === 'Era II · Transit' && after.badges === pickKey && after.charters[0].charters.join() === pickKey && after.charters.every((c) => c.charters.length === 1), 'Advance begins Era II: every House holds one charter and mine is badged on the Treasury', `${after.chip} · ${after.charters.map((c) => `${c.house}:${c.names[0]}`).join(' ')}`);
-  const eraDispatch = [...log.values()].find((d) => d.cat === 'era' && d.head === 'Era II: Transit & Trade');
-  const charterDispatch = [...log.values()].find((d) => d.cat === 'charter' && d.player === 0);
-  check(!!eraDispatch && eraDispatch.pill === 'Era II Unlocked' && eraDispatch.tier === 1 && !!charterDispatch && /^Vermilion adopts /.test(charterDispatch.head) && charterDispatch.pill.length > 8, 'the Chronicle prints the era transition (Era II Unlocked) and my charter adoption', `"${eraDispatch?.head}" [${eraDispatch?.pill}] · "${charterDispatch?.head}" [${charterDispatch?.pill}]`);
-  check(after.unlocks === 'roastery,bistro,arcade,nightmarket,park,tramstop' && after.locks === 'boutique:Era III cinema:Era III plaza:Era III', 'Era II unlocks Arcade, Nightmarket and Tram Stop; the Era III tools stay locked', `unlocked ${after.unlocks} · ${after.locks}`);
 
-  // The charter's mechanical effect is real.
-  await solo.click('#clock [data-act="pause"]');
-  const lotScreen = await solo.evaluate((t) => window.__mercadia.tileScreen(t), plan.lot);
-  if ((await state(solo)).players[0].cash < 700) {
-    await solo.click('#treasury [data-act="borrow"]');
-    await solo.click('#treasury [data-act="borrow"]');
-  }
-  await solo.keyboard.press('Escape');
-  await solo.mouse.click(lotScreen.x, lotScreen.y - 4);
-  await solo.waitForFunction((t) => window.__mercadia.selectedTile === t && !document.getElementById('inspector').hidden, plan.lot, { timeout: 3000 });
-  const fxText = await solo.evaluate(() => ({ park: document.querySelector('#dock [data-kind="park"] [data-f="cost"]').textContent, stop: document.querySelector('#dock [data-kind="tramstop"] [data-f="cost"]').textContent, rate: document.querySelector('#treasury [data-f="rate"]').textContent, up: document.querySelector('#inspector [data-f="upgrade"]').textContent, promo: document.querySelector('#inspector [data-f="promo"]').textContent, restock: document.querySelector('#inspector [data-f="restock"]').textContent, stock: document.querySelector('#inspector [data-f="stock"]').textContent, level: window.__mercadia.state().buildings.find((b) => b.id && b.tile === window.__mercadia.selectedTile).level }));
-  const [stockNow, stockMax] = fxText.stock.split('/').map(Number);
-  const effect = {
-    transit: () => [fxText.park === '§120' && fxText.stop === '§180', `Park ${fxText.park}, Tram Stop ${fxText.stop} (−25%)`],
-    credit: () => [/9%\/era/.test(fxText.rate), `Borrow rate${fxText.rate} (halved from 18%/era)`],
-    artisanry: () => [fxText.level === 1 ? /§86/.test(fxText.up) : /§130/.test(fxText.up) || /Level 3/.test(fxText.up), `upgrade button "${fxText.up}" (−20%)`],
-    heralds: () => [/§60/.test(fxText.promo) || /running|ready in/.test(fxText.promo), `promo button "${fxText.promo}" (−25% of §80)`],
-    provisioners: () => [stockNow >= stockMax || fxText.restock.includes(`§${Math.ceil(Math.round((stockMax - stockNow) * 3 * 0.85 * 100) / 100)}`), `restock "${fxText.restock}" for ${stockMax - stockNow} units at §3 −15%`],
-    canal: () => [true, 'Canal Showcase has no price tag in the HUD (its quality effect is asserted in Vitest)'],
-  }[pickKey]();
-  check(effect[0], `the adopted charter (${pickKey}) changes real numbers`, effect[1]);
-
-  // Era II tools are buildable now: a Tram Stop along the avenue, with its blueprint hints.
-  await solo.keyboard.press('Escape');
-  await solo.click('#dock [data-kind="tramstop"]');
-  const tramHint = await text(solo, '#dock .hint');
-  const inland = await freeLot(solo, false);
-  await solo.mouse.move(inland.x, inland.y);
-  await sleep(solo, 200);
-  const inlandCard = await text(solo, '#lotcard');
-  const avenue = await freeLot(solo, true);
-  await solo.mouse.move(avenue.x, avenue.y);
-  await sleep(solo, 200);
-  const avenueCard = await text(solo, '#lotcard');
-  check(/Place along the tramway avenue/.test(tramHint) && /Place along the tramway avenue/.test(inlandCard) && /\+Tram Footfall to \d+ lots?/.test(avenueCard), 'Tram Stop: avenue hint, inland lots refused before any click, the footfall it will bring', `inland: "${inlandCard.replace(/\s+/g, ' ').slice(0, 70)}" · avenue: "${avenueCard.replace(/\s+/g, ' ').slice(0, 70)}"`);
-  await solo.screenshot({ path: `${OUT}/07-tramstop-blueprint.png` });
-  const cashStop = (await state(solo)).players[0].cash;
-  await solo.mouse.click(avenue.x, avenue.y);
-  await built(solo, avenue.t, 'tramstop');
-  const paidStop = cashStop - (await state(solo)).players[0].cash;
-  check(paidStop === (pickKey === 'transit' ? 180 : 240), 'an Era II tool builds once unlocked: a Tram Stop on the avenue at the charter-aware price', `paid §${paidStop}`);
-  await solo.keyboard.press('Escape');
-
-  // Level 3 waits for Era III.
-  await solo.mouse.click(lotScreen.x, lotScreen.y - 4);
-  await solo.waitForFunction((t) => window.__mercadia.selectedTile === t, plan.lot, { timeout: 3000 });
-  if (fxText.level === 1) {
-    await solo.click('#inspector [data-act="upgrade"]');
-    await solo.waitForFunction((t) => window.__mercadia.state().buildings.find((b) => b.tile === t)?.level === 2, plan.lot, { timeout: 4000 });
-  }
-  await solo.waitForFunction(() => document.querySelector('#inspector [data-f="upgrade"]')?.dataset.state === 'locked', null, { timeout: 4000 });
-  const up2 = await solo.evaluate(() => { const b = document.querySelector('#inspector [data-f="upgrade"]'); return { state: b.dataset.state, text: b.textContent.trim(), disabled: b.disabled }; });
-  check(up2.state === 'locked' && up2.disabled && up2.text === 'Level 3 unlocks in Era III: Grand Boulevard', 'Level 3 is locked before Era III and says so on the upgrade button', `"${up2.text}"`);
-  await solo.keyboard.press('Escape');
-
-  // ── warp() runs cleanly through an Era Council ──
-  const w0 = await state(solo);
-  const through = await warpBy(solo, 3000 - w0.tick + 200, { log });
-  const w1 = await solo.evaluate(() => ({ s: window.__mercadia.state(), council: window.__mercadia.council(), open: !document.getElementById('council').hidden, charters: window.__mercadia.charters }));
-  check(through.moved === 3000 - w0.tick + 200 && w1.s.tick === 3200 && w1.s.phase === 'playing' && w1.s.era === 3 && w1.council === null && !w1.open && w1.charters.every((c) => c.charters.length === 2 && new Set(c.charters).size === 2), 'plain warp(n) is deterministic through the Era II Council: exact tick count, steward-adopted charters, no Council left open', `warped ${through.moved} ticks → tick ${w1.s.tick}, era ${w1.s.era}; mine: ${w1.charters[0].names.join(' + ')}`);
-  const lock3 = await solo.evaluate(() => ({ locked: window.__mercadia.locked.length, badges: document.querySelectorAll('#dock .tool[data-locked]').length }));
-  check(lock3.locked === 0 && lock3.badges === 0, 'Era III unlocks the whole dock', `locked tools: ${lock3.locked}`);
-  // Level 3 opens with the Grand Boulevard.
-  if ((await state(solo)).players[0].cash < 300) await solo.click('#treasury [data-act="borrow"]');
-  await solo.mouse.click(lotScreen.x, lotScreen.y - 4);
-  await solo.waitForFunction((t) => window.__mercadia.selectedTile === t, plan.lot, { timeout: 3000 });
-  const up3 = await solo.evaluate(() => { const b = document.querySelector('#inspector [data-f="upgrade"]'); return { state: b.dataset.state, text: b.textContent.trim(), disabled: b.disabled }; });
-  await solo.click('#inspector [data-act="upgrade"]');
-  await solo.waitForFunction((t) => window.__mercadia.state().buildings.find((b) => b.tile === t)?.level === 3, plan.lot, { timeout: 4000 });
-  check(up3.state === 'open' && /Upgrade to Lv 3/.test(up3.text) && !up3.disabled, 'Level 3 grand architecture is available in Era III and the upgrade goes through', `"${up3.text}" → Level 3`);
-  await solo.keyboard.press('Escape');
-  await solo.click('#clock [data-act="pause"]'); // resume
-
-  // ── Milestones, ledger, heraldry in Era III–IV ──
-  await warpBy(solo, 4700 - (await state(solo)).tick, { log });
-  await solo.click('#clock [data-act="pause"]');
-  await sleep(solo, 300);
-  const dyn = await solo.evaluate(() => ({ ms: window.__mercadia.milestones, era: window.__mercadia.era, prog: document.querySelector('#board [data-f="mprog"]').textContent.replace(/\s+/g, ' ').trim(), progHidden: document.querySelector('#board [data-f="mprog"]').hidden }));
-  const rows = await boardCrests(solo);
-  check(crestsOk(rows, HOUSE_CREST), 'heraldry: every leaderboard row flies its own crest — Compass, Anchor, Sunburst Crown, Laurel Arch', rows.map((r) => `${r.house}:${r.crest}`).join(' '));
-  check(dyn.era === 4 && dyn.ms[0].earned.includes('merchant') && dyn.ms[0].earned.includes('baron') && dyn.ms.every((m) => m.stars === m.earned.length) && rows.every((r) => r.stars === dyn.ms[r.p].stars), 'Dynasty Milestones: earned keys are exposed and each House’s brass stars match on the leaderboard', dyn.ms.map((m) => `${m.house} ★${m.stars} (${m.earned.join(',')})`).join(' · '));
-  check(!dyn.progHidden && dyn.prog.length > 8, 'the Milestone progress pill tracks my next milestone', dyn.prog);
-  await solo.click('#treasury [data-act="ledger"]');
-  await sleep(solo, 200);
-  const ledger = await solo.evaluate(() => {
-    const num = (s) => Number((s ?? '').replace(/[^0-9]/g, '')) * (/−/.test(s ?? '') ? -1 : 1);
-    const div = document.querySelector('#ledger tr[data-k="dividends"]');
-    return {
-      text: document.getElementById('ledger').textContent.replace(/\s+/g, ' '),
-      heads: [...document.querySelectorAll('#ledger thead th')].map((th) => th.textContent.trim()).join('|'),
-      dividendLabel: div?.querySelector('td')?.textContent ?? '',
-      dividends: num(div?.querySelector('td:last-child')?.textContent),
-      recon: num(document.querySelector('#ledger .recon b')?.textContent),
-      cash: num(document.querySelector('#treasury [data-f="cash"]')?.textContent),
-      state: window.__mercadia.state().players[0].cash,
-    };
-  });
-  const dueDividends = (dyn.ms[0].earned.includes('merchant') ? 80 : 0) + (dyn.ms[0].earned.includes('benefactor') ? 120 : 0);
-  check(/Financing/.test(ledger.text) && /Loan draws/.test(ledger.text) && /Loan repayments/.test(ledger.text) && /Change in cash/.test(ledger.text) && /This era/.test(ledger.heads) && /Last era/.test(ledger.heads), 'the Ledger reads era by era and shows Financing: loan draws, repayments, change in cash', ledger.heads);
-  check(/Milestone dividends/.test(ledger.dividendLabel) && ledger.dividends === dueDividends && dueDividends >= 80, 'Milestone dividends are booked on their own Ledger line (Charter Merchant §80, Civic Benefactor §120)', `ledger says §${ledger.dividends}, earned ${dyn.ms[0].earned.join(',')}`);
-  check(ledger.recon === ledger.cash && ledger.cash === ledger.state, 'opening cash + ledger equals cash in hand to the exact §', `ledger §${ledger.recon} = wallet §${ledger.cash}`);
-  await solo.click('#ledger [data-act="close"]');
-  await solo.click('#clock [data-act="pause"]');
-  await collect(solo, log);
-  if (!(await solo.evaluate(() => document.getElementById('chronicle').classList.contains('open')))) await solo.click('#chronicle [data-act="feed"]');
-  await sleep(solo, 300);
-  const lay4 = await layout(solo);
-  check(lay4.coverage <= 15 && lay4.clipped.length === 0 && lay4.overlaps.length === 0, 'Era IV, feed open, three charter badges: the HUD still leaves ≥ 85% to the city, unclipped', `HUD union covers ${lay4.coverage.toFixed(2)}%`);
-  await solo.screenshot({ path: `${OUT}/08-era4-chronicle.png` });
-
-  // ── Final bell: the Final Edition, with the hotkey lock and rematch cleanup ──
-  await solo.keyboard.press('2'); // arm a tool just before the bell
-  const fin = await warpBy(solo, 2000, { log });
-  await solo.waitForFunction(() => !document.getElementById('victory').hidden, null, { timeout: 8000 });
-  const atBell = await info(solo);
-  for (const key of ['1', '2', '7', 'Space']) await solo.keyboard.press(key);
-  const underModal = await info(solo);
-  check(fin.phase === 'ended' && fin.tick === 6000 && atBell.tool === null && underModal.tool === null, 'Era IV closes at tick 6000: the final bell disarms the build tool and the Final Edition swallows hotkeys', `tick ${fin.tick}; tool at bell=${atBell.tool}, after 1/2/7/Space=${underModal.tool}`);
-  const cats = new Set([...log.values()].map((d) => d.cat));
-  const events = [...log.values()].filter((d) => d.cat === 'event');
-  const lead = [...log.values()].find((d) => d.cat === 'lead');
-  const eraHeads = [...log.values()].filter((d) => d.cat === 'era').map((d) => d.head);
-  check(['era', 'milestone', 'charter', 'lead', 'event', 'build'].every((c) => cats.has(c)) && (cats.has('promo') || cats.has('rival')), 'over one match the Chronicle fired every kind of dispatch: era, charter, milestone, lead change, city event, build, rivalry', `${log.size} dispatches · ${[...cats].join(', ')}`);
-  check(!!lead && lead.pill === 'New Leader' && lead.player >= 0, 'a Crown Index lead change is a "New Leader" dispatch', lead ? `"${lead.head}"` : 'none');
-  check(events.some((d) => /^Forecast: /.test(d.head)) && events.some((d) => /closed|passed|ended|lifted|eased|Golden Fork/.test(d.head)) && events.some((d) => /[+×−]\d|§\d/.test(d.pill)), 'city events are forecast, started and receipted with mechanical pills', events.slice(0, 4).map((d) => `"${d.head}" [${d.pill}]`).join(' · '));
-  check(['Era I: Founding Charter', 'Era II: Transit & Trade', 'Era III: Grand Boulevard', 'Era IV: Golden Dynasty'].every((h) => eraHeads.includes(h)), 'all four Eras were announced: Founding Charter → Transit & Trade → Grand Boulevard → Golden Dynasty', eraHeads.join(' → '));
-  const edition = await solo.evaluate(() => {
-    const v = document.querySelector('#victory .victory');
-    const eq = [...v.querySelectorAll('.equation b')].map((b) => Number(b.textContent));
-    const st = window.__mercadia.state();
-    const top = st.players.map((p, i) => ({ i, crown: p.crown, house: p.house })).sort((a, b) => b.crown - a.crown || a.i - b.i)[0];
-    return {
-      mast: v.querySelector('.m-name')?.textContent ?? '',
-      crest: v.querySelector('.crest.grand')?.dataset.crest ?? '',
-      winner: top.house,
-      eq,
-      lines: v.querySelectorAll('svg.spark polyline').length,
-      dots: v.querySelectorAll('svg.spark circle').length,
-      axis: [...v.querySelectorAll('svg.spark .ax')].map((t) => t.textContent).filter((t) => /^[IV]+$/.test(t)).join(' '),
-      rows: v.querySelectorAll('table tbody tr').length,
-      rowCrests: v.querySelectorAll('table tbody td .hcrest').length,
-      rowStars: v.querySelectorAll('table tbody .mstars').length,
-      charters: v.querySelectorAll('table tbody em.chs').length,
-      highlight: v.querySelector('.highlight')?.textContent ?? '',
-      awards: v.querySelectorAll('.award').length,
-      rematch: !!v.querySelector('[data-act="rematch"]:not([disabled])'),
-      endless: !!v.querySelector('[data-act="endless"]:not([disabled])'),
-      fits: v.scrollWidth <= v.clientWidth + 1,
-      allCharters: window.__mercadia.charters.every((c) => c.charters.length === 3),
-    };
-  });
-  check(edition.mast === 'The Mercadia Gazette' && edition.crest === HOUSE_CREST[edition.winner] && edition.eq.length === 4 && edition.eq[0] + edition.eq[1] + edition.eq[2] === edition.eq[3] && edition.lines === 4 && edition.dots === 4 && edition.rows === 4 && edition.highlight.length > 10 && edition.awards === 3 && edition.rematch && edition.endless && edition.fits, 'Final Edition: masthead, the winning House’s crest, exact Crown equation, share chart, headline, honours, Rematch + Endless', `${edition.winner} (${edition.crest}) · ${edition.eq.slice(0, 3).join(' + ')} = ${edition.eq[3]} · "${edition.highlight}"`);
-  check(edition.axis === 'I II III IV' && edition.rowCrests === 4 && edition.rowStars === 4 && edition.charters === 4 && edition.allCharters, 'Final Edition: the chart is labelled era by era (I–IV) and every House shows crest, stars and its three charters', `axis ${edition.axis}`);
-  await solo.screenshot({ path: `${OUT}/09-final-edition.png` });
-  await solo.click('#victory [data-act="rematch"]');
-  await solo.waitForFunction(() => document.getElementById('victory').hidden && !window.__mercadia.state().ended && window.__mercadia.state().tick < 40, null, { timeout: 5000 });
-  const reborn = await solo.evaluate(() => ({ tool: window.__mercadia.tool, buildings: window.__mercadia.state().buildings.length, era: window.__mercadia.era, guide: document.getElementById('guide').hidden, g: window.__mercadia.guide(), charters: window.__mercadia.charters.map((c) => c.charters.length).join(''), locked: window.__mercadia.locked.length }));
-  check(reborn.tool === null && reborn.buildings === 0 && reborn.era === 1 && reborn.charters === '0000' && reborn.locked === 6, 'Rematch starts a clean Era I district with nothing armed, no charters and the locks back on', `tool=${reborn.tool}, era ${reborn.era}`);
-  check(reborn.guide && reborn.g.dismissed && !reborn.g.visible, 'the retired Founding Guide does not come back in the next match', `guide hidden=${reborn.guide}`);
-  await solo.keyboard.press('1');
-  const full = await warpBy(solo, 9000);
-  await solo.waitForFunction(() => !document.getElementById('victory').hidden, null, { timeout: 8000 });
-  check(full.phase === 'ended' && full.tick === 6000, 'one plain warp plays a whole match — three Era Councils and four Eras — to the Final Edition', `ended at tick ${full.tick}`);
-  await solo.click('#victory [data-act="endless"]');
-  await solo.waitForFunction(() => document.getElementById('victory').hidden && !window.__mercadia.state().ended, null, { timeout: 5000 });
-  const onward = await state(solo);
-  const beyond = await warpBy(solo, 1700);
-  const far = await solo.evaluate(() => ({ s: window.__mercadia.state(), chip: document.querySelector('#clock [data-f="era"]').textContent.trim(), of: document.querySelector('#clock [data-f="eraof"]').textContent.trim(), council: window.__mercadia.council(), open: !document.getElementById('council').hidden }));
-  check((await info(solo)).tool === null && onward.quarter === 5 && onward.era === 4 && beyond.phase === 'playing' && far.s.quarter === 6 && far.s.era === 4 && far.council === null && !far.open && far.chip === 'Era IV · Golden', 'Continue in Endless plays on past Era IV with nothing armed and no further Council', `quarter ${onward.quarter} → ${far.s.quarter}, "${far.chip}" ${far.of}`);
-
-  // Leave: two deliberate clicks.
-  await solo.click('#clock [data-act="leave"]');
-  await solo.waitForFunction(() => document.querySelector('#clock [data-act="leave"]')?.textContent?.trim() === 'Leave?');
-  await solo.click('#clock [data-act="leave"]');
-  await solo.waitForFunction(() => window.__mercadia.phase === 'title');
-  ok('a second click on Leave returns to the title');
-  await solo.context().close();
+// ═════════════════════════════ HOTSEAT ═════════════════════════════
+async function hotseat() {
+  const c = await ctx('hotseat');
+  const page = await openPage(c, 'hotseat');
+  await page.goto(`${BASE}/?dev=1`);
+  await page.getByRole('button', { name: 'Hotseat', exact: true }).click();
+  await page.getByLabel('Seat 1 name').fill('Ada');
+  await page.getByLabel('Seat 2 name').fill('Bram');
+  await page.getByText('Blitz', { exact: false }).first().click();
+  await page.getByRole('button', { name: /Start hotseat match/ }).click();
+  await page.waitForFunction(() => window.__mercadia?.phase === 'planning');
+  await sleep(500);
+  const t0 = await turnOf(page);
+  // Ada plans: build a Roastery
+  await page.getByRole('button', { name: /Roastery/ }).first().click();
+  await tileClick(page, 31);
+  await sleep(300);
+  await shot(page, '07-hotseat-ada-planning');
+  const adaDraft = await page.evaluate(() => window.__mercadia.draft.length);
+  await endBtn(page).click();
+  await sleep(600);
+  const handoff = await page.evaluate(() => ({ text: document.body.innerText, seat: window.__mercadia.seat, draft: window.__mercadia.draft.length, turn: window.__mercadia.turn }));
+  ok(adaDraft === 1 && /Pass to/i.test(handoff.text) && handoff.draft === 0 && handoff.turn === t0, 'hotseat: after the first seat ends, a handoff screen hides its draft and the turn has not resolved', JSON.stringify({ adaDraft, draft: handoff.draft, turn: handoff.turn }));
+  await shot(page, '08-hotseat-handoff');
+  await page.getByRole('button', { name: /^Begin .*turn/ }).click();
+  await sleep(400);
+  await page.getByRole('button', { name: /Roastery/ }).first().click();
+  await tileClick(page, 6).catch(() => {});
+  await endBtn(page).click();
+  await waitTurn(page, t0 + 1);
+  ok((await turnOf(page)) === t0 + 1, 'hotseat: the turn resolves only after the second seat ends', `${t0} → ${await turnOf(page)}`);
+  await sleep(700);
+  // PRODUCT.md Hotseat: the Turn Delta is shown to the TABLE before the first seat plans the next turn.
+  // Real rendered DOM checks (computed style + bounding boxes), taken BEFORE anybody clicks into Turn 2.
+  const vis = await tableDeltaState(page);
+  ok(vis.handoffLayer === false, 'hotseat: no handoff screen covers the game when Turn 1→2 resolves', JSON.stringify(vis));
+  ok(vis.hudVisibility === 'visible' && !vis.hudInert && vis.hudRect.w > 1000 && vis.hudRect.h > 600, 'hotseat: the HUD is genuinely visible (visibility: visible, full-viewport bounding box)', JSON.stringify({ v: vis.hudVisibility, inert: vis.hudInert, r: vis.hudRect }));
+  ok(vis.drawerOpen && vis.drawerVisibility === 'visible' && vis.drawerRect.w > 200 && vis.drawerRect.h > 200, 'hotseat: the Turn Delta drawer is open and visible with a real bounding box', JSON.stringify({ o: vis.drawerOpen, v: vis.drawerVisibility, r: vis.drawerRect }));
+  ok(vis.heading === `Turn ${t0} \u2192 ${t0 + 1}` && vis.headingVisible && vis.headingInViewport, 'hotseat: the readable "Turn 1 → 2" heading is on screen before Turn 2 is entered', JSON.stringify({ h: vis.heading, vis: vis.headingVisible, inVp: vis.headingInViewport }));
+  ok(/Worth [+\u2212]?\d/.test(vis.text) && /#\d( \u2192 #\d|\s*held)?/.test(vis.text) && /Crown Index/.test(vis.text), 'hotseat: the visible delta shows numbers (Crown Index, rank, component deltas)', vis.text.slice(0, 160).replace(/\s+/g, ' '));
+  ok(vis.draftLen === 0 && vis.cta?.label === 'Pass to Ada' && vis.cta.visible && vis.cta.enabled, 'hotseat: a visible "Pass to Ada" CTA exists and no private draft is exposed', JSON.stringify({ d: vis.draftLen, cta: vis.cta }));
+  ok(vis.turn === t0 + 1 && vis.res === 1, 'hotseat: Turn 2 is resolved but unplanned — the world has not moved again', JSON.stringify({ turn: vis.turn, res: vis.res }));
+  await shot(page, '09-hotseat-turn-delta');
+  // The CTA hands over: now the Turn 2 first-seat handoff covers the screen and hides the HUD.
+  await page.getByRole('button', { name: /^Pass to Ada/ }).click();
+  await sleep(600);
+  const covered = await page.evaluate(() => ({ layer: !!document.querySelector('.handoff-layer'), hud: getComputedStyle(document.querySelector('#hud')).visibility, text: document.querySelector('.handoff-layer')?.innerText ?? '', turn: window.__mercadia.turn, draft: window.__mercadia.draft.length }));
+  ok(covered.layer && covered.hud === 'hidden' && /Pass to /.test(covered.text) && covered.turn === t0 + 1 && covered.draft === 0, 'hotseat: after the CTA the Turn 2 first-seat handoff covers the board (HUD hidden) and nothing resolved', JSON.stringify(covered));
+  await shot(page, '09b-hotseat-turn2-handoff');
+  await page.getByRole('button', { name: /^Begin .*turn/ }).click();
+  await sleep(500);
+  const planning = await page.evaluate(() => ({ seat: window.__mercadia.seat, draft: window.__mercadia.draft.length, layer: !!document.querySelector('.handoff-layer'), hud: getComputedStyle(document.querySelector('#hud')).visibility }));
+  ok(planning.seat === 0 && planning.draft === 0 && !planning.layer && planning.hud === 'visible', "hotseat: Ada then plans Turn 2 on an empty draft behind a visible HUD", JSON.stringify(planning));
+  await finishCtx(c, 'hotseat-walkthrough');
 }
 
-// ───────────────────────────── Founding Guide: dismiss; Blitz ─────────────────────────────
-if (wants('guide')) {
-  console.log('Guide dismiss · Blitz');
-  const g = await open('guide');
-  await g.click('#title [data-act="mode"][data-v="blitz"]');
-  const blurb = await text(g, '#title .modeblurb');
-  await g.click('#title [data-act="solo"]');
-  await g.waitForFunction(() => window.__mercadia.phase === 'playing' && !document.getElementById('guide').hidden);
-  const blitz = await g.evaluate(() => ({ mode: window.__mercadia.state().mode, of: document.querySelector('#clock [data-f="eraof"]').textContent.trim(), rate: document.querySelector('#treasury [data-act="borrow"]').textContent.replace(/\s+/g, ' ').trim(), buildings: window.__mercadia.state().buildings.length }));
-  check(/4 brisk eras/.test(blurb) && blitz.mode === 'blitz' && blitz.of === 'of IV' && /7\.9%\/era/.test(blitz.rate) && blitz.buildings === 0, 'Blitz is four brisk eras too, with its own exact per-era loan rate', `"${blurb}" · ${blitz.rate}`);
-  await g.click('#guide [data-act="dismiss"]');
-  const gone = await g.evaluate(() => ({ hidden: document.getElementById('guide').hidden, stored: localStorage.getItem('mercadia:guide'), g: window.__mercadia.guide(), guided: document.querySelectorAll('#dock .tool.guided').length }));
-  check(gone.hidden && gone.stored === 'done' && gone.g.dismissed && gone.g.lots.length === 0 && gone.guided === 0, 'the Founding Guide is dismissed with one click: bar, rings and dock pointers all go, and it is persisted', `mercadia:guide=${gone.stored}`);
-  // Blitz: all four eras and three Councils in one warp.
-  const eras = [];
-  for (let i = 0; i < 3; i++) {
-    const r = await warpBy(g, 2000, { hold: true });
-    eras.push(`${r.phase}@${r.tick}`);
-    const key = await g.evaluate(() => window.__mercadia.council().offers[0][0]);
-    await g.click(`#council .charter[data-key="${key}"]`);
-    await g.click('#council [data-act="advance"]');
-    await g.waitForFunction(() => window.__mercadia.state().phase === 'playing', null, { timeout: 4000 });
-  }
-  const end = await warpBy(g, 2000);
-  await g.waitForFunction(() => !document.getElementById('victory').hidden, null, { timeout: 8000 });
-  check(eras.join() === 'council@660,council@1320,council@1980' && end.phase === 'ended' && end.tick === 2640 && (await hook(g, 'charters'))[0].charters.length === 3, 'a Blitz match runs Era I → IV with a Council after Eras I, II and III (66 s eras)', `${eras.join(' → ')} → ended@${end.tick}`);
-  await g.click('#victory [data-act="leave"]');
-  await g.waitForFunction(() => window.__mercadia.phase === 'title');
-  await g.click('#title [data-act="solo"]');
-  await g.waitForFunction(() => window.__mercadia.phase === 'playing' && window.__mercadia.state().tick < 60);
-  await sleep(g, 400);
-  check(await g.evaluate(() => document.getElementById('guide').hidden && window.__mercadia.guide().lots.length === 0), 'a dismissed guide stays dismissed in the next match');
-  await g.context().close();
-}
 
-// ───────────────────────────── Dev hook gating on a non-local hostname ─────────────────────────────
-if (wants('dev')) {
-  console.log('Dev hook');
-  const pub = await open('public-host', `http://mercadia.test:${PORT}/`);
-  await pub.click('#title [data-act="solo"]');
-  await pub.waitForFunction(() => window.__mercadia.phase === 'playing');
-  const gate = await pub.evaluate(() => {
-    const m = window.__mercadia;
-    const before = m.state().tick;
-    const ret = m.warp(500);
-    const focus = m.focus(40);
-    return { dev: m.dev, ret, focus, jumped: m.state().tick - before, host: location.hostname, era: m.era, chronicle: m.chronicle().length };
-  });
-  check(gate.dev === false && gate.ret === false && gate.focus === false && gate.jumped < 50, 'warp() and focus() are inert on a non-local host', `${gate.host}: dev=${gate.dev} warp→${gate.ret} tick moved ${gate.jumped}`);
-  check(gate.era === 1 && gate.chronicle >= 1, 'the read-only window (era, chronicle, …) still answers there', `era ${gate.era}, ${gate.chronicle} dispatch(es)`);
-  await pub.context().close();
-  const dev = await open('public-host-dev', `http://mercadia.test:${PORT}/?dev=1`);
-  await dev.click('#title [data-act="solo"]');
-  await dev.waitForFunction(() => window.__mercadia.phase === 'playing');
-  const gate2 = await dev.evaluate(() => {
-    const m = window.__mercadia;
-    const before = m.state().tick;
-    m.warp(300);
-    return { dev: m.dev, jumped: m.state().tick - before };
-  });
-  check(gate2.dev === true && gate2.jumped >= 300, '?dev=1 turns the hook back on', `dev=${gate2.dev} tick moved ${gate2.jumped}`);
-  await dev.context().close();
-}
-
-// ───────────────────────────── Phone: 390×844, touch ─────────────────────────────
-if (wants('mobile')) {
-  console.log('Mobile 390×844');
-  const phone = await open('phone', '/', PHONE);
-  await phone.tap('#title [data-act="solo"]');
-  await phone.waitForFunction(() => window.__mercadia.phase === 'playing');
-  await sleep(phone, 400);
-  // Hold the clock through the opening checks: the first city event is forecast at tick 75 and
-  // would take the Chronicle banner from the dispatches this section taps on.
-  await phone.tap('#clock [data-act="pause"]');
-  await phone.waitForFunction(() => window.__mercadia.paused === true, null, { timeout: 3000 });
-  // A dispatch with no lot (the Era I headline) offers no focus button: never a dead control.
-  const eraBanner = await phone.evaluate(() => { const box = document.querySelector('#chronicle .dispatch'); const f = box.querySelector('.d-focus'); return { cat: box.dataset.cat, hidden: f.hidden && f.getBoundingClientRect().width === 0, tile: f.dataset.tile ?? '' }; });
-  check(eraBanner.cat === 'era' && eraBanner.hidden && eraBanner.tile === '', 'phone: a dispatch with no lot shows no focus button on the banner', `banner "${eraBanner.cat}", focus button hidden=${eraBanner.hidden}`);
-  const span = await phone.evaluate(() => window.__mercadia.islandSpan());
-  check(span.left >= 0 && span.right <= span.width, 'portrait Fit view shows both island tips with no cropping', `tips at x=${span.left.toFixed(1)} and x=${span.right.toFixed(1)} of ${span.width}px`);
-  const tabs = await phone.evaluate(() => [...document.querySelectorAll('#docktabs [data-tab]')].map((b) => b.textContent.trim()));
-  const shopsShown = await phone.evaluate(() => [...document.querySelectorAll('#dock .tool')].filter((b) => getComputedStyle(b).display !== 'none').map((b) => b.dataset.kind));
-  check(tabs.join('|') === 'Shops (6)|Civic (3)' && (await visible(phone, '#docktabs [data-tab="civic"]')) && shopsShown.length === 6, 'the dock is tabbed: Shops (6) / Civic (3)', `${tabs.join(' / ')} · showing ${shopsShown.join(', ')}`);
-  const lockBadges = (kinds) => phone.evaluate((kinds) => kinds.map((k) => { const el = document.querySelector(`#dock [data-kind="${k}"] .lock`); const r = el.getBoundingClientRect(); const cs = getComputedStyle(el.querySelector('b')); return { k, text: el.textContent.trim(), ok: !el.hidden && r.width >= 20 && r.height >= 8 && r.left >= 0 && r.right <= innerWidth && parseFloat(cs.fontSize) >= 8 }; }), kinds);
-  const shopsFit = [];
-  for (const k of shopsShown) shopsFit.push(await visible(phone, `#dock [data-kind="${k}"]`));
-  const shopLocks = await lockBadges(['arcade', 'boutique', 'cinema', 'nightmarket']);
-  const mobileGuide = await phone.evaluate(() => {
-    const el = document.getElementById('guide');
-    const r = el.getBoundingClientRect();
-    const tabs = document.getElementById('docktabs').getBoundingClientRect();
-    const dock = document.getElementById('dock').getBoundingClientRect();
-    return { hidden: el.hidden, step: el.dataset.step, h: r.height, top: r.top, bottom: r.bottom, above: r.bottom <= Math.min(tabs.top, dock.top) + 1, coversCentre: r.top <= innerHeight / 2 && r.bottom >= innerHeight / 2, inView: r.left >= 0 && r.right <= innerWidth, title: el.querySelector('[data-f="gtitle"]').textContent, lots: window.__mercadia.guide().lots.length };
-  });
-  check(!mobileGuide.hidden && mobileGuide.step === '1' && mobileGuide.h <= 56 && mobileGuide.above && !mobileGuide.coversCentre && mobileGuide.inView && mobileGuide.lots >= 3, 'the Founding Guide is a slim one-line bar above the dock, clear of the city centre', `"${mobileGuide.title}" ${Math.round(mobileGuide.h)}px tall at y=${Math.round(mobileGuide.top)}–${Math.round(mobileGuide.bottom)}`);
-  await phone.screenshot({ path: `${OUT}/10-mobile-era1.png` });
-  await phone.tap('#docktabs [data-tab="civic"]');
-  const civicFit = [];
-  for (const k of ['park', 'tramstop', 'plaza']) civicFit.push(await visible(phone, `#dock [data-kind="${k}"]`));
-  const civicLocks = await lockBadges(['tramstop', 'plaza']);
-  check(shopsFit.every(Boolean) && civicFit.every(Boolean), 'Park, Tram Stop and Plaza are one tap away and fully on screen', `shops on screen ${shopsFit.filter(Boolean).length}/6, civic ${civicFit.filter(Boolean).length}/3`);
-  check([...shopLocks, ...civicLocks].every((l) => l.ok) && shopLocks.map((l) => l.text).join() === 'Era II,Era III,Era III,Era II' && civicLocks.map((l) => l.text).join() === 'Era II,Era III', 'Era lock badges stay legible on both dock tabs with no horizontal clipping', [...shopLocks, ...civicLocks].map((l) => `${l.k}:${l.text}`).join(' '));
-  await phone.tap('#dock [data-kind="plaza"]');
-  const mLock = await phone.evaluate(() => ({ t: document.querySelector('#toasts .toast.lockmsg')?.textContent ?? '', tool: window.__mercadia.tool }));
-  check(mLock.t === 'Festival Plaza unlocks in Era III: Grand Boulevard' && mLock.tool === null, 'tapping a locked tool on a phone shows the unlock notice', `"${mLock.t}"`);
-  const strip = await phone.evaluate(() => {
-    const rows = [...document.querySelectorAll('#board .row')].sort((a, b) => Number(a.style.order) - Number(b.style.order));
-    const segs = [...document.querySelectorAll('#board .bar i')].sort((a, b) => Number(a.style.order) - Number(b.style.order));
-    return {
-      ini: rows.map((r) => r.querySelector('.ini').textContent),
-      iniShown: rows.every((r) => getComputedStyle(r.querySelector('.ini')).display !== 'none'),
-      crests: rows.map((r) => { const c = r.querySelector('.hcrest'); const q = c.getBoundingClientRect(); return q.width >= 10 && q.left >= 0 && q.right <= innerWidth ? c.dataset.crest : ''; }),
-      crowns: rows.every((r) => /^\d+$/.test(r.querySelector('[data-f="crown"]').textContent)),
-      oneRow: new Set(rows.map((r) => Math.round(r.getBoundingClientRect().top))).size === 1,
-      rowOrder: rows.map((r) => r.dataset.p).join(''),
-      segOrder: segs.map((s) => s.dataset.s).join(''),
-      rowX: rows.map((r) => Math.round(r.getBoundingClientRect().left)),
-      segX: segs.map((s) => Math.round(s.getBoundingClientRect().left)),
-    };
-  });
-  const ascending = (v) => v.every((x, i) => i === 0 || x >= v[i - 1]);
-  check(strip.iniShown && strip.ini.includes('You') && strip.ini.includes('Ves') && strip.rowOrder === strip.segOrder && ascending(strip.rowX) && ascending(strip.segX) && strip.oneRow && strip.crowns && new Set(strip.crests.filter(Boolean)).size === 4, 'single-row score strip: four House crests, short names, Crown; the share bar follows its rank order', `${strip.ini.join(' ')} · ${strip.crests.join(' ')} · rows ${strip.rowOrder} / bar ${strip.segOrder}`);
-  // Touch blueprint: first tap previews, second tap builds.
-  await phone.tap('#dock [data-kind="park"]');
-  const p1 = await freeLot(phone);
-  await phone.touchscreen.tap(p1.x, p1.y);
-  await sleep(phone, 250);
-  const previewOnly = !(await state(phone)).buildings.some((b) => b.tile === p1.t);
-  const previewCard = await text(phone, '#lotcard');
-  await phone.screenshot({ path: `${OUT}/11-mobile-civic-blueprint.png` });
-  await phone.touchscreen.tap(p1.x, p1.y);
-  await built(phone, p1.t, 'park');
-  check(previewOnly && /Park Aura/.test(previewCard) && /tap again/.test(previewCard), 'touch: first tap previews the blueprint and its reach, second tap builds', previewCard.replace(/\s+/g, ' ').slice(0, 90));
-  await phone.tap('#docktabs [data-tab="shops"]');
-  await phone.tap('#dock [data-kind="roastery"]');
-  const p2 = await freeLot(phone);
-  await phone.touchscreen.tap(p2.x, p2.y);
-  await sleep(phone, 150);
-  await phone.touchscreen.tap(p2.x, p2.y);
-  await built(phone, p2.t, 'roastery');
-  check(await phone.evaluate(() => document.getElementById('inspector').hidden) && (await visible(phone, '#dock [data-kind="bistro"]')), 'after building on a phone the dock stays in reach (no sheet in the way)');
-  // ── The active dispatch's lot is one tap away on a phone (banner focus button, and the feed) ──
-  const founding = (await hook(phone, 'chronicle')).find((d) => d.cat === 'build' && d.player === 0 && d.tile === p2.t);
-  check(!!founding && /founds its first shop/.test(founding.head) && founding.icon === 'roastery', 'the Roastery I founded is a Chronicle dispatch tied to its lot', founding ? `#${founding.n} "${founding.head}" → lot ${founding.tile}` : 'no dispatch');
-  const bannerOf = () =>
-    phone.evaluate(() => {
-      const box = document.querySelector('#chronicle .dispatch');
-      const f = box.querySelector('.d-focus');
-      const chip = f.querySelector('.d-focus-chip');
-      const r = f.getBoundingClientRect();
-      const tg = box.querySelector('.d-toggle').getBoundingClientRect();
-      const main = box.querySelector('.d-main').getBoundingClientRect();
-      const rgb = (c) => c.match(/[\d.]+/g).slice(0, 3).map(Number);
-      const lum = ([x, y, z]) => { const g = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * g(x) + 0.7152 * g(y) + 0.0722 * g(z); };
-      const cs = getComputedStyle(chip);
-      const [l1, l2] = [lum(rgb(cs.backgroundColor)), lum(rgb(cs.color))];
-      const shown = !f.hidden && cs.display !== 'none' && r.width > 0;
-      return {
-        n: Number(box.dataset.n || -1), cat: box.dataset.cat, mode: box.dataset.mode, head: box.querySelector('.d-head').textContent,
-        shown, tile: Number(f.dataset.tile ?? -1), w: Math.round(r.width * 10) / 10, h: Math.round(r.height * 10) / 10, label: f.getAttribute('aria-label') ?? '',
-        inView: r.left >= 0 && r.right <= innerWidth && r.top >= 0, clear: r.right <= tg.left + 0.5 && r.left >= main.right - 0.5,
-        contrast: (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05), headW: box.querySelector('.d-head').getBoundingClientRect().width,
-        open: document.getElementById('chronicle').classList.contains('open'),
-      };
-    });
-  /** Slide the city away so the lot is far from the middle, then report where it sits. */
-  const lookAway = async (tile) => {
-    // Aim the camera at a point 170 screen px "below" the lot (same zoom), so the lot rides up the screen.
-    await phone.evaluate((t) => { const m = window.__mercadia; const d = 170 / m.zoom / 32; m.look((t % 12) + 0.5 + d, Math.floor(t / 12) + 0.5 + d, m.zoom); }, tile);
-    await sleep(phone, 120);
-    return phone.evaluate((t) => { const m = window.__mercadia; const p = m.tileScreen(t); const c = m.camera.centre; return { x: p.x, y: p.y, off: Math.hypot(p.x - c.x, p.y - c.y) }; }, tile);
-  };
-  /** After a focus tap: wait for the glide to finish and report where the lot landed. */
-  const landed = async (tile) => {
-    await phone.waitForFunction((t) => { const m = window.__mercadia; const p = m.tileScreen(t); const c = m.camera.centre; return !m.camera.gliding && Math.hypot(p.x - c.x, p.y - c.y) < 6; }, tile, { timeout: 4000 }).catch(() => undefined);
-    return phone.evaluate((t) => { const m = window.__mercadia; const p = m.tileScreen(t); const c = m.camera; const strip = document.querySelector('#chronicle .dispatch').getBoundingClientRect().bottom; const dock = document.getElementById('guide').hidden ? document.getElementById('treasury').getBoundingClientRect().top : document.getElementById('guide').getBoundingClientRect().top; return { x: p.x, y: p.y, cx: c.centre.x, cy: c.centre.y, off: Math.hypot(p.x - c.centre.x, p.y - c.centre.y), gliding: c.gliding, inCity: p.y > strip + 20 && p.y < dock - 20 && p.x > 20 && p.x < innerWidth - 20, open: document.getElementById('chronicle').classList.contains('open'), feedHidden: document.getElementById('cfeed').hidden }; }, tile);
-  };
-  const at = (q) => `(${Math.round(q.x)},${Math.round(q.y)})`;
-  // The Era I headline holds the banner for its first seconds; then the founding shop is the active dispatch.
-  await phone.waitForFunction((n) => Number(document.querySelector('#chronicle .dispatch').dataset.n) === n && !document.querySelector('#chronicle .d-focus').hidden, founding?.n ?? -1, { timeout: 12000 }).catch(() => undefined);
-  const fb = await bannerOf();
-  check(fb.n === founding?.n && fb.mode === 'dispatch' && fb.shown && fb.tile === p2.t && fb.w >= 44 && fb.h >= 44 && fb.inView && fb.clear && fb.contrast >= 7 && fb.headW >= 150 && /^Show on the map/.test(fb.label), 'phone: the active Roastery dispatch carries a dedicated high-contrast focus button on the Chronicle banner (≥ 44 px, clear of the chevron)', `"${fb.head}" → lot ${fb.tile}; button ${Math.round(fb.w)}×${Math.round(fb.h)} px, contrast ${fb.contrast.toFixed(1)}:1`);
-  const away1 = await lookAway(p2.t);
-  await phone.tap('#chronicle .d-focus');
-  const back1 = await landed(p2.t);
-  check(away1.off > 120 && back1.off < 6 && back1.inCity && !back1.open && back1.feedHidden, 'phone: tapping the banner’s focus button pans the camera onto the Roastery’s lot — the feed stays shut', `lot ${p2.t}: ${at(away1)} → ${at(back1)}, free-area centre (${Math.round(back1.cx)},${Math.round(back1.cy)})`);
-  await phone.screenshot({ path: `${OUT}/12a-mobile-chronicle-focus-roastery.png` });
-  // The same dispatch leads the expanded feed, with its own click-to-focus; focusing folds the feed away.
-  const away2 = await lookAway(p2.t);
-  await phone.tap('#chronicle .d-main');
-  await phone.waitForFunction(() => document.getElementById('chronicle').classList.contains('open') && !document.getElementById('cfeed').hidden, null, { timeout: 3000 });
-  const topRow = await phone.evaluate(() => { const rows = [...document.querySelectorAll('#cfeed .cline')]; const l = rows[0]; const r = l.getBoundingClientRect(); return { n: Number(l.dataset.n), active: l.dataset.active === '1', tile: Number(l.dataset.tile ?? -1), focusable: l.classList.contains('focusable') && l.tagName === 'BUTTON', h: r.height, rows: rows.length, actives: rows.filter((x) => x.dataset.active === '1').length, still: Math.hypot(window.__mercadia.tileScreen(Number(l.dataset.tile ?? 0)).x - window.__mercadia.camera.centre.x, window.__mercadia.tileScreen(Number(l.dataset.tile ?? 0)).y - window.__mercadia.camera.centre.y) }; });
-  await phone.screenshot({ path: `${OUT}/12b-mobile-chronicle-feed-active.png` });
-  await phone.tap('#cfeed .cline[data-active="1"]');
-  const back2 = await landed(p2.t);
-  check(topRow.n === founding?.n && topRow.active && topRow.actives === 1 && topRow.tile === p2.t && topRow.focusable && topRow.h >= 38 && topRow.rows <= 4 && topRow.still > 120 && away2.off > 120 && back2.off < 6 && !back2.open && back2.feedHidden, 'phone: tapping the headline opens the feed with the active dispatch on top (no camera move); tapping that row pans to the lot and folds the feed away', `row #${topRow.n} of ${topRow.rows}: ${at(away2)} → ${at(back2)}`);
-  // A Promo Blitz of my own: a Tier 1 headline that takes the banner at once, focus button and all.
-  const shopOn = await phone.evaluate((t) => window.__mercadia.tileScreen(t), p2.t);
-  await phone.touchscreen.tap(shopOn.x, shopOn.y - 3);
-  await phone.waitForFunction((t) => window.__mercadia.selectedTile === t && !document.getElementById('inspector').hidden, p2.t, { timeout: 5000 });
-  await phone.tap('#inspector [data-act="promo"]');
-  await phone.waitForFunction(() => window.__mercadia.chronicle().some((d) => d.cat === 'promo' && d.player === 0), null, { timeout: 4000 });
-  await phone.tap('#inspector [data-act="close"]');
-  await phone.waitForFunction(() => document.getElementById('inspector').hidden, null, { timeout: 3000 });
-  const promoD = (await hook(phone, 'chronicle')).find((d) => d.cat === 'promo' && d.player === 0);
-  await phone.waitForFunction((n) => Number(document.querySelector('#chronicle .dispatch').dataset.n) === n, promoD.n, { timeout: 4000 }).catch(() => undefined);
-  const pb = await bannerOf();
-  const away3 = await lookAway(p2.t);
-  await phone.tap('#chronicle .d-focus');
-  const back3 = await landed(p2.t);
-  await phone.screenshot({ path: `${OUT}/12c-mobile-chronicle-focus-promo.png` });
-  check(promoD.tile === p2.t && pb.n === promoD.n && pb.cat === 'promo' && pb.shown && pb.tile === p2.t && pb.w >= 44 && pb.h >= 44 && pb.clear && away3.off > 120 && back3.off < 6 && back3.inCity && !back3.open, 'phone: the active Promo Blitz dispatch focuses its lot from the banner in one tap', `"${pb.head}" → lot ${pb.tile}: ${at(away3)} → ${at(back3)}`);
-  await phone.tap('#clock [data-act="pause"]'); // resume
-  await phone.waitForFunction(() => window.__mercadia.paused === false, null, { timeout: 3000 });
-  // Compact Chronicle bar: headline + pill, unclipped; tap expands the recent feed, tap closes it.
-  await phone.evaluate(() => window.__mercadia.warp(220));
-  await sleep(phone, 400);
-  const bar = await phone.evaluate(() => {
-    const d = document.querySelector('#chronicle .dispatch');
-    const r = d.getBoundingClientRect();
-    const head = d.querySelector('.d-head');
-    const pill = d.querySelector('.d-pill');
-    const board = document.getElementById('board').getBoundingClientRect();
-    return { head: head.textContent, pill: pill.textContent, pillShown: !pill.hidden && getComputedStyle(pill).display !== 'none', pillFits: pill.scrollWidth <= pill.clientWidth + 1, size: parseFloat(getComputedStyle(pill).fontSize), h: r.height, under: r.top >= board.bottom - 1, inView: r.left >= 0 && r.right <= innerWidth };
-  });
-  check(bar.head.length > 6 && bar.pillShown && bar.pillFits && bar.size >= 10 && bar.under && bar.inView && bar.h <= 64, 'the compact Chronicle bar sits under the score strip: one headline and a readable impact pill', `"${bar.head}" [${bar.pill}] at ${bar.size}px, bar ${Math.round(bar.h)}px tall`);
-  await phone.tap('#chronicle [data-act="feed"]');
-  await phone.waitForFunction(() => document.getElementById('chronicle').classList.contains('open') && !document.getElementById('cfeed').hidden, null, { timeout: 3000 });
-  const mFeed = await phone.evaluate(() => { const f = document.getElementById('cfeed'); const r = f.getBoundingClientRect(); return { lines: f.querySelectorAll('.cline').length, inView: r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight, fits: [...f.querySelectorAll('.cline')].every((l) => l.getBoundingClientRect().right <= innerWidth + 0.5), stripes: [...f.querySelectorAll('.cline')].every((l) => getComputedStyle(l).borderLeftWidth === '3px') }; });
-  await phone.screenshot({ path: `${OUT}/12-mobile-chronicle.png` });
-  await phone.tap('#chronicle [data-act="feed"]');
-  await phone.waitForFunction(() => !document.getElementById('chronicle').classList.contains('open'), null, { timeout: 3000 });
-  check(mFeed.lines >= 2 && mFeed.lines <= 4 && mFeed.inView && mFeed.fits && mFeed.stripes, 'tapping the bar expands the recent Chronicle feed (striped, unclipped) and a second tap puts it away', `${mFeed.lines} lines`);
-  const layPhone = await layout(phone);
-  check(layPhone.clipped.length === 0 && layPhone.overlaps.length === 0, '390×844: no persistent panel is clipped or overlaps another', `${layPhone.shown.join(' ')} · clipped [${layPhone.clipped}] overlaps [${layPhone.overlaps}]`);
-  // Inspector as a bottom sheet.
-  const sp = await phone.evaluate((t) => window.__mercadia.tileScreen(t), p2.t);
-  await phone.touchscreen.tap(sp.x, sp.y - 3);
-  await phone.waitForFunction((t) => window.__mercadia.selectedTile === t && !document.getElementById('inspector').hidden, p2.t, { timeout: 5000 });
-  await sleep(phone, 250);
-  const sheet = await phone.evaluate((t) => {
-    const el = document.getElementById('inspector');
-    const r = el.getBoundingClientRect();
-    const p = window.__mercadia.tileScreen(t);
-    const board = document.getElementById('board').getBoundingClientRect();
-    const sell = el.querySelector('[data-act="sell"]');
-    sell.scrollIntoView({ block: 'end' });
-    const sr = sell.getBoundingClientRect();
-    return { top: r.top, bottom: r.bottom, h: r.height, scrolls: el.scrollHeight > el.clientHeight, tileY: p.y, tileX: p.x, boardBottom: board.bottom, sellIn: sr.top >= r.top && sr.bottom <= r.bottom + 0.5 && sr.bottom <= innerHeight, vh: innerHeight, crest: el.querySelector('.head .hcrest')?.dataset.crest ?? '', diag: el.querySelector('.diag')?.textContent ?? '' };
-  }, p2.t);
-  check(sheet.bottom >= sheet.vh - 12 && sheet.h <= sheet.vh * 0.42 + 1 && sheet.sellIn && sheet.tileY > sheet.boardBottom && sheet.tileY < sheet.top && sheet.tileX > 0 && sheet.tileX < 390 && sheet.crest === 'compass' && sheet.diag.length > 8, 'the Inspector is a bottom sheet (≤ 42% tall): crest and diagnosis up top, Sell reachable by scroll, the selected block visible above it', `sheet ${Math.round(sheet.top)}–${Math.round(sheet.bottom)} of ${sheet.vh} (${((sheet.h / sheet.vh) * 100).toFixed(1)}%), block at y=${Math.round(sheet.tileY)}`);
-  await phone.screenshot({ path: `${OUT}/13-mobile-sheet.png` });
-  await phone.tap('#inspector [data-act="collapse"]');
-  const collapsed = await phone.evaluate(() => document.getElementById('inspector').getBoundingClientRect().height);
-  check(collapsed < sheet.h, 'the sheet collapses to its summary', `${Math.round(sheet.h)}px → ${Math.round(collapsed)}px`);
-  await phone.tap('#inspector [data-act="close"]');
-  // A citizen's speech card must not ride into the score strip or the Chronicle bar.
-  let card = null;
-  for (let attempt = 0; attempt < 6 && !card; attempt++) {
-    const walker = await phone.evaluate((skip) => {
-      const m = window.__mercadia;
-      const top = document.querySelector('#chronicle .dispatch').getBoundingClientRect().bottom;
-      const list = m.citizensOnScreen().filter((c) => c.y > top + 20 && c.y < innerHeight - 260 && c.x > 20 && c.x < innerWidth - 20).sort((p, q) => p.y - q.y);
-      return list[skip] ?? null;
-    }, attempt);
-    if (!walker) break;
-    await phone.touchscreen.tap(walker.x, walker.y + 4);
-    await sleep(phone, 300);
-    card = await phone.evaluate(() => {
-      const el = document.querySelector('#speech .card');
-      if (!el || document.getElementById('speech').hidden) return null;
-      const r = el.getBoundingClientRect();
-      return { top: r.top, left: r.left, right: r.right, boardBottom: document.getElementById('board').getBoundingClientRect().bottom, barBottom: document.querySelector('#chronicle .dispatch').getBoundingClientRect().bottom, below: document.getElementById('speech').classList.contains('below') };
-    });
-    if (!card) await phone.touchscreen.tap(8, 400);
-  }
-  check(!!card && card.top >= card.boardBottom && card.top >= card.barBottom && card.left >= 0 && card.right <= 390, 'a citizen’s speech card docks clear of the score strip and the Chronicle bar', card ? `card top ${Math.round(card.top)} ≥ Chronicle bar bottom ${Math.round(card.barBottom)}${card.below ? ' (flipped below the citizen)' : ''}` : 'no citizen could be tapped');
-  await phone.touchscreen.tap(8, 400);
-  if (!(await phone.evaluate(() => document.getElementById('inspector').hidden))) await phone.tap('#inspector [data-act="close"]');
-  // Era Council on a phone: one scrollable column, charter and Advance by tap.
-  await phone.evaluate(() => window.__mercadia.warp(5000, true));
-  await phone.waitForFunction(() => !document.getElementById('council').hidden, null, { timeout: 5000 });
-  await sleep(phone, 300);
-  const mCouncil = await phone.evaluate(() => {
-    const card = document.querySelector('#council .council');
-    const r = card.getBoundingClientRect();
-    const cards = [...card.querySelectorAll('.charter')].map((b) => b.getBoundingClientRect());
-    return { inView: r.left >= 0 && r.right <= innerWidth + 0.5 && r.top >= 0 && r.bottom <= innerHeight + 0.5, sideways: card.scrollWidth <= card.clientWidth + 1, column: new Set(cards.map((c) => Math.round(c.left))).size === 1 && cards.every((c, i) => i === 0 || c.top >= cards[i - 1].bottom - 1), tap: Math.min(...cards.map((c) => c.height)), n: cards.length, phase: window.__mercadia.state().phase, guide: document.getElementById('guide').hidden };
-  });
-  check(mCouncil.phase === 'council' && mCouncil.inView && mCouncil.sideways && mCouncil.n === 3 && mCouncil.column && mCouncil.tap >= 44 && mCouncil.guide, 'the Era Council stacks into one column of large tap targets inside the phone screen (and the guide has retired)', `3 cards, shortest ${Math.round(mCouncil.tap)}px`);
-  await phone.screenshot({ path: `${OUT}/14-mobile-council.png` });
-  const mKey = await phone.evaluate(() => window.__mercadia.council().offers[0][1]);
-  await phone.tap(`#council .charter[data-key="${mKey}"]`);
-  await phone.waitForFunction((k) => window.__mercadia.council()?.picks[0] === k, mKey, { timeout: 3000 });
-  await phone.tap('#council [data-act="advance"]');
-  await phone.waitForFunction(() => window.__mercadia.state().phase === 'playing' && window.__mercadia.era === 2 && document.getElementById('council').hidden, null, { timeout: 4000 });
-  const mEra2 = await phone.evaluate(() => ({ badge: document.querySelector('#treasury .charters .cbadge')?.dataset.key ?? '', chip: document.querySelector('#clock [data-f="era"]').textContent.trim(), arcade: document.querySelector('#dock [data-kind="arcade"]').dataset.locked ?? '' }));
-  const layPhone2 = await layout(phone);
-  check(mEra2.badge === mKey && /^Era II/.test(mEra2.chip) && mEra2.arcade === '' && layPhone2.clipped.length === 0 && layPhone2.overlaps.length === 0, 'by tap: charter sealed, Advance to Era II, the badge on the Treasury, the Arcade unlocked — still nothing clipped', `${mKey} · "${mEra2.chip}"`);
-  await phone.screenshot({ path: `${OUT}/15-mobile-play.png` });
-  await phone.evaluate(() => window.__mercadia.warp(6100));
-  await phone.waitForFunction(() => !document.getElementById('victory').hidden, null, { timeout: 8000 });
-  const mEdition = await phone.evaluate(() => { const v = document.querySelector('#victory .victory'); const r = v.getBoundingClientRect(); const b = v.querySelector('[data-act="rematch"]'); return { fits: v.scrollWidth <= v.clientWidth + 1 && r.left >= 0 && r.right <= innerWidth, lines: v.querySelectorAll('svg.spark polyline').length, btn: b.getBoundingClientRect().height, crest: !!v.querySelector('.crest.grand') }; });
-  check(mEdition.fits && mEdition.lines === 4 && mEdition.btn >= 44 && mEdition.crest, 'the Final Edition fits a 390px screen with no sideways scroll', `overflow-free=${mEdition.fits}, Rematch button ${Math.round(mEdition.btn)}px tall`);
-  await phone.screenshot({ path: `${OUT}/16-mobile-final-edition.png` });
-  await phone.context().close();
-}
-
-// ───────────────────────────── Multiplayer at 2× from an odd tick: Ledger = Treasury on every beat ─────────────────────────────
-if (wants('ledger')) {
-  console.log('Multiplayer ledger at 2× (odd tick parity)');
-  const a = await open('ledger-host');
-  await a.fill('#t-name', 'Ada');
-  await a.click('#title [data-act="create"]');
-  await a.waitForFunction(() => window.__mercadia.phase === 'lobby' && window.__mercadia.seat === 0 && !!window.__mercadia.lobby, null, { timeout: 15000 });
-  const code = (await info(a)).room;
-  const b = await open('ledger-guest', `/?room=${code}`);
-  await b.waitForFunction(() => window.__mercadia.phase === 'lobby' && window.__mercadia.seat === 1, null, { timeout: 15000 });
-  await a.waitForFunction(() => window.__mercadia.lobby.seats.filter((x) => x.kind === 'human' && x.connected).length === 2, null, { timeout: 15000 });
-  await a.click('#lobby [data-act="start"]');
-  for (const p of [a, b]) await p.waitForFunction(() => window.__mercadia.phase === 'playing' && window.__mercadia.me >= 0 && window.__mercadia.state().ready, null, { timeout: 15000 });
-  const mode = (await state(a)).mode;
-  // Both players keep the Ledger drawer open, so the drawer's own closing line is on screen.
-  for (const p of [a, b]) {
-    await p.click('#treasury [data-act="ledger"]');
-    await p.waitForFunction(() => !document.getElementById('ledger').hidden && !!document.querySelector('#ledger .recon b'), null, { timeout: 3000 });
-  }
-  // The host asks for 2× on an odd tick: from then on the room broadcasts odd ticks only, and
-  // no broadcast ever lands on a multiple of ten. (The click is made inside the page, the
-  // moment an odd tick arrives; if the room had already stepped on, go back to 1× and retry.)
-  let parity = null;
-  for (let attempt = 0; attempt < 12 && !parity; attempt++) {
-    const seen = await a.evaluate(
-      () =>
-        new Promise((resolve) => {
-          const m = window.__mercadia;
-          const ticks = [];
-          let asked = false;
-          const iv = setInterval(() => {
-            const t = m.state().tick;
-            if (!asked) {
-              if (m.speed === 1 && t % 2 === 1) {
-                asked = true;
-                document.querySelector('#clock [data-act="speed"][data-v="2"]').click();
-              }
-              return;
-            }
-            if (m.speed !== 2) return;
-            if (ticks[ticks.length - 1] !== t) ticks.push(t);
-            if (ticks.length >= 6) {
-              clearInterval(iv);
-              resolve(ticks);
-            }
-          }, 4);
-        }),
-    );
-    if (seen.slice(1).every((t) => t % 2 === 1)) parity = seen;
-    else {
-      await a.click('#clock [data-act="speed"][data-v="1"]');
-      await a.waitForFunction(() => window.__mercadia.speed === 1, null, { timeout: 5000 });
-    }
-  }
-  check(mode === 'standard' && !!parity, 'a Standard room runs at 2× from an odd tick: every broadcast is an odd tick', parity ? `ticks ${parity.slice(1).join(', ')} …` : 'could not land on odd parity');
-  await b.waitForFunction(() => window.__mercadia.speed === 2, null, { timeout: 5000 });
-  // Sample every snapshot on both clients: the data the HUD reads, and the two numbers on screen.
-  const sample = (p) =>
-    p.evaluate(() => {
-      const S = (window.__ledgerWatch = { n: 0, last: -1, tens: 0, even: 0, bad: [], domN: 0, domBad: [] });
-      S.iv = setInterval(() => {
-        const l = window.__mercadia.ledger();
-        if (!l || l.tick === S.last) return;
-        S.last = l.tick;
-        S.n++;
-        if (l.tick % 10 === 0) S.tens++;
-        if (l.tick % 2 === 0) S.even++;
-        if (l.closing !== l.cash) S.bad.push(`tick ${l.tick}: Ledger §${l.closing} vs Treasury §${l.cash}`);
-      }, 5);
-      // The drawer and the Treasury chip are painted by the same HUD pass: whenever either changes, they must agree.
-      const read = () => {
-        const led = document.querySelector('#ledger .recon b')?.textContent ?? '';
-        const cash = document.querySelector('#treasury [data-f="cash"]')?.textContent ?? '';
-        return { led, cash };
-      };
-      let prev = '';
-      S.dom = setInterval(() => {
-        if (document.getElementById('ledger').hidden) return; // a closed drawer is not repainted
-        const r = read();
-        const key = `${r.led}|${r.cash}`;
-        if (key === prev) return;
-        prev = key;
-        S.domN++;
-        if (r.led !== r.cash) S.domBad.push(`tick ${window.__mercadia.state().tick}: drawer ${r.led} vs chip ${r.cash}`);
-      }, 5);
-    });
-  await sample(a);
-  await sample(b);
-  // Two adjacent Pocket Parks: Block Baron (+4 Prestige) and Civic Benefactor (+§120 dividend).
-  const before = await hook(a, 'ledger');
-  await a.click('#treasury [data-act="ledger"]'); // the drawer would sit over the lots: close it to build
-  const pair = await adjacentParks(a);
-  check(!!pair, 'two Pocket Parks of mine stand on adjacent lots, built through the dock at 2×', pair ? `lots ${pair.join(' + ')}` : 'no adjacent pair could be built');
-  await a.keyboard.press('Escape');
-  await a.click('#treasury [data-act="ledger"]');
-  await a.waitForFunction(() => window.__mercadia.milestones[0].earned.includes('baron') && window.__mercadia.milestones[0].earned.includes('benefactor'), null, { timeout: 8000 });
-  await b.waitForFunction(() => window.__mercadia.milestones[0].earned.includes('benefactor'), null, { timeout: 8000 });
-  const afterParks = await a.evaluate(() => { const m = window.__mercadia; const l = m.ledger(); const row = [...document.querySelectorAll('#ledger tr')].find((r) => /Milestone dividends/.test(r.textContent)); return { ...l, row: row ? row.textContent.replace(/\s+/g, ' ').trim() : '', drawer: document.querySelector('#ledger .recon b').textContent, chip: document.querySelector('#treasury [data-f="cash"]').textContent }; });
-  check(afterParks.dividends === 120 && afterParks.closing === afterParks.cash && /Milestone dividends\D*120\b/.test(afterParks.row) && afterParks.drawer === afterParks.chip && afterParks.tick % 2 === 1, 'adjacent Pocket Parks earn Block Baron + Civic Benefactor, and the +§120 dividend is in the Ledger at once (odd tick, 2×)', `tick ${afterParks.tick}: Ledger ${afterParks.drawer} = Treasury ${afterParks.chip} · "${afterParks.row}" · before §${before.cash}`);
-  // A §400 loan on each side.
-  for (const p of [a, b]) {
-    const debt0 = (await hook(p, 'ledger')).debt;
-    await p.click('#treasury [data-act="borrow"]');
-    await p.waitForFunction((d) => window.__mercadia.ledger().debt === d + 400, debt0, { timeout: 5000 });
-  }
-  const afterLoan = await a.evaluate(() => { const l = window.__mercadia.ledger(); const row = [...document.querySelectorAll('#ledger tr')].find((r) => /Loan draws/.test(r.textContent)); return { ...l, row: row ? row.textContent.replace(/\s+/g, ' ').trim() : '', drawer: document.querySelector('#ledger .recon b').textContent, chip: document.querySelector('#treasury [data-f="cash"]').textContent, recon: document.querySelector('#ledger .recon').textContent.replace(/\s+/g, ' ').trim() }; });
-  const guestLoan = await hook(b, 'ledger');
-  check(afterLoan.borrowed === 400 && afterLoan.debt === 400 && afterLoan.closing === afterLoan.cash && afterLoan.drawer === afterLoan.chip && /Loan draws\D*400\b/.test(afterLoan.row) && guestLoan.borrowed === 400 && guestLoan.closing === guestLoan.cash, 'a §400 loan reconciles on the same beat for host and guest: Ledger closing cash = Treasury cash to the §', `host tick ${afterLoan.tick}: "${afterLoan.recon}" vs Treasury ${afterLoan.chip} · guest Ledger §${guestLoan.closing} = Treasury §${guestLoan.cash}`);
-  await a.mouse.move(720, 300);
-  await a.screenshot({ path: `${OUT}/28-multiplayer-2x-ledger-host.png` });
-  // Let payroll (interest on the loans), sales and AI trading run for a while: still no beat out of step.
-  const t0 = (await state(a)).tick;
-  await a.waitForFunction((t) => window.__mercadia.state().tick >= t + 240, t0, { timeout: 30000 });
-  const [wa, wb] = [await a.evaluate(() => { const S = window.__ledgerWatch; clearInterval(S.iv); clearInterval(S.dom); return S; }), await b.evaluate(() => { const S = window.__ledgerWatch; clearInterval(S.iv); clearInterval(S.dom); return S; })];
-  const end = await hook(a, 'ledger');
-  check(wa.n >= 100 && wb.n >= 100 && wa.tens === 0 && wa.even === 0 && wb.tens === 0 && wb.even === 0, 'for the rest of the run no broadcast lands on a multiple of ten (the case that left the Ledger stale)', `host saw ${wa.n} snapshots, guest ${wb.n}; all odd ticks, up to tick ${end.tick}`);
-  check(wa.bad.length === 0 && wb.bad.length === 0 && wa.domBad.length === 0 && wb.domBad.length === 0 && wa.domN >= 5 && wb.domN >= 3, 'on every one of those beats the Ledger’s closing cash equals the Treasury’s cash, in the data and on screen, for both players', wa.bad.concat(wb.bad, wa.domBad, wb.domBad).slice(0, 3).join(' | ') || `0 mismatches in ${wa.n + wb.n} snapshots and ${wa.domN + wb.domN} repaints · host ends at §${end.cash}, debt §${end.debt}`);
-  await a.context().close();
-  await b.context().close();
-}
-
-// ───────────────────────────── Multiplayer: browser contexts sharing one room ─────────────────────────────
-if (wants('multi')) {
-  console.log('Multiplayer');
-  const a = await open('host');
-  await a.fill('#t-name', 'Ada');
-  await a.click('#title [data-act="create"]');
-  await a.waitForFunction(() => window.__mercadia.phase === 'lobby' && window.__mercadia.seat === 0 && !!window.__mercadia.lobby, null, { timeout: 15000 });
-  const code = (await info(a)).room;
-  check(/^[A-Z]{4}$/.test(code) && new URL(a.url()).searchParams.get('room') === code, 'Create Room yields a code and ?room= URL', `${code} ${a.url()}`);
-  // Hotkeys are dead in the Lobby too.
-  await a.keyboard.press('1');
-  await a.keyboard.press('Space');
-  check((await info(a)).tool === null && (await info(a)).phase === 'lobby', 'build and speed hotkeys are ignored in the Lobby');
-  // No AI (Pure PvP): one click each way.
-  await a.waitForSelector('#lobby [data-act="pvp"]');
-  const pvpLabel = await text(a, '#lobby [data-act="pvp"]');
-  await a.click('#lobby [data-act="pvp"]');
-  await a.waitForFunction(() => window.__mercadia.lobby.seats.every((s) => s.kind !== 'ai'), null, { timeout: 5000 });
-  const pure = await a.evaluate(() => ({ seats: window.__mercadia.lobby.seats.map((s) => s.kind).join(','), start: document.querySelector('#lobby [data-act="start"]').disabled, pressed: document.querySelector('#lobby [data-act="pvp"]').getAttribute('aria-pressed') }));
-  check(pvpLabel === 'No AI (Pure PvP)' && pure.seats === 'human,open,open,open' && pure.start === true && pure.pressed === 'true', 'No AI (Pure PvP) clears every AI seat in one click', `"${pvpLabel}" → ${pure.seats}`);
-  await a.click('#lobby [data-act="pvp"]');
-  await a.waitForFunction(() => window.__mercadia.lobby.seats.filter((s) => s.kind === 'ai').length === 3, null, { timeout: 5000 });
-  ok('the same button brings the AI rivals back');
-
-  const guestCtx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  const openGuest = async (label) => {
-    const page = steady(await guestCtx.newPage());
-    watch(page, label);
-    await page.goto(`${BASE}/?room=${code}`);
-    await ready(page);
-    return page;
-  };
-  let b = await openGuest('guest');
-  await b.waitForFunction(() => window.__mercadia.phase === 'lobby' && window.__mercadia.seat === 1, null, { timeout: 15000 });
-  await a.waitForFunction(() => window.__mercadia.lobby.seats.filter((s) => s.kind === 'human' && s.connected).length === 2, null, { timeout: 15000 });
-  const lob = await a.evaluate(() => window.__mercadia.lobby);
-  check(lob.seats[0].name === 'Ada' && lob.seats[1].kind === 'human' && lob.seats[2].kind === 'ai' && lob.seats[3].kind === 'ai' && lob.host === 0, 'invite link auto-joins: 2 humans + 2 AI, host is seat 0', lob.seats.map((s) => `${s.kind}:${s.name}`).join(' '));
-  await a.click('#lobby [data-act="mode"][data-v="blitz"]');
-  await b.waitForFunction(() => window.__mercadia.lobby.mode === 'blitz');
-  const lobbyCopy = await b.evaluate(() => ({ blurb: document.querySelector('#lobby .modeblurb')?.textContent ?? '', crests: document.querySelectorAll('#lobby .seat > .hcrest').length }));
-  check(/4 brisk eras/.test(lobbyCopy.blurb) && lobbyCopy.crests === 4, 'host picks Blitz and the guest sees it: four brisk eras, a crest on every seat', lobbyCopy.blurb);
-  await a.screenshot({ path: `${OUT}/20-lobby.png` });
-  await a.click('#lobby [data-act="start"]');
-  for (const p of [a, b]) await p.waitForFunction(() => window.__mercadia.phase === 'playing' && window.__mercadia.kind === 'multi' && window.__mercadia.state().ready, null, { timeout: 15000 });
-  const ia = await info(a);
-  const ib = await info(b);
-  check(ia.me === 0 && ib.me === 1, 'both sockets are seated in the match', `host player ${ia.me}, guest player ${ib.me}`);
-  const pace = await b.evaluate(() => [...document.querySelectorAll('#clock [data-act="speed"]')].map((x) => `${x.dataset.v}|${x.disabled}|${x.title}`));
-  const hostPace = await a.evaluate(() => [...document.querySelectorAll('#clock [data-act="speed"]')].map((x) => `${x.dataset.v}|${x.disabled}`).join(' '));
-  check(pace.length === 3 && pace.every((x) => /^(1|1\.5|2)\|true\|Host controls match speed$/.test(x)) && hostPace === '1|false 1.5|false 2|false' && !(await a.evaluate(() => !!document.querySelector('#clock [data-act="pause"]'))), 'host pace is 1× / 1.5× / 2× (no pause); the guest’s buttons are disabled and say why', `guest: ${pace[0]} · host: ${hostPace}`);
-  const ta = (await state(a)).tick;
-  await a.waitForFunction((t) => window.__mercadia.state().tick > t + 20, ta, { timeout: 15000 });
-  const [sa, sb] = [await state(a), await state(b)];
-  check(Math.abs(sa.tick - sb.tick) <= 6 && sa.citizens >= 45 && sa.era === 1 && sb.era === 1, 'server ticks at 10 Hz for both clients, both in Era I', `ticks ${sa.tick}/${sb.tick}, citizens ${sa.citizens}/${sb.citizens}`);
-  const [ca0, cb0] = [await boardCrests(a), await boardCrests(b)];
-  check(crestsOk(ca0, HOUSE_CREST) && crestsOk(cb0, HOUSE_CREST) && (await a.evaluate(() => !document.getElementById('guide').hidden)) && (await b.evaluate(() => !document.getElementById('guide').hidden)), 'both boards fly the four House crests, and each human gets the Founding Guide', ca0.map((r) => `${r.house}:${r.crest}`).join(' '));
-  const lotA = await build(a, 'bistro');
-  await built(b, lotA, 'bistro', 0);
-  ok('host builds a Bistro and the guest sees it', `lot ${lotA}`);
-  const lotB = await build(b, 'roastery');
-  await built(a, lotB, 'roastery', 1);
-  ok('guest builds a Roastery and the host sees it', `lot ${lotB}`);
-  const [ca, cb] = [await state(a), await state(b)];
-  check(ca.players[0].cash === cb.players[0].cash || Math.abs(ca.players[0].cash - cb.players[0].cash) < 60, 'cash agrees across clients', `host sees ${ca.players[0].cash}, guest sees ${cb.players[0].cash}`);
-  await a.click('#dock [data-kind="arcade"]');
-  const mpLock = await a.evaluate(() => ({ t: document.querySelector('#toasts .toast.lockmsg')?.textContent ?? '', tool: window.__mercadia.tool }));
-  check(mpLock.t === 'Arcade unlocks in Era II: Transit & Trade' && mpLock.tool === null, 'Era locks hold in a room: the Arcade answers with its unlock notice', `"${mpLock.t}"`);
-  // A rival's Promo Blitz shows in their shop's Inspector, with a live countdown, and in both Chronicles.
-  // (Rivalry headlines are rationed to one per quiet window: open the Inspector first, wait one out, then fire.)
-  const quietNow = () => { const m = window.__mercadia; const r = m.chronicle().filter((d) => d.cat === 'promo' || d.cat === 'rival'); return m.state().tick - (r.length ? r[r.length - 1].tick : -9999) > 158; };
-  await a.keyboard.press('Escape');
-  const pa = await a.evaluate((t) => window.__mercadia.tileScreen(t), lotA);
-  await a.mouse.click(pa.x, pa.y - 4);
-  await a.waitForFunction((t) => window.__mercadia.selectedTile === t && !document.getElementById('inspector').hidden, lotA, { timeout: 5000 });
-  await a.waitForFunction(quietNow, null, { timeout: 25000 });
-  await a.click('#inspector [data-act="promo"]');
-  await b.keyboard.press('Escape');
-  const pb = await b.evaluate((t) => window.__mercadia.tileScreen(t), lotA);
-  await b.mouse.click(pb.x, pb.y - 4);
-  await b.waitForFunction(() => { const el = document.querySelector('#inspector .promobadge'); return !!el && !el.hidden; }, null, { timeout: 6000 });
-  const badge1 = await text(b, '#inspector .promobadge');
-  const rivalHead = await b.evaluate(() => ({ crest: document.querySelector('#inspector .head .hcrest')?.dataset.crest ?? '' }));
-  await sleep(b, 2200);
-  const badge2 = await text(b, '#inspector .promobadge');
-  const secs = (s) => Number((s.match(/(\d+)s/) ?? [])[1]);
-  check(/Promo Blitz/.test(badge1) && secs(badge2) < secs(badge1) && rivalHead.crest === 'compass', 'a rival’s Promo Blitz shows as a badge with a live countdown in their shop’s Inspector, under the rival’s crest', `"${badge1}" → "${badge2}"`);
-  await b.keyboard.press('Escape');
-  let promoBy = 0;
-  let promoLot = lotA;
-  if (!(await a.evaluate(() => window.__mercadia.chronicle().some((d) => d.cat === 'promo' && d.player === 0)))) {
-    // An AI headline slipped into the same instant and took the window: the guest fires one instead.
-    promoBy = 1;
-    promoLot = lotB;
-    const pg = await b.evaluate((t) => window.__mercadia.tileScreen(t), lotB);
-    await b.mouse.click(pg.x, pg.y - 4);
-    await b.waitForFunction((t) => window.__mercadia.selectedTile === t && !document.getElementById('inspector').hidden, lotB, { timeout: 5000 });
-    await b.waitForFunction(quietNow, null, { timeout: 25000 });
-    await b.click('#inspector [data-act="promo"]');
-  }
-  for (const p of [a, b]) await p.waitForFunction((who) => window.__mercadia.chronicle().some((d) => d.cat === 'promo' && d.player === who), promoBy, { timeout: 5000 });
-  const [na, nb] = [await hook(a, 'chronicle'), await hook(b, 'chronicle')];
-  const promoA = na.find((d) => d.cat === 'promo' && d.player === promoBy);
-  const promoB = nb.find((d) => d.n === promoA.n);
-  check(!!promoB && promoB.head === promoA.head && promoB.pill === promoA.pill && promoA.tile === promoLot && /^Promo Blitz! (Vermilion|Cobalt)/.test(promoA.head), 'the Chronicle dispatch for a human’s Promo Blitz reaches both clients, identical', `#${promoA.n} "${promoA.head}" [${promoA.pill}]`);
-  await b.keyboard.press('Escape');
-  await a.keyboard.press('Escape');
-  await a.screenshot({ path: `${OUT}/21-multiplayer-host.png` });
-  await b.screenshot({ path: `${OUT}/22-multiplayer-guest.png` });
-
-  // ── Era Council 1: both choose, the room advances at once ──
-  await a.click('#clock [data-act="speed"][data-v="2"]');
-  for (const p of [a, b]) await p.waitForFunction(() => window.__mercadia.speed === 2, null, { timeout: 5000 });
-  ok('the host sets 2× and both clients run at the room pace');
-  const inCouncil = (p, timeout = 70000) => p.waitForFunction(() => window.__mercadia.state().phase === 'council' && !document.getElementById('council').hidden, null, { timeout });
-  await Promise.all([inCouncil(a), inCouncil(b)]);
-  // Null-safe: a Council that has already risen (its countdown ran out) reads as `open: false`
-  // with empty lists, so a slow machine fails a check by name instead of dereferencing null.
-  const councilView = (p) =>
-    p.evaluate(() => {
-      const m = window.__mercadia;
-      const c = m.council();
-      const card = document.querySelector('#council .council');
-      const shut = { open: false, tick: m.state().tick, era: 0, left: 0, total: 0, picks: [], offers: [], countdown: '', advance: false, cards: [], rows: 0, unlocks: '', tool: m.tool };
-      if (!c || !card || document.getElementById('council').hidden) return shut;
-      return { open: true, tick: m.state().tick, era: c.era, left: c.left, total: c.total, picks: c.picks, offers: c.offers, countdown: card.querySelector('[data-f="countdown"]')?.textContent ?? '', advance: !!card.querySelector('[data-act="advance"]'), cards: [...card.querySelectorAll('.charter')].map((x) => x.dataset.key), rows: card.querySelectorAll('.srow .hcrest').length, unlocks: [...card.querySelectorAll('.unlock')].map((u) => u.dataset.kind).join(), tool: m.tool };
-    });
-  /** Seal a charter by click. False (never a throw) when the Council has risen or the card is not on offer. */
-  const seal = async (p, key) => {
-    if (!key) return false;
+// ═════════════════════════════ ENDLESS + REPLAY + SCORE DELTA ═════════════════════════════
+const REPLAY_CLI = join(process.cwd(), 'node_modules', 'tsx', 'dist', 'cli.mjs');
+function nodeReplay(file) {
+  try {
+    const out = execFileSync(process.execPath, [REPLAY_CLI, join(process.cwd(), 'scripts', 'replay.ts'), file], { encoding: 'utf8' });
+    return JSON.parse(out.trim().split('\n').pop());
+  } catch (e) {
+    const out = String(e.stdout ?? '').trim().split('\n').pop();
     try {
-      await p.click(`#council .charter[data-key="${key}"]`, { timeout: 5000 });
-      return true;
+      return JSON.parse(out);
     } catch {
-      return false;
+      return { ok: false, error: String(e.stderr ?? e.message).slice(0, 300) };
+    }
+  }
+}
+
+/** One planning turn through the real UI: adopt a Charter on a Council turn, then End Turn. Returns once the world moved. */
+async function playTurnUi(page) {
+  const before = await M(page);
+  if ((await page.locator('.charter').count()) > 0) {
+    await page.locator('.charter').first().click();
+    await sleep(250);
+  }
+  await sleep(650); // outside the End Turn gesture guard
+  await endBtn(page).click();
+  await page.waitForFunction((t) => window.__mercadia.turn !== t || window.__mercadia.phase === 'ended', before.turn, { timeout: 15000 });
+  await sleep(120);
+}
+
+/** The Turn Delta score block as rendered: text, rows, overflow and visibility. */
+const scoreBlockState = (page) =>
+  page.evaluate(() => {
+    const drawer = document.querySelector('#h-drawer');
+    const block = drawer.querySelector('.dscore');
+    const rows = [...(block?.querySelectorAll('.srow') ?? [])];
+    const body = drawer.querySelector('#h-dbody') ?? drawer;
+    const r = (block ?? drawer).getBoundingClientRect();
+    const vis = block ? getComputedStyle(block).visibility === 'visible' && r.width > 0 && r.height > 0 : false;
+    const clipped = rows.some((e) => e.scrollWidth > e.clientWidth + 1);
+    const sc = window.__mercadia.summary?.scores ?? [];
+    return {
+      heading: drawer.querySelector('#h-dh')?.textContent.trim(),
+      has: !!block,
+      visible: vis,
+      rowCount: rows.length,
+      text: block ? block.innerText.replace(/\s+/g, ' ') : '',
+      clipped,
+      pageOverflowX: document.documentElement.scrollWidth - innerWidth,
+      drawerOverflowX: drawer.scrollWidth - drawer.clientWidth,
+      bodyOverflowX: body.scrollWidth - body.clientWidth,
+      drawerRect: (() => { const q = drawer.getBoundingClientRect(); return { x: Math.round(q.x), y: Math.round(q.y), w: Math.round(q.width), h: Math.round(q.height) }; })(),
+      moved: sc.filter((x) => x.rankDelta !== 0).map((x) => ({ p: x.player, from: x.prevRank, to: x.nextRank, d: x.rankDelta })),
+      scores: sc,
+    };
+  });
+
+async function checkScoreDom(page, label, widthName) {
+  const st = await scoreBlockState(page);
+  const sign = (n) => (n === 0 ? '0' : `${n > 0 ? '+' : '−'}${Math.abs(n)}`);
+  ok(st.has && st.visible && st.rowCount === st.scores.length && st.rowCount >= 2, `${label}: the Turn Delta shows a visible "Crown Index · rank" block with one row per House (${widthName})`, JSON.stringify({ has: st.has, vis: st.visible, rows: st.rowCount }));
+  const moved = st.moved[0];
+  ok(!!moved && st.text.includes(`#${moved.from} → #${moved.to}`) && st.text.includes(moved.d > 0 ? `▲${moved.d}` : `▼${-moved.d}`), `${label}: the rendered text shows the rank change (#${moved?.from} → #${moved?.to}) with its ▲/▼ chip (${widthName})`, st.text.slice(0, 200));
+  const allDeltas = st.scores.every((x) => st.text.includes(`Worth ${sign(x.worthDelta)}`) && st.text.includes(`Share ${sign(x.shareDelta)}`) && st.text.includes(`Prestige ${sign(x.prestigeDelta)}`) && x.worthDelta + x.shareDelta + x.prestigeDelta === x.crownDelta);
+  ok(allDeltas, `${label}: every House row prints Worth, Share and Prestige deltas that sum to its Crown Index change (${widthName})`, st.text.slice(0, 260));
+  ok(!st.clipped && st.pageOverflowX <= 1 && st.drawerOverflowX <= 1, `${label}: no clipping or horizontal overflow at ${widthName}`, JSON.stringify({ clipped: st.clipped, page: st.pageOverflowX, drawer: st.drawerOverflowX }));
+  return st;
+}
+
+async function endlessReplay() {
+  const c = await ctx('endless', { video: false });
+  const page = await openPage(c, 'solo-to-endless');
+  await startSolo(page);
+  let rankShot = false;
+  let rankSeen = null;
+  // Finish a real 32-turn Standard match through the UI (Charters adopted on Council turns).
+  for (let i = 0; i < 40 && (await M(page)).phase !== 'ended'; i++) {
+    await playTurnUi(page);
+    if (!rankShot && (await M(page)).phase !== 'ended') {
+      const moved = await page.evaluate(() => (window.__mercadia.summary?.scores ?? []).some((x) => x.rankDelta !== 0));
+      if (moved) {
+        await sleep(400);
+        rankShot = true;
+        rankSeen = await checkScoreDom(page, 'score delta (desktop)', '1440×900');
+        const open = await ensureDeltaOpen(page);
+        ok(deltaOpenOk(open), 'score delta (desktop): the Turn Delta drawer is open, opaque, on screen and on top before the 1440×900 capture', JSON.stringify(open));
+        await shot(page, '20-turn-delta-rank-and-components-1440x900');
+      }
+    }
+  }
+  const fin = await M(page);
+  ok(fin.phase === 'ended' && fin.turn === 33, 'endless: a real 32-turn Standard match finished in the browser (Final Edition)', JSON.stringify({ phase: fin.phase, turn: fin.turn }));
+  if (!rankShot) ok(false, 'score delta (desktop): a turn with rank movement occurred in the match', 'no rank change in 32 turns');
+  await sleep(600);
+  await shot(page, '22-final-edition');
+  // Plain finished export: the real Export match button on Final Edition downloads it; it replays bit-for-bit.
+  const fdl = await downloadVia(page, page.locator('.gazette').getByRole('button', { name: 'Export match' }), join(RAW, 'finished-export.json'));
+  const done = fdl.exp;
+  const r1 = nodeReplay(join(RAW, 'finished-export.json'));
+  ok(done.version === 5 && done.log.length === 32 && !done.endlessAt && /^mercadia-\d+\.json$/.test(fdl.name) && r1.ok && r1.turnsReplayed === 32 && r1.mismatches.length === 0, 'replay: the Final Edition Export match download (version 5, 32 turns) replays bit-for-bit in headless Node (every turn hash)', JSON.stringify({ v: done.version, name: fdl.name, ...r1 }));
+  // Continue in Endless, play two more turns, export through the real UI, replay.
+  await page.getByRole('button', { name: 'Continue in Endless' }).click();
+  await page.waitForFunction(() => window.__mercadia.phase === 'planning', null, { timeout: 10000 });
+  await sleep(500);
+  ok((await M(page)).turn === 33, 'endless: Continue in Endless re-opens planning on Turn 33');
+  const plateExport = await page.evaluate(() => {
+    const b = document.querySelector('#hud .plate [data-act="export"]');
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height), label: b.getAttribute('aria-label'), vis: getComputedStyle(b).visibility, inView: r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight };
+  });
+  ok(plateExport && plateExport.label === 'Export match' && plateExport.vis === 'visible' && plateExport.w > 20 && plateExport.inView, 'endless: after Continue in Endless the planning screen carries a visible Export match button in the match controls (1440×900)', JSON.stringify(plateExport));
+  await shot(page, '23-endless-turn33-planning');
+  await playTurnUi(page);
+  await sleep(500);
+  await playTurnUi(page);
+  await sleep(800);
+  const post = await M(page);
+  ok(post.turn === 35 && post.phase === 'planning', 'endless: two Endless turns resolved (Turn 35)', JSON.stringify({ turn: post.turn, phase: post.phase }));
+  const dOpen = await ensureDeltaOpen(page);
+  ok(deltaOpenOk(dOpen), 'endless: the Endless Turn Delta drawer is open and on screen', JSON.stringify(dOpen));
+  const exBtn = await page.evaluate(() => { const b = document.querySelector('#h-drawer [data-act="export"]'); const r = b?.getBoundingClientRect(); return r ? { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.x), right: Math.round(r.right), vw: innerWidth, text: b.textContent.trim(), scrollX: document.documentElement.scrollWidth - innerWidth, drawerScrollX: document.querySelector('#h-drawer').scrollWidth - document.querySelector('#h-drawer').clientWidth } : null; });
+  ok(exBtn && exBtn.text === 'Export match' && exBtn.right <= exBtn.vw && exBtn.scrollX <= 1 && exBtn.drawerScrollX <= 1, 'endless: the Turn Delta drawer carries an "Export match" button with no clipping or horizontal overflow (1440×900)', JSON.stringify(exBtn));
+  await shot(page, '24-endless-turn35-delta');
+  const edl = await downloadVia(page, page.locator('#h-drawer [data-act="export"]'), join(RAW, 'endless-export.json'));
+  const exp = edl.exp;
+  ok(exp.version === 5 && exp.log.length === 34 && Array.isArray(exp.endlessAt) && exp.endlessAt.length === 1 && exp.endlessAt[0] === 32, 'endless: the Export match download after Continue in Endless is version 5 and records the continuation (endlessAt=[32]) and 34 order batches', JSON.stringify({ v: exp.version, n: exp.log.length, at: exp.endlessAt }));
+  const r2 = nodeReplay(join(RAW, 'endless-export.json'));
+  ok(r2.ok && r2.turnsReplayed === 34 && r2.mismatches.length === 0 && r2.finalTurn === 35 && r2.phase === 'planning' && r2.endless === true, 'replay: the post-Endless UI export (Turn 35) replays bit-for-bit in headless Node, including the Endless turns', JSON.stringify(r2));
+  // The planning-screen button downloads the same canonical export.
+  await page.keyboard.press('Escape');
+  await sleep(300);
+  const pdl = await downloadVia(page, page.locator('#hud .plate [data-act="export"]'), join(RAW, 'endless-export-plate.json'));
+  ok(JSON.stringify(pdl.exp) === JSON.stringify(exp), 'endless: the planning-screen Export match button downloads the same canonical export');
+  // A legacy version 3 export fails fast with an explicit version error, not 32 silent hash mismatches.
+  writeFileSync(join(RAW, 'legacy-v3-export.json'), JSON.stringify({ ...done, version: 3 }));
+  const r3 = nodeReplay(join(RAW, 'legacy-v3-export.json'));
+  // A legacy version 4 export (Pass 3: seat-keyed start tiles) fails the same way.
+  writeFileSync(join(RAW, 'legacy-v4-export.json'), JSON.stringify({ ...done, version: 4 }));
+  const r4 = nodeReplay(join(RAW, 'legacy-v4-export.json'));
+  ok(r4.ok === false && /Incompatible match export version 4: this build replays version 5 exports only/.test(r4.error ?? '') && !('mismatches' in r4), 'replay: a legacy version 4 export is rejected with an explicit incompatible-version error (no hash mismatch list)', JSON.stringify(r4));
+  ok(r3.ok === false && /Incompatible match export version 3/.test(r3.error ?? '') && !('mismatches' in r3), 'replay: a legacy version 3 export is rejected with an explicit incompatible-version error (no hash mismatch list)', JSON.stringify(r3));
+  ok(exp.hashes.length === 34, 'replay: the browser recorded a state hash for every turn including the Endless ones', String(exp.hashes.length));
+  copyFileSync(join(RAW, 'endless-export.json'), join(MEDIA, '..', 'endless-export.json'));
+  await finishCtx(c, 'endless-and-replay');
+
+  // Same Turn Delta rank/component check on a 390×844 phone and a 1024×768 laptop, on a turn with rank movement.
+  for (const [name, vp, mobile] of [['mobile', { width: 390, height: 844 }, true], ['laptop', { width: 1024, height: 768 }, false]]) {
+    const c2 = await ctx('endless-' + name, { mobile, video: false });
+    const p2 = await openPage(c2, name);
+    if (!mobile) await p2.setViewportSize(vp);
+    await startSolo(p2);
+    let found = false;
+    for (let i = 0; i < 16 && !found; i++) {
+      await playTurnUi(p2);
+      found = await p2.evaluate(() => (window.__mercadia.summary?.scores ?? []).some((x) => x.rankDelta !== 0));
+    }
+    if (!found) ok(false, `score delta (${name}): a turn with rank movement occurred`, 'none in 16 turns');
+    else {
+      await sleep(600);
+      await checkScoreDom(p2, `score delta (${name})`, `${vp.width}×${vp.height}`);
+      const open2 = await ensureDeltaOpen(p2);
+      ok(deltaOpenOk(open2), `score delta (${name}): the Turn Delta drawer is open, opaque, on screen and on top before the capture`, JSON.stringify(open2));
+      await shot(p2, name === 'mobile' ? '25-turn-delta-rank-390x844' : '26-turn-delta-rank-1024x768');
+      if (name === 'laptop') {
+        // planning view next to the delta at 1024×768: no overlap of the delta drawer with the command rail
+        const geo = await p2.evaluate(() => {
+          const q = (sel) => { const e = document.querySelector(sel); if (!e) return null; const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; };
+          return { drawer: q('#h-drawer'), rail: q('#rail'), vw: innerWidth, vh: innerHeight };
+        });
+        const overlap = geo.drawer && geo.rail && !(geo.drawer.r <= geo.rail.l || geo.drawer.l >= geo.rail.r || geo.drawer.b <= geo.rail.t || geo.drawer.t >= geo.rail.b);
+        ok(!overlap && geo.drawer.r <= geo.vw + 1 && geo.drawer.b <= geo.vh + 1, 'laptop 1024×768: the Turn Delta drawer does not overlap the command rail and stays on screen', JSON.stringify(geo));
+        await p2.keyboard.press('Escape');
+        await sleep(400);
+        await shot(p2, '27-planning-1024x768');
+      }
+    }
+    // Continue in Endless at this viewport: the Export match controls are reachable and fit (no clipping/overflow).
+    for (let i = 0; i < 40 && (await M(p2)).phase !== 'ended'; i++) await playTurnUi(p2);
+    await sleep(500);
+    await p2.getByRole('button', { name: 'Continue in Endless' }).click();
+    await p2.waitForFunction(() => window.__mercadia.phase === 'planning', null, { timeout: 10000 });
+    await sleep(400);
+    await playTurnUi(p2);
+    await sleep(500);
+    const open3 = await ensureDeltaOpen(p2);
+    const fit = await p2.evaluate(() => {
+      const box = (b) => { if (!b) return null; const r = b.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), l: Math.round(r.left), r: Math.round(r.right), t: Math.round(r.top), b: Math.round(r.bottom), vis: getComputedStyle(b).visibility, label: b.getAttribute('aria-label') }; };
+      const d = document.querySelector('#h-drawer');
+      return { plate: box(document.querySelector('#hud .plate [data-act="export"]')), drawer: box(d.querySelector('[data-act="export"]')), vw: innerWidth, vh: innerHeight, scrollX: document.documentElement.scrollWidth - innerWidth, drawerScrollX: d.scrollWidth - d.clientWidth, plateOverlap: (() => { const q = ['.plate-main', '.plate-era', '.plate-btns'].map((x) => document.querySelector('#hud ' + x).getBoundingClientRect()); const hit = (a, b) => !(a.right <= b.left + 0.5 || a.left >= b.right - 0.5 || a.bottom <= b.top + 0.5 || a.top >= b.bottom - 0.5); return hit(q[0], q[1]) || hit(q[0], q[2]) || hit(q[1], q[2]); })(), plateScrollX: (() => { const p = document.querySelector('#hud .plate'); return p.scrollWidth - p.clientWidth; })() };
+    });
+    const inV = (q) => q && q.l >= 0 && q.r <= fit.vw && q.t >= 0 && q.b <= fit.vh && q.vis === 'visible';
+    const minSide = mobile ? 44 : 28;
+    const plateOk = mobile ? fit.plate && fit.plate.w === 0 : inV(fit.plate) && fit.plate.w >= minSide && fit.plate.h >= minSide; // on a phone the plate button is folded away so the Turn number is never crowded; the sheet carries it
+    ok(deltaOpenOk(open3) && plateOk && inV(fit.drawer) && fit.drawer.h >= minSide && fit.scrollX <= 1 && fit.drawerScrollX <= 1 && fit.plateScrollX <= 1 && !fit.plateOverlap, `endless export (${name}): the Export match control(s) are reachable (planning bar on desktop/laptop, Turn Delta sheet everywhere), on screen, tappable and cause no clipping or horizontal overflow at ${vp.width}×${vp.height}`, JSON.stringify(fit));
+    await shot(p2, name === 'mobile' ? '30-endless-export-390x844' : '31-endless-export-1024x768');
+    const dl2 = await downloadVia(p2, p2.locator('#h-drawer [data-act="export"]'), join(RAW, `endless-export-${name}.json`));
+    const rr = nodeReplay(join(RAW, `endless-export-${name}.json`));
+    ok(dl2.exp.version === 5 && dl2.exp.endlessAt?.length === 1 && rr.ok && rr.mismatches.length === 0, `endless export (${name}): the ${vp.width}×${vp.height} UI download is version 5 with endlessAt and replays bit-for-bit`, JSON.stringify({ v: dl2.exp.version, at: dl2.exp.endlessAt, ...rr }));
+    await finishCtx(c2, `endless-${name}`);
+  }
+}
+
+// ═════════════════════════════ ALL FOUR HOUSES START BESIDE GRAND STATION ═════════════════════════════
+async function startBeside() {
+  const c = await ctx('start', { video: false });
+  const page = await openPage(c, 'turn1');
+  await startSolo(page);
+  const st = await page.evaluate(() => {
+    const g = window.__mercadia.view.game;
+    const stationDoor = 8 + 12;
+    const stationTiles = [8, 9];
+    return {
+      turn: g.turn,
+      players: g.players.length,
+      cash: g.players.map((p) => p.cash),
+      buildings: g.buildings.length,
+      units: g.units.map((u) => ({ owner: u.owner, kind: u.kind, tile: u.tile, x: u.tile % 12, y: Math.floor(u.tile / 12) })),
+      stationDoor,
+      stationTiles,
+    };
+  });
+  const tiles = st.units.map((u) => u.tile);
+  const cheb = (u) => Math.min(...st.stationTiles.map((s) => Math.max(Math.abs(s - u.x), Math.abs(0 - u.y))));
+  const perHouse = [0, 1, 2, 3].map((o) => st.units.filter((u) => u.owner === o).map((u) => u.kind).sort().join('+'));
+  ok(st.turn === 1 && st.players === 4 && st.cash.every((x) => x === 900) && st.buildings === 0, 'start: four Houses, §900 each, no property, on Turn 1', JSON.stringify({ cash: st.cash, b: st.buildings }));
+  ok(perHouse.every((x) => x === 'factor+watch') && new Set(tiles).size === 8, 'start: each House has one Factor and one Watch Company, on 8 distinct tiles', JSON.stringify(perHouse));
+  ok(st.units.every((u) => u.y <= 3 && cheb(u) <= 5), 'start: all four Houses begin beside Grand Station (north frontage, y <= 3, none on the Harbor Pier side)', JSON.stringify(st.units.map((u) => `${u.owner}:${u.kind[0]}(${u.x},${u.y})`)));
+  await sleep(500);
+  await shot(page, '28-turn1-all-four-houses-beside-station');
+  await finishCtx(c, 'start');
+}
+
+// ═════════════════════════════ MOBILE ═════════════════════════════
+async function mobile() {
+  const c = await ctx('mobile', { mobile: true });
+  const page = await openPage(c, 'phone');
+  await page.goto(`${BASE}/?dev=1`);
+  await sleep(600);
+  await shot(page, '10-mobile-title-390x844');
+  await page.getByRole('button', { name: /Play Solo Now/i }).tap();
+  await page.waitForFunction(() => window.__mercadia?.phase === 'planning');
+  await sleep(600);
+  await shot(page, '11-mobile-solo-planning');
+  const geo = await page.evaluate(() => {
+    const out = {};
+    const q = (re) => [...document.querySelectorAll('button')].find((b) => re.test(b.innerText || b.getAttribute('aria-label') || ''));
+    const end = q(/^End Turn/);
+    const r = end?.getBoundingClientRect();
+    out.end = r ? { w: r.width, h: r.height, bottom: r.bottom } : null;
+    out.scrollX = document.documentElement.scrollWidth - window.innerWidth;
+    out.small = [...document.querySelectorAll('button:not([hidden]), [role=button]')].filter((b) => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (r.width < 44 || r.height < 44); }).map((b) => (b.getAttribute('aria-label') || b.innerText).slice(0, 30));
+    return out;
+  });
+  ok(geo.end && geo.end.h >= 56 && geo.end.w >= 140 && geo.end.bottom <= 844, 'mobile: End Turn is at least 140×56 and fully on screen at 390×844', JSON.stringify(geo.end));
+  ok(geo.scrollX <= 1, 'mobile: no horizontal overflow', `scrollX ${geo.scrollX}`);
+  ok(geo.small.length === 0, 'mobile: no visible tap target under 44px', geo.small.join(' | '));
+  // two-tap build then End Turn by tap
+  await page.getByRole('button', { name: /Roastery, §180/ }).tap();
+  const pos = await page.evaluate(() => window.__mercadia.tileScreenPos(31));
+  await page.touchscreen.tap(pos.x, pos.y);
+  await sleep(300);
+  const preview = await page.evaluate(() => window.__mercadia.draft.length);
+  await page.touchscreen.tap(pos.x, pos.y);
+  await sleep(300);
+  const queued = await page.evaluate(() => window.__mercadia.draft.length);
+  ok(preview === 0 && queued === 1, 'mobile: the first tap previews, the second tap queues', `${preview} → ${queued}`);
+  await shot(page, '12-mobile-queued');
+  const t = await turnOf(page);
+  await endBtn(page).tap();
+  await waitTurn(page, t + 1);
+  await sleep(600);
+  ok((await turnOf(page)) === t + 1, 'mobile: End Turn by tap advances exactly one turn');
+  await shot(page, '13-mobile-turn-delta-sheet');
+  const sheet = await page.evaluate(() => document.body.innerText);
+  ok(/Turn \d+\s*→\s*\d+/.test(sheet), 'mobile: the Turn Delta opens as a bottom sheet after resolution');
+  await finishCtx(c, 'mobile-walkthrough');
+}
+
+// ═════════════════════════════ ROOM (two independent browsers) ═════════════════════════════
+async function makeRoom(tagA = 'A', tagB = 'B', { relayA = false, relayB = false, mode = 'Blitz', videos = true } = {}) {
+  const cA = await ctx('room-' + tagA, { video: videos });
+  const cB = await ctx('room-' + tagB, { video: videos });
+  const A = await openPage(cA, tagA);
+  const B = await openPage(cB, tagB);
+  const rel = {};
+  if (relayA) rel.A = installRelay(A);
+  if (relayB) rel.B = installRelay(B);
+  await A.goto(`${BASE}/?dev=1`);
+  await A.getByRole('button', { name: /Create Room/i }).click();
+  await A.waitForURL(/room=/);
+  const code = new URL(A.url()).searchParams.get('room');
+  await B.goto(`${BASE}/?dev=1&room=${code}`);
+  await B.getByRole('button', { name: /Leave room/ }).waitFor();
+  await A.getByLabel(/No AI/).check({ force: true }).catch(async () => {
+    await A.getByText('No AI (Pure PvP)').click();
+  });
+  await A.getByText(mode, { exact: false }).first().click();
+  await sleep(300);
+  await A.getByRole('button', { name: /Start match/ }).click();
+  await Promise.all([A, B].map((p) => p.waitForFunction(() => window.__mercadia?.phase === 'planning', null, { timeout: 15000 })));
+  await sleep(500);
+  return { cA, cB, A, B, code, rel };
+}
+
+async function queueRoastery(page, tile) {
+  await page.getByRole('button', { name: /Roastery, §180/ }).click();
+  await tileClick(page, tile);
+  await sleep(250);
+}
+
+async function room() {
+  const { cA, cB, A, B, rel } = await makeRoom('A', 'B', { relayA: true });
+  // An established WebSocket survives context.setOffline, so going offline = cut the socket, then block new connections.
+  const goOffline = async () => {
+    await cA.context.setOffline(true);
+    rel.A.cut();
+  };
+  await shot(A, '14-room-A-planning');
+  const a0 = await M(A);
+  const b0 = await M(B);
+  ok(a0.turn === 1 && b0.turn === 1 && a0.hash === b0.hash, 'room: both browsers start on Turn 1 with the same state hash', `${a0.hash} ${b0.hash}`);
+  ok(a0.seat !== b0.seat && a0.seat >= 0 && b0.seat >= 0, 'room: the two browsers hold two different seats', `${a0.seat},${b0.seat}`);
+
+  // 6. A readies: A waits, B shows A Ready, nothing changes; B readies: exactly one resolution
+  await queueRoastery(A, A0TileFor(a0.seat));
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  await sleep(500);
+  const aW = await M(A);
+  const bW = await B.evaluate(() => ({ seats: window.__mercadia.view.seats.map((s) => `${s.name}:${s.ready}`), hash: window.__mercadia.hash, turn: window.__mercadia.turn }));
+  ok(/Waiting for opponent/.test(aW.status) && aW.label === 'Cancel Ready', 'room: after A readies, A shows "Waiting for opponent…" and Cancel Ready', `${aW.status} / ${aW.label}`);
+  ok(bW.seats.some((s) => s.endsWith(':true')) && bW.turn === 1 && bW.hash === b0.hash, 'room: B sees A as Ready and the world has not changed', JSON.stringify(bW));
+  await shot(B, '15-room-B-sees-A-ready');
+  await sleep(FAST ? 3000 : 20000);
+  ok((await M(B)).hash === b0.hash && (await M(A)).turn === 1, 'room: the world stays frozen while waiting');
+
+  // 7. Cancel Ready: A cancels, edits, readies again; B readies; one resolution with A's FINAL draft
+  await endBtn(A).click(); // Cancel Ready
+  await A.waitForFunction(() => window.__mercadia.view.ready === false);
+  await A.keyboard.press('Escape');
+  await A.evaluate(() => document.activeElement?.blur?.());
+  await A.keyboard.press('Backspace'); // undo the first Roastery: the final draft is the edited lot only
+  await sleep(300);
+  await queueRoastery(A, A0TileFor(a0.seat, 1));
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  await queueRoastery(B, B0TileFor(b0.seat));
+  await endBtn(B).click();
+  await Promise.all([A, B].map((p) => p.waitForFunction(() => window.__mercadia.turn === 2, null, { timeout: 15000 })));
+  await sleep(500);
+  const a1 = await M(A);
+  const b1 = await M(B);
+  const sA = await A.evaluate(() => window.__mercadia.summary);
+  const sB = await B.evaluate(() => window.__mercadia.summary);
+  ok(a1.turn === 2 && b1.turn === 2 && a1.hash === b1.hash, 'room: both browsers show Turn 2 with the same state hash', `${a1.hash} ${b1.hash}`);
+  ok(sA.hash === sB.hash && sA.from === 1 && sA.to === 2 && JSON.stringify(sA.lines) === JSON.stringify(sB.lines), 'room: both browsers show the same Turn Delta (N→N+1)');
+  const aBuilds = sA.lines.filter((l) => /completes Roastery/.test(l.text) && l.player === a0.seat);
+  ok(aBuilds.length === 1 && sA.lines.some((l) => l.tile === A0TileFor(a0.seat, 1) && /Roastery/.test(l.text)), "room: the resolution used A's final draft (the edited lot)", JSON.stringify(aBuilds.map((l) => l.tile)));
+  await shot(A, '16-room-A-turn-delta');
+  await shot(B, '17-room-B-turn-delta');
+
+  // 8. Reconnect during readiness: A readies, reloads; reclaims the seat, still Ready, same turn
+  await queueRoastery(A, 55).catch(() => {});
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  const seatBefore = (await M(A)).seat;
+  await A.reload();
+  await A.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 15000 });
+  await sleep(600);
+  let a2 = await M(A);
+  ok(a2.seat === seatBefore && a2.ready === true && a2.turn === 2, 'room: A reloads, reclaims the same seat, still Ready, same turn', JSON.stringify({ seat: a2.seat, ready: a2.ready, turn: a2.turn }));
+  // offline/online
+  await goOffline();
+  await A.waitForFunction(() => window.__mercadia.view.status.text === 'Reconnecting…', null, { timeout: 30000 });
+  await shot(A, '18-room-A-reconnecting');
+  await cA.context.setOffline(false);
+  await A.waitForFunction(() => window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 30000 });
+  await sleep(500);
+  a2 = await M(A);
+  ok(a2.seat === seatBefore && a2.ready === true && a2.turn === 2, 'room: A goes offline and back online, reclaims the seat, still Ready', JSON.stringify({ seat: a2.seat, ready: a2.ready, turn: a2.turn }));
+
+  // 9. Reconnect across resolution: A offline (already Ready); B readies; A reconnects and shows Turn 3 + the same delta
+  await goOffline();
+  await A.waitForFunction(() => window.__mercadia.view.status.text === 'Reconnecting…', null, { timeout: 30000 });
+  await endBtn(B).click();
+  await B.waitForFunction(() => window.__mercadia.turn === 3, null, { timeout: 15000 });
+  await cA.context.setOffline(false);
+  await A.waitForFunction(() => window.__mercadia.turn === 3, null, { timeout: 30000 });
+  await sleep(600);
+  const a3 = await M(A);
+  const b3 = await M(B);
+  const sA3 = await A.evaluate(() => window.__mercadia.summary);
+  const sB3 = await B.evaluate(() => window.__mercadia.summary);
+  ok(a3.hash === b3.hash && sA3.from === 2 && sA3.to === 3 && sA3.hash === sB3.hash, 'room: A reconnects after the turn resolved and shows Turn 3, the same hash and the same Turn 2→3 delta as B', `${a3.turn} ${a3.hash} ${b3.hash}`);
+  ok(a3.notices.some((n) => /resolved while you were offline/.test(n)), 'room: A is told "Turn 2 resolved while you were offline — unsent edits discarded"', a3.notices.join(' | '));
+  await finishCtx(cA, 'room-browser-A');
+  await finishCtx(cB, 'room-browser-B');
+}
+
+// seat → a lot within the seat's start reach (seat 0 Factor at (7,1), seat 1 Factor at (10,1))
+const A0TileFor = (seat, alt = 0) => (seat === 0 ? [31, 30][alt] : [34, 33][alt]); // (7,2)/(6,2) and (10,2)/(9,2)
+const B0TileFor = (seat) => (seat === 0 ? 32 : 35);
+
+
+// ═════════════════════════════ SEAT RECLAIM AFTER > 13 HOURS ═════════════════════════════
+const HOUR = 3600 * 1000;
+async function reclaimAfterHours() {
+  const { cA, cB, A, B, code } = await makeRoom('R1', 'R2', { videos: false });
+  const a0 = await M(A);
+  await queueRoastery(A, A0TileFor(a0.seat));
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  await sleep(500);
+  const before = await M(A);
+  ok(before.ready === true && before.draft === 1 && before.seat >= 0, 'reclaim: before closing, A holds a seat with a one-order draft and Ready set', JSON.stringify({ seat: before.seat, draft: before.draft, ready: before.ready }));
+  const key = `mercadia:pid:${code}`;
+  // Age the saved token by 25 hours in localStorage, then close the tab (the context's localStorage survives, sessionStorage does not).
+  const aged = await A.evaluate(([k, off]) => {
+    const raw = localStorage.getItem(k);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    v.at -= off;
+    v.beat -= off;
+    localStorage.setItem(k, JSON.stringify(v));
+    return { id: !!v.id };
+  }, [key, 25 * HOUR]);
+  pages.find((r) => r.page === A).csp = await A.evaluate(() => window.__csp ?? []); // read before the tab goes away
+  await A.close();
+  ok(!!aged, 'reclaim: the closed tab left a seat token in localStorage, aged here by 25 hours', JSON.stringify(aged && { ageH: 25 }));
+  // Reopen the room URL in a brand-new tab whose clock is also 26 hours ahead (Date.now shifted).
+  const R = await openPage(cA, 'reopen');
+  await R.addInitScript((off) => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + off;
+  }, 26 * HOUR);
+  await R.goto(`${BASE}/?dev=1&room=${code}`);
+  await R.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(700);
+  const clock = await R.evaluate(() => Date.now() - performance.timeOrigin - performance.now());
+  const after = await M(R);
+  ok(clock > 25 * HOUR, 'reclaim: the reopened tab really runs 26 hours ahead (Date.now shifted)', String(Math.round(clock / HOUR)));
+  ok(after.seat === before.seat && after.seat !== -1, 'reclaim: after > 13 h the reopened tab reclaims the exact same seat (never spectator -1)', JSON.stringify({ before: before.seat, after: after.seat }));
+  ok(after.ready === true && after.draft === before.draft && after.turn === before.turn && after.hash === before.hash, 'reclaim: the reopened tab shows the same draft, Ready state, turn and state hash', JSON.stringify({ before, after: { draft: after.draft, ready: after.ready, turn: after.turn, hash: after.hash } }));
+  await shot(R, '29-seat-reclaimed-after-26h');
+  // The server-side active room is still there too: B readying resolves the turn for the reclaimed seat.
+  await queueRoastery(B, B0TileFor((await M(B)).seat));
+  await endBtn(B).click();
+  await Promise.all([R, B].map((p) => p.waitForFunction(() => window.__mercadia.turn === 2, null, { timeout: 15000 })));
+  ok((await M(R)).hash === (await M(B)).hash, 'reclaim: the room still resolves normally once the other seat readies (both show Turn 2, same hash)');
+  await finishCtx(cA, 'reclaim-A');
+  await finishCtx(cB, 'reclaim-B');
+}
+
+
+// ═════════════════════════════ PASS 4: SPECTATOR TAB, ROOM EXPORT, 404 + LEAVE TOKENS ═════════════════════════════
+const tokenOf = (page, code) =>
+  page.evaluate((k) => ({ local: JSON.parse(localStorage.getItem(k) ?? 'null'), session: sessionStorage.getItem(k), now: Date.now() }), `mercadia:pid:${code}`);
+
+/** One two-seat planning turn through the real UI (Charter on Council turns), both seats readied. */
+async function playRoomTurn(pagesIn) {
+  const before = (await M(pagesIn[0])).turn;
+  for (const p of pagesIn) {
+    if ((await p.locator('.charter').count()) > 0) {
+      await p.locator('.charter').first().click();
+      await sleep(250);
+    }
+  }
+  await sleep(650);
+  for (const p of pagesIn) {
+    await endBtn(p).click();
+    await p.waitForFunction(() => window.__mercadia.view.ready === true || window.__mercadia.phase !== 'planning' || window.__mercadia.view.resolutions > 0, null, { timeout: 15000 }).catch(() => {});
+    await sleep(150);
+  }
+  await Promise.all(pagesIn.map((p) => p.waitForFunction((t) => window.__mercadia.turn !== t || window.__mercadia.phase === 'ended', before, { timeout: 20000 })));
+  await sleep(150);
+}
+
+async function exportFitState(page) {
+  return page.evaluate(() => {
+    const box = (b) => { if (!b) return null; const r = b.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), l: Math.round(r.left), r: Math.round(r.right), t: Math.round(r.top), b: Math.round(r.bottom), vis: getComputedStyle(b).visibility, label: b.getAttribute('aria-label') }; };
+    const d = document.querySelector('#h-drawer');
+    const plate = document.querySelector('#hud .plate');
+    return { plate: box(document.querySelector('#hud .plate [data-act="export"]')), drawer: box(d.querySelector('[data-act="export"]')), vw: innerWidth, vh: innerHeight, scrollX: document.documentElement.scrollWidth - innerWidth, drawerScrollX: d.scrollWidth - d.clientWidth, plateScrollX: plate.scrollWidth - plate.clientWidth };
+  });
+}
+const fitOk = (fit, mobile) => {
+  const inV = (q) => q && q.l >= 0 && q.r <= fit.vw && q.t >= 0 && q.b <= fit.vh && q.vis === 'visible';
+  const minSide = mobile ? 44 : 28;
+  const plateOk = mobile ? fit.plate && fit.plate.w === 0 : inV(fit.plate) && fit.plate.w >= minSide && fit.plate.h >= minSide;
+  return plateOk && inV(fit.drawer) && fit.drawer.h >= minSide && fit.scrollX <= 1 && fit.drawerScrollX <= 1 && fit.plateScrollX <= 1;
+};
+
+/** Item 1: a second tab of the SAME browser profile joins as a spectator and must never take over the persisted seat token. */
+async function spectatorTab() {
+  const { cA, cB, A, B, code } = await makeRoom('S1', 'S2', { videos: true });
+  const a0 = await M(A);
+  await queueRoastery(A, A0TileFor(a0.seat));
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  await sleep(500);
+  const before = await M(A);
+  const tokA = await tokenOf(A, code);
+  ok(before.seat >= 0 && before.ready === true && before.draft === 1 && !!tokA.local?.id, 'spectator tab: the seated tab holds seat ' + before.seat + ' with a one-order draft, Ready set and a persisted seat token', JSON.stringify({ seat: before.seat, draft: before.draft, ready: before.ready }));
+  // Second tab, same browser context (shared localStorage), opens the room URL while the seated tab is live.
+  const T = await openPage(cA, 'spectator-tab');
+  await T.goto(`${BASE}/?dev=1&room=${code}`);
+  await T.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(600);
+  const spec = await M(T);
+  ok(spec.seat === -1, 'spectator tab: the second same-profile tab joins as a spectator (seat −1)', JSON.stringify({ seat: spec.seat, status: spec.status }));
+  await shot(T, '32-spectator-tab-open');
+  // Stay open across several heartbeats (2 s each, stale after 6 s).
+  await sleep(9000);
+  const tokT = await tokenOf(T, code);
+  const tokA2 = await tokenOf(A, code);
+  ok(tokT.local?.id === tokA.local.id && tokT.session === null, 'spectator tab: after > 4 heartbeats the persisted seat token is still the seated tab\'s (spectator wrote nothing to localStorage or its own sessionStorage)', JSON.stringify({ same: tokT.local?.id === tokA.local.id, spectatorHasSessionToken: tokT.session !== null }));
+  ok(tokA2.local.tab === tokA.local.tab && tokA2.now - tokA2.local.beat < 4500, 'spectator tab: the seated tab alone keeps the heartbeat fresh', JSON.stringify({ sinceBeatMs: tokA2.now - tokA2.local.beat }));
+  await shot(A, '33-spectator-seated-tab-still-ready');
+  // Close the seated tab, then the spectator tab.
+  pages.find((r) => r.page === A).csp = await A.evaluate(() => window.__csp ?? []);
+  pages.find((r) => r.page === T).csp = await T.evaluate(() => window.__csp ?? []);
+  await A.close();
+  await sleep(1500);
+  await T.close();
+  // Reopen the room URL with a clock 26 hours ahead (a returning browser, hours later).
+  const R = await openPage(cA, 'reopen-26h');
+  await R.addInitScript((off) => {
+    const real = Date.now.bind(Date);
+    Date.now = () => real() + off;
+  }, 26 * HOUR);
+  await R.goto(`${BASE}/?dev=1&room=${code}`);
+  await R.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(700);
+  const clock = await R.evaluate(() => Date.now() - performance.timeOrigin - performance.now());
+  const after = await M(R);
+  ok(clock > 25 * HOUR, 'spectator tab: the reopened tab really runs 26 hours ahead (Date.now shifted)', String(Math.round(clock / HOUR)));
+  ok(after.seat === before.seat && after.seat !== -1, 'spectator tab: +26 h later the returning browser reclaims the exact seat ' + before.seat + ' (not spectator −1)', JSON.stringify({ before: before.seat, after: after.seat }));
+  ok(after.ready === true && after.draft === before.draft && after.turn === before.turn && after.hash === before.hash, 'spectator tab: the reclaimed seat shows Ready: true, the same draft, turn and state hash', JSON.stringify({ draft: after.draft, ready: after.ready, turn: after.turn, hash: after.hash === before.hash }));
+  await shot(R, '34-spectator-reclaimed-after-26h');
+  await queueRoastery(B, B0TileFor((await M(B)).seat));
+  await endBtn(B).click();
+  await Promise.all([R, B].map((p) => p.waitForFunction(() => window.__mercadia.turn === 2, null, { timeout: 15000 })));
+  ok((await M(R)).hash === (await M(B)).hash, 'spectator tab: the other seat readying resolves Turn 1 for the reclaimed seat (same hash on both)');
+  await finishCtx(cA, 'spectator-tab-A');
+  await finishCtx(cB, 'spectator-tab-B');
+}
+
+/** Item 2: the authority-scoped Export match for a networked room (Final Edition and after Continue in Endless). */
+async function roomExport() {
+  const { cA, cB, A, B, code } = await makeRoom('X1', 'X2', { mode: 'Standard', videos: true });
+  // API contract on the live Worker/Durable Object.
+  const fresh = await (await fetch(`${BASE}/api/rooms`, { method: 'POST' })).json();
+  const r409 = await fetch(`${BASE}/api/rooms/${fresh.code}/export`);
+  ok(r409.status === 409 && /json/.test(r409.headers.get('content-type') ?? ''), 'room export API: a room whose match has not started answers HTTP 409', String(r409.status));
+  const r404 = await fetch(`${BASE}/api/rooms/ZZQX/export`);
+  ok(r404.status === 404, 'room export API: a missing room answers HTTP 404', String(r404.status));
+  const r405 = await fetch(`${BASE}/api/rooms/${code}/export`, { method: 'POST' });
+  ok(r405.status === 405, 'room export API: only GET is allowed (POST answers 405)', String(r405.status));
+  // Play the real Standard match to Final Edition through two browsers.
+  for (let i = 0; i < 40 && (await M(A)).phase !== 'ended'; i++) await playRoomTurn([A, B]);
+  const fin = await M(A);
+  ok(fin.phase === 'ended' && fin.turn === 33 && (await M(B)).phase === 'ended', 'room export: a real 32-turn networked Standard match reached Final Edition in two browsers', JSON.stringify({ turn: fin.turn, phase: fin.phase }));
+  await sleep(600);
+  await shot(A, '35-room-final-edition-export');
+  const api = await fetch(`${BASE}/api/rooms/${code}/export`);
+  const apiBody = await api.json();
+  ok(api.status === 200 && /^application\/json/.test(api.headers.get('content-type') ?? '') && api.headers.get('cache-control') === 'no-store' && /^attachment; filename="mercadia-[A-Z]{4}-\d+\.json"$/.test(api.headers.get('content-disposition') ?? ''), 'room export API: a started match answers 200 application/json, cache-control no-store and a clean attachment filename', `${api.status} ${api.headers.get('content-type')} ${api.headers.get('cache-control')} ${api.headers.get('content-disposition')}`);
+  // Credentials that must never appear in a download.
+  const ids = [];
+  for (const p of [A, B]) {
+    const t = await tokenOf(p, code);
+    ids.push(t.local?.id, t.session);
+  }
+  const secrets = ids.filter(Boolean);
+  ok(secrets.length >= 2, 'room export: the two seats\' playerIds were read from storage for the leak scan', String(secrets.length));
+  const leakFree = (text) => secrets.every((id) => !text.includes(id)) && !/playerId|"epoch|epochs|"ready|"draft|revision|token/i.test(text);
+  // Final Edition: the real Export match button, on both a host and a non-host seat.
+  const fa = await downloadVia(A, A.locator('.gazette').getByRole('button', { name: 'Export match' }), join(RAW, 'room-final-export-A.json'));
+  const fb = await downloadVia(B, B.locator('.gazette').getByRole('button', { name: 'Export match' }), join(RAW, 'room-final-export-B.json'));
+  const rf = nodeReplay(join(RAW, 'room-final-export-A.json'));
+  ok(fa.exp.version === 5 && fa.exp.log.length === 32 && !fa.exp.endlessAt && JSON.stringify(fa.exp) === JSON.stringify(fb.exp) && JSON.stringify(fa.exp) === JSON.stringify(apiBody) && /^mercadia-\d+\.json$/.test(fa.name), 'room export: the Final Edition Export match button downloads the authority\'s version 5 export (32 turns), identical for both seats and to GET /api/rooms/:code/export', JSON.stringify({ v: fa.exp.version, n: fa.exp.log.length, name: fa.name }));
+  ok(rf.ok && rf.turnsReplayed === 32 && rf.mismatches.length === 0 && rf.finalTurn === 33 && rf.phase === 'ended', 'room export: the Final Edition room export replays bit-for-bit with scripts/replay.ts (exit 0)', JSON.stringify(rf));
+  ok(leakFree(readFileSync(join(RAW, 'room-final-export-A.json'), 'utf8')) && Object.keys(fa.exp).sort().join() === 'config,hashes,log,version', 'room export: the Final Edition download holds zero playerIds, drafts, readiness epochs or credentials (only version, config, log, hashes)');
+  ok(fa.exp.hashes[31] === fin.hash, 'room export: the last exported hash equals the hash both browsers show on Final Edition', fin.hash);
+  // Continue in Endless (host), play two Endless turns.
+  await A.getByRole('button', { name: 'Continue in Endless' }).click();
+  await Promise.all([A, B].map((p) => p.waitForFunction(() => window.__mercadia.phase === 'planning' && window.__mercadia.turn === 33, null, { timeout: 15000 })));
+  await sleep(600);
+  await playRoomTurn([A, B]);
+  await playRoomTurn([A, B]);
+  await sleep(600);
+  const post = await M(A);
+  ok(post.turn === 35 && post.phase === 'planning' && (await M(B)).turn === 35, 'room export: Continue in Endless re-opened planning and two Endless turns resolved in both browsers (Turn 35)', JSON.stringify({ turn: post.turn }));
+  // A private, unapplied Turn 35 draft on A and B marked Ready: neither may leak into the export.
+  await queueRoastery(A, A0TileFor((await M(A)).seat));
+  await endBtn(B).click();
+  await B.waitForFunction(() => window.__mercadia.view.ready === true);
+  await A.keyboard.press('Escape').catch(() => {});
+  const open = await ensureDeltaOpen(A);
+  ok(deltaOpenOk(open), 'room export: the Endless Turn Delta drawer is open, opaque, on screen and on top (1440×900)', JSON.stringify(open));
+  const fit1 = await exportFitState(A);
+  ok(fitOk(fit1, false), 'room export (1440×900): Export match is reachable on the planning bar and in the Turn Delta drawer, on screen and tappable, with zero horizontal overflow', JSON.stringify(fit1));
+  await shot(A, '36-room-endless-turn-delta-export-1440x900');
+  const ed = await downloadVia(A, A.locator('#h-drawer [data-act="export"]'), join(RAW, 'room-endless-export.json'));
+  const re = nodeReplay(join(RAW, 'room-endless-export.json'));
+  const eraw = readFileSync(join(RAW, 'room-endless-export.json'), 'utf8');
+  ok(ed.exp.version === 5 && ed.exp.log.length === 34 && JSON.stringify(ed.exp.endlessAt) === '[32]' && ed.exp.hashes.length === 34, 'room export: the post-Endless Export match (Turn Delta drawer) is version 5 with endlessAt=[32] and 34 resolved batches', JSON.stringify({ v: ed.exp.version, n: ed.exp.log.length, at: ed.exp.endlessAt }));
+  ok(re.ok && re.turnsReplayed === 34 && re.mismatches.length === 0 && re.finalTurn === 35 && re.phase === 'planning' && re.endless === true, 'room export: the post-Endless room export replays bit-for-bit with scripts/replay.ts (exit 0), Endless turns included', JSON.stringify(re));
+  ok(leakFree(eraw) && !eraw.includes('"build"'), 'room export: the post-Endless download holds zero playerIds, readiness epochs or credentials and leaves out A\'s unapplied Turn 35 draft (a queued Roastery) and B\'s Ready flag', `bytes=${eraw.length} hasBuild=${eraw.includes('"build"')}`);
+  const pd = await downloadVia(A, A.locator('#hud .plate [data-act="export"]'), join(RAW, 'room-endless-export-plate.json'));
+  ok(JSON.stringify(pd.exp) === JSON.stringify(ed.exp), 'room export: the planning-bar Export match button downloads the same authority export');
+  const bd = await downloadVia(B, (await ensureDeltaOpen(B), B.locator('#h-drawer [data-act="export"]')), join(RAW, 'room-endless-export-B.json'));
+  ok(JSON.stringify(bd.exp) === JSON.stringify(ed.exp), 'room export: the other seat (B) downloads the identical export');
+  for (const v of [3, 4]) {
+    writeFileSync(join(RAW, `legacy-v${v}-room-export.json`), JSON.stringify({ ...ed.exp, version: v }));
+    const rl = nodeReplay(join(RAW, `legacy-v${v}-room-export.json`));
+    ok(rl.ok === false && new RegExp(`Incompatible match export version ${v}: this build replays version 5 exports only`).test(rl.error ?? '') && !('mismatches' in rl), `room export: a legacy version ${v} room export is rejected with an explicit incompatible-ruleset version error`, JSON.stringify(rl));
+  }
+  copyFileSync(join(RAW, 'room-endless-export.json'), join(MEDIA, '..', 'room-endless-export.json'));
+  // 1024×768 laptop
+  await A.setViewportSize({ width: 1024, height: 768 });
+  await sleep(600);
+  await ensureDeltaOpen(A);
+  const fit2 = await exportFitState(A);
+  ok(fitOk(fit2, false), 'room export (1024×768): Export match is reachable (planning bar + Turn Delta drawer), on screen, tappable, zero horizontal overflow', JSON.stringify(fit2));
+  await shot(A, '37-room-endless-export-1024x768');
+  const l = await downloadVia(A, A.locator('#h-drawer [data-act="export"]'), join(RAW, 'room-endless-export-1024.json'));
+  ok(JSON.stringify(l.exp) === JSON.stringify(ed.exp) && nodeReplay(join(RAW, 'room-endless-export-1024.json')).ok, 'room export (1024×768): the UI download is the same authority export and replays bit-for-bit');
+  await A.setViewportSize({ width: 1440, height: 900 });
+  // 390×844 phone (a spectator tab in a phone context: the export is public, so a spectator may download it too)
+  const cM = await ctx('room-X3', { mobile: true, video: false });
+  const M3 = await openPage(cM, 'phone');
+  await M3.goto(`${BASE}/?dev=1&room=${code}`);
+  await M3.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(800);
+  ok((await M(M3)).seat === -1, 'room export (390×844): the phone joins as a spectator of the Endless room');
+  const open3 = await ensureDeltaOpen(M3);
+  ok(deltaOpenOk(open3), 'room export (390×844): the Turn Delta sheet is open and on screen', JSON.stringify(open3));
+  const fit3 = await exportFitState(M3);
+  ok(fitOk(fit3, true), 'room export (390×844): Export match is reachable in the Turn Delta sheet, ≥ 44 px tall, on screen, zero horizontal overflow', JSON.stringify(fit3));
+  await shot(M3, '38-room-endless-export-390x844');
+  const md = await downloadVia(M3, M3.locator('#h-drawer [data-act="export"]'), join(RAW, 'room-endless-export-390.json'));
+  const mr = nodeReplay(join(RAW, 'room-endless-export-390.json'));
+  ok(JSON.stringify(md.exp) === JSON.stringify(ed.exp) && mr.ok && mr.turnsReplayed === 34, 'room export (390×844): the phone download is the same version 5 authority export and replays bit-for-bit', JSON.stringify(mr));
+  await finishCtx(cM, 'room-endless-export-phone');
+  await finishCtx(cA, 'room-endless-export-A');
+  await finishCtx(cB, 'room-endless-export-B');
+}
+
+/** Item 3: a confirmed 404 forgets only that room's token; explicit Leave keeps the token so the seat can be reclaimed. */
+async function tokens404AndLeave() {
+  const { cA, cB, A, B, code } = await makeRoom('L1', 'L2', { videos: true });
+  const a0 = await M(A);
+  await queueRoastery(A, A0TileFor(a0.seat));
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  await sleep(400);
+  const key = `mercadia:pid:${code}`;
+  const t0 = await tokenOf(A, code);
+  ok(!!t0.local?.id && t0.session === t0.local.id, 'leave: the seated tab holds the seat token in localStorage and sessionStorage', JSON.stringify({ has: !!t0.local?.id }));
+  // A confirmed 404 on a room that no longer exists (never created / purged): clears only that room's token.
+  const dead = 'ZZQW';
+  const P = await openPage(cA, 'dead-room');
+  await P.goto(`${BASE}/?dev=1`);
+  await P.evaluate(([d, k]) => {
+    const rec = JSON.stringify({ id: 'stale-id', at: 1, beat: 0, tab: 'old' });
+    localStorage.setItem(`mercadia:pid:${d}`, rec);
+    sessionStorage.setItem(`mercadia:pid:${d}`, 'stale-id');
+    localStorage.setItem(`mercadia:draft:${d}`, '{}');
+  }, [dead, key]);
+  const seeded = await P.evaluate(([d]) => !!localStorage.getItem(`mercadia:pid:${d}`) && !!sessionStorage.getItem(`mercadia:pid:${d}`), [dead]);
+  const res404 = await fetch(`${BASE}/api/rooms/${dead}`);
+  await P.goto(`${BASE}/?dev=1&room=${dead}`);
+  await P.waitForFunction(() => /No such room/.test(document.body.innerText) && window.__mercadia?.view.status.text === 'Room not found', null, { timeout: 20000 });
+  await sleep(500);
+  const after404 = await P.evaluate(([d, k]) => ({ deadLocal: localStorage.getItem(`mercadia:pid:${d}`), deadSession: sessionStorage.getItem(`mercadia:pid:${d}`), otherLocal: localStorage.getItem(k) }), [dead, key]);
+  // Only booleans leave this block: the raw token JSON of the dead room and of the live room is never reported.
+  const deadRoomCleared = after404.deadLocal === null && after404.deadSession === null;
+  let otherRoomPreserved = false;
+  try {
+    otherRoomPreserved = !!after404.otherLocal && JSON.parse(after404.otherLocal).id === t0.local.id;
+  } catch {
+    otherRoomPreserved = false;
+  }
+  await shot(P, '39-room-not-found-clears-only-that-token');
+  ok(seeded && res404.status === 404 && deadRoomCleared, 'room 404: a confirmed HTTP 404 removed the missing room\'s token from localStorage and sessionStorage', `seeded=${seeded} http=${res404.status} deadRoomCleared=${deadRoomCleared}`);
+  ok(otherRoomPreserved, 'room 404: another room\'s token (the live room) is left untouched in localStorage', `otherRoomPreserved=${otherRoomPreserved}`);
+  pages.find((r) => r.page === P).csp = await P.evaluate(() => window.__csp ?? []);
+  await P.close();
+  // Explicit Leave: confirm the dialog; the token stays (heartbeat released only).
+  await A.locator('#hud [data-act="leave"]').click();
+  await A.getByRole('button', { name: 'Leave room' }).click();
+  await A.getByRole('button', { name: /Play Solo Now/i }).waitFor({ timeout: 10000 });
+  await sleep(500);
+  const afterLeave = await tokenOf(A, code);
+  ok(!!afterLeave.local && afterLeave.local.id === t0.local.id && afterLeave.local.beat === 0, 'leave: explicit Leave keeps the seat token and only releases its heartbeat', JSON.stringify({ kept: !!afterLeave.local, beat: afterLeave.local?.beat }));
+  await shot(A, '40-after-explicit-leave-token-kept');
+  // Return to that room in a brand-new tab: the reserved seat is reclaimed with its Ready flag and draft.
+  const R = await openPage(cA, 'reclaim-after-leave');
+  await R.goto(`${BASE}/?dev=1&room=${code}`);
+  await R.waitForFunction(() => window.__mercadia?.phase === 'planning' && window.__mercadia.view.status.text !== 'Reconnecting…', null, { timeout: 20000 });
+  await sleep(700);
+  const back = await M(R);
+  ok(back.seat === a0.seat && back.ready === true && back.draft === 1, 'leave: returning to the room link reclaims the reserved seat ' + a0.seat + ' (Ready, one-order draft), never a spectator', JSON.stringify({ seat: back.seat, ready: back.ready, draft: back.draft }));
+  await shot(R, '41-seat-reclaimed-after-leave');
+  // This tab only lives for about a second: its recording is a clip of white, so it is closed (and its CSP read) first.
+  // The real walkthrough is leave-and-reclaim-A-1 / -B; this tab's proof is still 41.
+  pages.find((r) => r.page === R).csp = await R.evaluate(() => window.__csp ?? []);
+  await R.close();
+  await finishCtx(cA, 'leave-and-reclaim-A', ['leave-and-reclaim-A-1']);
+  await finishCtx(cB, 'leave-and-reclaim-B');
+}
+
+// ═════════════════════════════ RELAY ═════════════════════════════
+// A WebSocket relay between the page and the room authority that can drop, hold, delay, reorder,
+// replay and inject single messages, and cut the socket.
+function installRelay(page) {
+  const r = { log: [], rules: [], held: [], conns: [] };
+  r.parse = (m) => {
+    try {
+      return JSON.parse(m);
+    } catch {
+      return null;
     }
   };
-  const [va, vb] = await Promise.all([councilView(a), councilView(b)]);
-  check(va.open && vb.open && va.tick === 660 && vb.tick === 660 && va.era === 1 && va.total === 180 && /^\d+s$/.test(va.countdown) && /^\d+s$/.test(vb.countdown) && !va.advance && !vb.advance && va.rows === 4 && vb.rows === 4 && va.unlocks === 'arcade,nightmarket,tramstop', 'the Era I close opens the Era Council on both clients with a server countdown (no Advance button)', `tick ${va.tick}; countdown host ${va.countdown} / guest ${vb.countdown}`);
-  check(va.cards.length === 3 && vb.cards.length === 3 && va.cards.join() === va.offers[0]?.join() && vb.cards.join() === vb.offers[1]?.join() && JSON.stringify(va.offers) === JSON.stringify(vb.offers) && va.picks[2] !== null && va.picks[3] !== null && va.picks[0] === null && va.picks[1] === null, 'each human is offered their own three charters; the AI Houses have already sealed theirs', `host ${va.cards.join('/')} · guest ${vb.cards.join('/')} · AI ${va.picks[2]}, ${va.picks[3]}`);
-  // The countdown is live server time (18 s). Everything from here to the guest's pick is
-  // bounded: the pause is watched inside the page, the Council is read before each screenshot,
-  // and a screenshot gives up rather than outlast the Council.
-  const held = await a.evaluate(async () => {
-    const m = window.__mercadia;
-    const c0 = m.council();
-    const t0 = m.state().tick;
-    await new Promise((r) => setTimeout(r, 1200));
-    const c1 = m.council();
-    return { t0, t1: m.state().tick, l0: c0 ? c0.left : -1, l1: c1 ? c1.left : -1 };
-  });
-  check(held.t1 === held.t0 && held.l0 > 0 && held.l1 > 0 && held.l1 < held.l0, 'the room pauses the city during the Council while the countdown runs', `tick ${held.t0} held, ${held.l0} → ${held.l1} beats left`);
-  await shot(a, `${OUT}/23-multiplayer-council-host.png`);
-  await seal(a, va.cards[0]);
-  await b.waitForFunction((k) => document.querySelector('#council .srow[data-p="0"] [data-f="pick"]')?.dataset.key === k, va.cards[0], { timeout: 5000 }).catch(() => undefined);
-  const seen = await b.evaluate(() => { const pick = document.querySelector('#council .srow[data-p="0"] [data-f="pick"]'); return { sealed: !!pick && pick.classList.contains('sealed'), text: pick?.textContent ?? '', note: document.querySelector('#council [data-f="cnote"]')?.textContent ?? '', open: !document.getElementById('council').hidden }; });
-  const hostNote = await text(a, '#council [data-f="cnote"]');
-  // Read the countdown before the screenshot, not after it.
-  const leftBefore = (await councilView(b)).left;
-  check(seen.sealed && seen.open && /Waiting for 1 more House/.test(hostNote), 'the host’s sealed charter appears on the guest’s Council, and the room keeps waiting for the guest', `guest sees "${seen.text}" · host: "${hostNote}" · ${(leftBefore / 10).toFixed(1)} s left`);
-  await shot(b, `${OUT}/24-multiplayer-council-guest.png`);
-  // Time it inside the page: from the moment the room echoes the last pick back to the moment the next era begins.
-  await b.evaluate(() => {
-    const t = (window.__councilTimes = { start: performance.now(), pick: 0, play: 0 });
-    const iv = setInterval(() => {
-      const m = window.__mercadia;
-      const c = m.council();
-      const now = performance.now() - t.start;
-      if (c && c.picks[1] && !t.pick) t.pick = now;
-      if (m.state().phase === 'playing' && !t.play) {
-        t.play = now;
-        clearInterval(iv);
+  page.routeWebSocket(/\/ws\/rooms\//, (ws) => {
+    const srv = ws.connectToServer();
+    const conn = { ws, srv };
+    r.conns.push(conn);
+    const handle = (dir, send) => (raw) => {
+      const msg = r.parse(typeof raw === 'string' ? raw : raw.toString());
+      if (msg && msg.t !== 'ping' && msg.t !== 'pong') r.log.push({ dir, msg });
+      const rule = r.rules.find((x) => x.dir === dir && x.left > 0 && x.pred(msg));
+      if (rule) {
+        rule.left--;
+        if (rule.kind === 'drop') return;
+        if (rule.kind === 'hold') {
+          r.held.push({ send, raw });
+          return;
+        }
       }
-    }, 10);
+      send(raw);
+    };
+    ws.onMessage(handle('c2s', (m) => srv.send(m)));
+    srv.onMessage(handle('s2c', (m) => ws.send(m)));
+    ws.onClose(() => srv.close().catch?.(() => {}));
   });
-  const guestSealed = await seal(b, vb.cards[1]);
-  await Promise.all([a, b].map((p) => p.waitForFunction(() => window.__mercadia.state().phase === 'playing' && document.getElementById('council').hidden, null, { timeout: 25000 })));
-  await b.waitForFunction(() => window.__councilTimes.play > 0, null, { timeout: 5000 });
-  const times = await b.evaluate(() => window.__councilTimes);
-  const tookMs = Math.round(times.play - times.pick);
-  check(guestSealed && times.pick > 0 && tookMs >= 0 && tookMs < 3000 && leftBefore > 40, 'once every connected human has chosen the room advances promptly, well before the countdown', `${tookMs} ms from the last pick registering to Era II, with ${(leftBefore / 10).toFixed(1)} s still on the clock`);
-  const era2 = (p) => p.evaluate(() => ({ era: window.__mercadia.era, charters: window.__mercadia.charters.map((c) => c.charters), unlocks: window.__mercadia.unlocks.join(), arcade: document.querySelector('#dock [data-kind="arcade"]').dataset.locked ?? '', badge: document.querySelector('#treasury .charters .cbadge')?.dataset.key ?? '', chip: document.querySelector('#clock [data-f="era"]').textContent.trim() }));
-  await Promise.all([a, b].map((p) => p.waitForFunction(() => window.__mercadia.charters.every((c) => c.charters.length === 1), null, { timeout: 5000 })));
-  const [ea, eb] = [await era2(a), await era2(b)];
-  check(ea.era === 2 && eb.era === 2 && JSON.stringify(ea.charters) === JSON.stringify(eb.charters) && ea.charters[0][0] === va.cards[0] && ea.charters[1][0] === vb.cards[1] && ea.badge === va.cards[0] && eb.badge === vb.cards[1], 'both clients hold identical charters for all four Houses, each human exactly the one they clicked', `${ea.charters.map((c) => c.join()).join(' | ')}`);
-  check(ea.unlocks === eb.unlocks && /arcade,nightmarket/.test(ea.unlocks) && ea.arcade === '' && eb.arcade === '' && ea.chip === 'Era II · Transit', 'Era II is unlocked on both clients', `${ea.chip}: ${ea.unlocks}`);
-  const lotC = await build(a, 'arcade');
-  await built(b, lotC, 'arcade', 0);
-  ok('the host builds an Era II Arcade and the guest sees it', `lot ${lotC}`);
-  await a.keyboard.press('Escape');
+  r.drop = (dir, pred, n = 1) => r.rules.push({ dir, pred, left: n, kind: 'drop' });
+  r.hold = (dir, pred, n = 1) => r.rules.push({ dir, pred, left: n, kind: 'hold' });
+  r.release = () => {
+    const h = r.held.splice(0);
+    for (const x of h) x.send(x.raw);
+    return h.length;
+  };
+  r.live = () => r.conns[r.conns.length - 1];
+  r.toServer = (msg) => r.live().srv.send(JSON.stringify(msg));
+  r.toClient = (msg) => r.live().ws.send(JSON.stringify(msg));
+  r.cut = () => r.live().ws.close();
+  r.since = (i) => r.log.slice(i);
+  return r;
+}
 
-  // Reconnect: the guest reloads and must land in the same seat with the same city and dynasty.
-  await settle(b);
-  await b.reload();
-  await b.waitForFunction(() => window.__mercadia && window.__mercadia.phase === 'playing' && window.__mercadia.me === 1 && window.__mercadia.state().ready, null, { timeout: 20000 });
-  await sleep(b, 500);
-  const rb = await state(b);
-  const dynOf = (p) => p.evaluate(() => ({ charters: window.__mercadia.charters.map((c) => c.charters), stars: window.__mercadia.milestones.map((m) => m.earned), last: window.__mercadia.chronicle().slice(-1)[0]?.n ?? 0, era: window.__mercadia.era, guide: document.getElementById('guide').hidden }));
-  const [da, db] = [await dynOf(a), await dynOf(b)];
-  check(rb.buildings.some((x) => x.tile === lotA) && rb.buildings.some((x) => x.tile === lotB && x.owner === 1) && rb.buildings.some((x) => x.tile === lotC), 'guest reloads and reconnects into the same seat', `player ${(await info(b)).me}, buildings ${rb.buildings.length}`);
-  check(JSON.stringify(da.charters) === JSON.stringify(db.charters) && JSON.stringify(da.stars) === JSON.stringify(db.stars) && Math.abs(da.last - db.last) <= 1 && db.era === 2 && db.guide, 'the reconnected client has the full dynasty: era, charters, milestones and the Chronicle', `charters ${db.charters.map((c) => c.join()).join('|')} · stars ${db.stars.map((s) => s.length).join('')} · last dispatch #${db.last}/#${da.last}`);
-  // Harder: the tab is closed outright (sessionStorage gone) and the invite link is reopened.
-  await settle(b);
-  await b.close();
-  await a.waitForFunction(() => window.__mercadia.lobby.seats[1].connected === false, null, { timeout: 10000 });
-  b = await openGuest('guest-reopened');
-  await b.waitForFunction(() => window.__mercadia.phase === 'playing' && window.__mercadia.state().ready, null, { timeout: 20000 });
-  await sleep(b, 400);
-  const reopened = await info(b);
-  check(reopened.me === 1 && reopened.seat === 1, 'closing the tab and reopening ?room= reclaims the exact seat (not a spectator)', `seat ${reopened.seat}, player ${reopened.me}`);
-  const room = await (await fetch(`${BASE}/api/rooms/${code}`)).json();
-  check(room.status === 'playing' && room.humans === 2 && room.connected === 2 && room.era === 2, 'room summary reports the running match and its era', `status=${room.status} humans=${room.humans} connected=${room.connected} tick=${room.tick} era=${room.era}`);
+async function relayChecks() {
+  const { cA, cB, A, B, rel } = await makeRoom('RA', 'RB', { relayA: true, relayB: true, mode: 'Standard', videos: false });
+  const ra = rel.A;
+  const rb = rel.B;
+  const seatA = (await M(A)).seat;
+  const seatB = (await M(B)).seat;
+  const tileA = A0TileFor(seatA);
+  const tileB = B0TileFor(seatB);
 
-  // ── Era Council 2: a mid-Council reconnect, then one House stays silent ──
-  // The guest's page is settled before the Council opens, so the reload inside the countdown
-  // is not kept waiting by a webfont still in flight.
-  await settle(b);
-  await Promise.all([inCouncil(a), inCouncil(b)]);
-  const tOpen = Date.now();
-  await settle(b);
-  await b.reload();
-  await b.waitForFunction(() => window.__mercadia && window.__mercadia.phase === 'playing' && window.__mercadia.me === 1 && window.__mercadia.state().ready && window.__mercadia.state().phase === 'council' && !document.getElementById('council').hidden, null, { timeout: 15000 }).catch(() => undefined);
-  const [v2b, v2a] = await Promise.all([councilView(b), councilView(a)]);
-  check(v2b.open && v2b.era === 2 && v2b.tick === 1320 && v2b.cards.length === 3 && v2b.cards.join() === v2a.offers[1]?.join() && v2b.unlocks === 'boutique,cinema,plaza,level3' && v2b.left > 20, 'reconnecting in the middle of an Era Council restores it: my offers, the unlocks, the countdown', `guest back with ${v2b.cards.join('/')}, ${(v2b.left / 10).toFixed(1)} s left`);
-  await seal(a, v2a.cards[0]);
-  await b.waitForFunction((k) => document.querySelector('#council .srow[data-p="0"] [data-f="pick"]')?.dataset.key === k, v2a.cards[0], { timeout: 5000 }).catch(() => undefined);
-  const steward = await text(b, '#council [data-f="cnote"]');
-  await Promise.all([a, b].map((p) => p.waitForFunction(() => window.__mercadia.state().phase === 'playing' && window.__mercadia.charters.every((c) => c.charters.length === 2), null, { timeout: 30000 })));
-  const lasted = (Date.now() - tOpen) / 1000;
-  const [d2a, d2b] = [await dynOf(a), await dynOf(b)];
-  check(lasted >= 14 && lasted <= 24 && /steward chooses for you/.test(steward), 'a silent House is not waited for beyond the ~18 s countdown', `Council sat ${lasted.toFixed(1)} s · guest was told: "${steward}"`);
-  check(JSON.stringify(d2a.charters) === JSON.stringify(d2b.charters) && d2a.charters[0][1] === v2a.cards[0] && (v2a.offers[1] ?? []).includes(d2a.charters[1][1]) && d2a.era === 3 && d2b.era === 3, 'the steward auto-selects for the silent House from its own offer, and both clients agree', `host ${d2a.charters[0].join('+')} · guest (steward) ${d2a.charters[1].join('+')}`);
+  // 17 (first part) + 10: Turn 1 — A readies at epoch 0, ack held, duplicate answered, cancel, stale ack released
+  await queueRoastery(A, tileA);
+  await sleep(300);
+  ra.hold('s2c', (m) => m?.t === 'readyAck' && m.ready === true && m.epoch === 1, 1);
+  await endBtn(A).click();
+  await sleep(600);
+  let a = await M(A);
+  ok(a.label === 'End Turn' && a.ready === false, 'late acks: with A\'s Ready acknowledgment held, A still shows End Turn (never an unacknowledged Ready)', a.label);
+  await endBtn(A).click(); // duplicate press resends the same epoch
+  await A.waitForFunction(() => window.__mercadia.view.ready === true, null, { timeout: 8000 });
+  a = await M(A);
+  ok(a.label === 'Cancel Ready', 'late acks: pressing End Turn again is safe — the duplicate is answered with Ready at epoch 1 and A shows Cancel Ready');
+  await sleep(700); // outside the End Turn gesture guard
+  await endBtn(A).click(); // cancel
+  await A.waitForFunction(() => window.__mercadia.view.ready === false);
+  const released = ra.release(); // the held "Ready epoch 1" ack arrives after "Planning epoch 2"
+  await sleep(600);
+  a = await M(A);
+  ok(released >= 1 && a.ready === false && a.label === 'End Turn', 'late acks: the held Ready (epoch 1) ack released after Planning (epoch 2) leaves A Planning with End Turn showing');
+  const bSeesA = await B.evaluate((s) => window.__mercadia.view.seats[s].ready, seatA);
+  ok(bSeesA === false, 'late acks: B keeps showing A as Planning');
+  const i0 = ra.log.length;
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true);
+  const sent = ra.since(i0).find((x) => x.dir === 'c2s' && x.msg.t === 'ready');
+  ok(sent && sent.msg.epoch === 2, "late acks: A's next End Turn sends epoch 2 and is recorded on that first press", JSON.stringify(sent?.msg));
 
-  // A latecomer on a phone watches as a spectator, and can read that they are.
-  const spec = await open('spectator', `/?room=${code}`, PHONE);
-  await spec.waitForFunction(() => window.__mercadia.phase === 'playing' && window.__mercadia.state().ready, null, { timeout: 20000 });
-  await sleep(spec, 300);
-  const pill = await spec.evaluate(() => {
-    const el = document.getElementById('spectator');
-    const cs = getComputedStyle(el);
-    const r = el.getBoundingClientRect();
-    const rgb = (s) => s.match(/[\d.]+/g).map(Number);
-    const lum = ([r, g, b]) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
-    const fg = rgb(cs.color);
-    const bg = rgb(cs.backgroundColor);
-    const a = bg[3] ?? 1;
-    // Worst case: the 4% that shows through is as dark as the ink itself.
-    const worst = bg.slice(0, 3).map((v) => v * a + 30 * (1 - a));
-    const [l1, l2] = [lum(worst), lum(fg)];
-    return { hidden: el.hidden, text: el.textContent, color: cs.color, bg: cs.backgroundColor, border: cs.borderTopWidth, contrast: (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05), inView: r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight, me: window.__mercadia.me, dock: document.getElementById('dock').hidden, guide: document.getElementById('guide').hidden, crests: document.querySelectorAll('#board .row .hcrest').length, era: window.__mercadia.era };
-  });
-  check(!pill.hidden && pill.me === -1 && /watching as a spectator/.test(pill.text) && pill.color === 'rgb(30, 26, 22)' && pill.bg === 'rgba(250, 247, 240, 0.96)' && pill.contrast >= 10 && pill.inView && parseFloat(pill.border) >= 1 && pill.dock && pill.guide, 'spectator notice: dark ink on solid cream linen with a hairline, ≥ 10:1 — no dock, no guide', `${pill.color} on ${pill.bg}, contrast ${pill.contrast.toFixed(1)}:1`);
-  const laySpec = await layout(spec);
-  check(pill.crests === 4 && pill.era === 3 && laySpec.clipped.length === 0 && laySpec.overlaps.length === 0, 'the spectator’s phone shows the crested score strip and the era, nothing clipped', `${laySpec.shown.join(' ')}`);
-  await spec.screenshot({ path: `${OUT}/25-mobile-spectator.png` });
+  // B readies → Turn 1 resolves exactly once. Then Turn 2: first Ready carries epoch 0.
+  await queueRoastery(B, tileB);
+  const preResolved = (await M(A)).resolutions;
+  await endBtn(B).click();
+  await Promise.all([A, B].map((p) => p.waitForFunction(() => window.__mercadia.turn === 2, null, { timeout: 15000 })));
+  await sleep(500);
+  ok((await M(A)).resolutions === preResolved + 1, 'resolution: the turn applied exactly once on A');
+  const resolvedMsgs = ra.log.filter((x) => x.dir === 's2c' && x.msg.t === 'resolved');
+  ok(resolvedMsgs.length === 1 && resolvedMsgs[0].msg.game && resolvedMsgs[0].msg.summary && resolvedMsgs[0].msg.turn === 2 && resolvedMsgs[0].msg.hash, '15: one resolution message carries the Turn 2 state (turn + hash) together with the 1→2 summary');
+  ok(resolvedMsgs[0].msg.game.turn === 2 && resolvedMsgs[0].msg.summary.from === 1 && resolvedMsgs[0].msg.summary.to === 2, '15: summary matches its state (1→2 with Turn 2 world)');
 
-  // ── Era Council 3: the spectator reads it, the humans seal it ──
-  await Promise.all([inCouncil(a), inCouncil(b), inCouncil(spec)]);
-  const specCouncil = await spec.evaluate(() => { const card = document.querySelector('#council .council'); const r = card.getBoundingClientRect(); return { cards: card.querySelectorAll('.charter').length, rows: card.querySelectorAll('.srow').length, countdown: card.querySelector('[data-f="countdown"]')?.textContent ?? '', note: card.querySelector('[data-f="cnote"]').textContent, inView: r.left >= 0 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5, notice: !document.getElementById('spectator').hidden }; });
-  check(specCouncil.cards === 0 && specCouncil.rows === 4 && /^\d+s$/.test(specCouncil.countdown) && specCouncil.inView && /Houses are choosing/.test(specCouncil.note), 'a spectator sees the Era Council read-only: standings and countdown, no charter cards', `"${specCouncil.note}" ${specCouncil.countdown}`);
-  // Both Councils are read before the spectator's screenshot, which may not outlast the countdown.
-  const [v3a, v3b] = await Promise.all([councilView(a), councilView(b)]);
-  await shot(spec, `${OUT}/26-mobile-spectator-council.png`);
-  const sealed3 = [await seal(a, v3a.cards[2]), await seal(b, v3b.cards[0])];
-  check(v3a.open && v3b.open && sealed3.every(Boolean), 'both humans seal their third charter while the Council still sits', `host ${v3a.cards[2]} · guest ${v3b.cards[0]} · ${(v3a.left / 10).toFixed(1)} s were left`);
-  await Promise.all([a, b, spec].map((p) => p.waitForFunction(() => window.__mercadia.state().phase === 'playing' && window.__mercadia.era === 4 && window.__mercadia.charters.every((c) => c.charters.length === 3), null, { timeout: 10000 })));
-  const [d3a, d3b, d3s] = [await dynOf(a), await dynOf(b), await dynOf(spec)];
-  check(JSON.stringify(d3a.charters) === JSON.stringify(d3b.charters) && JSON.stringify(d3a.charters) === JSON.stringify(d3s.charters) && d3a.charters[0][2] === v3a.cards[2] && d3a.charters[1][2] === v3b.cards[0] && d3a.charters.every((c) => new Set(c).size === 3), 'Era IV: three Councils on, host, guest and spectator agree on every House’s three distinct charters', d3a.charters.map((c) => c.join('+')).join(' | '));
-  const starsA = await boardCrests(a);
-  const starsB = await boardCrests(b);
-  check(starsA.every((r) => r.stars === d3a.stars[r.p].length) && JSON.stringify(starsA.map((r) => [r.p, r.stars]).sort()) === JSON.stringify(starsB.map((r) => [r.p, r.stars]).sort()) && d3a.stars.some((s) => s.length >= 2), 'Milestone stars are synced: the same brass stars beside each crest on both boards', d3a.stars.map((s, i) => `p${i} ★${s.length}`).join(' '));
-  await a.screenshot({ path: `${OUT}/27-multiplayer-era4-host.png` });
-  await spec.context().close();
+  // Turn 2 first Ready: epoch 0, one press
+  await queueRoastery(A, A0TileFor(seatA, 1));
+  await sleep(300);
+  const i1 = ra.log.length;
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true, null, { timeout: 8000 });
+  const first = ra.since(i1).filter((x) => x.dir === 'c2s' && x.msg.t === 'ready');
+  ok(first.length === 1 && first[0].msg.turn === 2 && first[0].msg.epoch === 0 && first[0].msg.revision === 1, 'late acks: Turn 2 first Ready is ready{turn:2, revision:1, epoch:0}, recorded on the first press', JSON.stringify(first.map((x) => x.msg)));
+  // a Turn 1 readyAck injected into A's socket changes nothing
+  const before = await M(A);
+  ra.toClient({ t: 'readyAck', turn: 1, ready: false, epoch: 5 });
+  await sleep(400);
+  const after = await M(A);
+  ok(after.ready === before.ready && after.turn === before.turn && after.label === before.label, 'late acks: a Turn 1 readyAck injected in Turn 2 changes nothing');
+  ok(!ra.since(i1).some((x) => x.dir === 'c2s' && x.msg.turn === 1), 'late acks: the relay log shows no Turn 1 message sent by A after the resolution');
 
-  // Host migration: the host leaves, the guest takes over.
-  await a.context().close();
-  await b.waitForFunction(() => window.__mercadia.lobby.host === 1, null, { timeout: 15000 });
-  await b.waitForFunction(() => [...document.querySelectorAll('#clock [data-act="speed"]')].every((x) => !x.disabled), null, { timeout: 5000 });
-  ok('host leaves and the guest becomes host: the pace buttons unlock');
-  const tb = (await state(b)).tick;
-  await b.waitForFunction((t) => window.__mercadia.state().tick > t + 10, tb, { timeout: 15000 });
-  await b.click('#clock [data-act="speed"][data-v="1.5"]');
-  await b.waitForFunction(() => window.__mercadia.speed === 1.5, null, { timeout: 5000 });
-  ok('the match keeps running for the remaining player, who now sets the pace (1.5×)');
-  await guestCtx.close();
+  // 10. Retry safety: B readies → Turn 2 resolves; then the relay replays A's Turn 2 ready + cancelReady
+  await queueRoastery(B, B0TileFor(seatB) === 32 ? 6 : 36).catch(() => {});
+  await endBtn(B).click();
+  await Promise.all([A, B].map((p) => p.waitForFunction(() => window.__mercadia.turn === 3, null, { timeout: 15000 })));
+  await sleep(500);
+  const snapA = await A.evaluate(() => ({ hash: window.__mercadia.hash, turn: window.__mercadia.turn, res: window.__mercadia.view.resolutions, ready: window.__mercadia.view.ready }));
+  const bLogLen = rb.log.length;
+  const replayReady = first[0].msg;
+  const iR = ra.log.length;
+  ra.toServer(replayReady);
+  ra.toServer({ t: 'cancelReady', turn: 2, epoch: 1 });
+  await sleep(800);
+  const replies = ra.since(iR).filter((x) => x.dir === 's2c');
+  const stateReplies = replies.filter((x) => x.msg.t === 'state');
+  const snapA2 = await A.evaluate(() => ({ hash: window.__mercadia.hash, turn: window.__mercadia.turn, res: window.__mercadia.view.resolutions, ready: window.__mercadia.view.ready, sum: window.__mercadia.summary }));
+  ok(stateReplies.length === 2 && stateReplies.every((x) => x.msg.turn === 3 && x.msg.hash === snapA.hash && x.msg.summary.from === 2 && x.msg.summary.to === 3 && x.msg.own && x.msg.own.epoch === 0 && x.msg.own.ready === false), '10: replayed Turn 2 ready/cancelReady are each answered with a Turn 3 state carrying the 2→3 summary and A\'s Turn 3 flag+epoch', JSON.stringify(replies.map((x) => [x.msg.t, x.msg.turn])));
+  ok(replies.every((x) => x.msg.t === 'state') && snapA2.turn === 3 && snapA2.hash === snapA.hash && snapA2.res === snapA.res && snapA2.ready === false, '10: Turn #, the state hash, A\'s Ready and the Turn Delta are unchanged — no resolution, nothing reopened');
+  ok(!rb.since(bLogLen).some((x) => x.dir === 's2c' && (x.msg.t === 'state' || x.msg.t === 'resolved' || x.msg.t === 'seats')), '10: B receives nothing for the replay');
+  // After Turn 3 resolves, the same replay is answered with Turn 4 and the 3→4 summary
+  await queueRoastery(A, 55).catch(() => {});
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true, null, { timeout: 8000 });
+  await endBtn(B).click();
+  await Promise.all([A, B].map((p) => p.waitForFunction(() => window.__mercadia.turn === 4, null, { timeout: 15000 })));
+  const iR2 = ra.log.length;
+  ra.toServer(replayReady);
+  await sleep(700);
+  const rep2 = ra.since(iR2).filter((x) => x.dir === 's2c' && x.msg.t === 'state');
+  ok(rep2.length === 1 && rep2[0].msg.turn === 4 && rep2[0].msg.summary.from === 3 && rep2[0].msg.summary.to === 4, '10: after Turn 3 also resolves the same replay gets the Turn 4 state with its 3→4 summary, never the 2→3 one', JSON.stringify(rep2.map((x) => [x.msg.turn, x.msg.summary?.from])));
+
+  // 14(a): edit the draft, drop the latest draft → "Saving draft…"; an injected ready for the unacked revision is rejected
+  ra.drop('c2s', (m) => m?.t === 'draft', 1);
+  const dBefore = await A.evaluate(() => window.__mercadia.view.revision);
+  await A.getByRole('button', { name: /^Borrow/ }).click(); // an always-legal order whose draft message is dropped
+  await sleep(500);
+  const aSave = await M(A);
+  const hashBefore = aSave.hash;
+  ok(/Saving draft/.test(aSave.label), '14a: with the latest draft dropped, End Turn reads "Saving draft…"', aSave.label);
+  const ackedBefore = await A.evaluate(() => window.__mercadia.view.ackedRevision);
+  const iS = ra.log.length;
+  ra.toServer({ t: 'ready', turn: 4, revision: ackedBefore + 1, epoch: 0 });
+  await sleep(600);
+  const errs = ra.since(iS).filter((x) => x.dir === 's2c' && x.msg.t === 'error');
+  ok(errs.some((e) => e.msg.code === 'staleDraft'), '14a: the injected ready for the unacknowledged revision is rejected with staleDraft', JSON.stringify(errs.map((e) => e.msg)));
+  const aAfter = await M(A);
+  const bAfter = await B.evaluate((s) => ({ ready: window.__mercadia.view.seats[s].ready, hash: window.__mercadia.hash }), seatA);
+  ok(aAfter.ready === false && bAfter.ready === false && aAfter.hash === hashBefore, '14a: A stays Planning in both browsers and the state hash does not change');
+  void dBefore;
+
+  // 15 (repeat) + 10 (repeat): A's resolution message is dropped; A reconnects and gets the same N+1 state
+  await sleep(1200); // the draft resend lands
+  const tNow = (await M(A)).turn;
+  await endBtn(A).click();
+  await A.waitForFunction(() => window.__mercadia.view.ready === true, null, { timeout: 8000 });
+  ra.drop('s2c', (m) => m?.t === 'resolved', 1);
+  await endBtn(B).click();
+  await B.waitForFunction((t) => window.__mercadia.turn === t + 1, tNow, { timeout: 15000 });
+  await sleep(1000);
+  const aStale = await M(A);
+  ok(aStale.turn === tNow, '15: with A\'s resolution message dropped A still shows the old turn');
+  ra.cut();
+  await A.waitForFunction((t) => window.__mercadia.turn === t + 1, tNow, { timeout: 20000 });
+  await sleep(500);
+  const aFresh = await M(A);
+  const bFresh = await M(B);
+  ok(aFresh.hash === bFresh.hash && aFresh.turn === tNow + 1, '15: on reconnect A receives the same Turn N+1 state and hash in its join state, never showing the old world again', `${aFresh.turn} ${aFresh.hash} ${bFresh.hash}`);
+  const wsJoins = ra.log.filter((x) => x.dir === 's2c' && x.msg.t === 'state').pop();
+  ok(wsJoins && wsJoins.msg.summary && wsJoins.msg.summary.to === tNow + 1, '15: the join state carries the N→N+1 summary');
+
+  // 10 (repeat): A drops its readyAck, B readies, A's resolution is dropped; A presses End Turn again → "already resolved" notice
+  await queueRoastery(A, 55).catch(() => {});
+  await sleep(300);
+  const tN = (await M(A)).turn;
+  ra.drop('s2c', (m) => m?.t === 'readyAck', 1);
+  await endBtn(A).click();
+  await sleep(700);
+  ra.drop('s2c', (m) => m?.t === 'resolved', 1);
+  await endBtn(B).click();
+  await B.waitForFunction((t) => window.__mercadia.turn === t + 1, tN, { timeout: 15000 });
+  await sleep(800);
+  const aOld = await M(A);
+  ok(aOld.turn === tN, '10 repeat: A still shows Turn N after its readyAck and the resolution message were dropped');
+  await endBtn(A).click(); // resends ready for turn N
+  await A.waitForFunction((t) => window.__mercadia.turn === t + 1, tN, { timeout: 15000 });
+  await sleep(500);
+  const aNow = await M(A);
+  const bNow = await M(B);
+  ok(aNow.hash === bNow.hash && aNow.notices.some((n) => new RegExp(`Turn ${tN} already resolved — showing Turn ${tN + 1}`).test(n)), `10 repeat: A shows Turn ${tN + 1} with B's hash and the notice "Turn ${tN} already resolved — showing Turn ${tN + 1}"`, aNow.notices.join(' | '));
+  ok(aNow.ready === false && (await B.evaluate((s) => window.__mercadia.view.seats[s].ready, seatA)) === false, '10 repeat: A adopts Planning at epoch 0 for the new turn (B shows A as Planning) and no second resolution occurred');
+  await shot(A, '19-relay-A-already-resolved');
+
+  // 16: reconnect across resolution with pending work
+  await queueRoastery(A, 36).catch(() => {});
+  await sleep(600);
+  const t16 = (await M(A)).turn;
+  const rev16 = await A.evaluate(() => window.__mercadia.view.ackedRevision);
+  ra.drop('s2c', (m) => m?.t === 'readyAck', 1);
+  await endBtn(A).click();
+  await sleep(500);
+  // A goes offline for real (no quick reconnect can race the resolution): cut the socket AND block new connections.
+  await cA.context.setOffline(true);
+  ra.cut();
+  await A.waitForFunction(() => window.__mercadia.view.status.text === 'Reconnecting…', null, { timeout: 15000 });
+  // queue one more order while "Reconnecting…" (unsent local revision r+1)
+  await A.getByRole('button', { name: /Roastery/ }).first().click().catch(() => {});
+  await tileClick(A, 44).catch(() => {});
+  await endBtn(B).click();
+  await B.waitForFunction((t) => window.__mercadia.turn === t + 1, t16, { timeout: 15000 });
+  await cA.context.setOffline(false);
+  await A.waitForFunction((t) => window.__mercadia.turn === t + 1, t16, { timeout: 30000 });
+  await sleep(600);
+  const a16 = await M(A);
+  const b16 = await M(B);
+  ok(a16.hash === b16.hash && a16.draft === 0 && a16.notices.some((n) => new RegExp(`Turn ${t16} resolved while you were offline — unsent edits discarded`).test(n)), `16: A shows Turn ${t16 + 1} with B's hash, the "resolved while you were offline" notice and the authority's empty draft`, JSON.stringify({ draft: a16.draft, notices: a16.notices }));
+  const logAfter = ra.log.slice(ra.log.findLastIndex((x) => x.dir === 's2c' && x.msg.t === 'state'));
+  ok(!logAfter.some((x) => x.dir === 'c2s' && x.msg.turn === t16 && ['draft', 'ready', 'cancelReady'].includes(x.msg.t)), '16: A sent no earlier-turn draft/ready/cancelReady after reconnecting');
+  const i16 = ra.log.length;
+  const hash16 = a16.hash;
+  ra.toServer({ t: 'draft', turn: t16, revision: rev16 + 1, orders: [] });
+  ra.toServer({ t: 'ready', turn: t16, revision: rev16, epoch: 1 });
+  await sleep(800);
+  const r16 = ra.since(i16).filter((x) => x.dir === 's2c');
+  ok(r16.some((x) => x.msg.t === 'error' && x.msg.code === 'offTurnDraft') && r16.some((x) => x.msg.t === 'state' && x.msg.turn === t16 + 1), '16: an injected earlier-turn draft is rejected as off-turn and the replayed ready is answered with the current state');
+  const a16b = await M(A);
+  ok(a16b.hash === hash16 && a16b.ready === false && a16b.draft === 0, "16: A's draft, Ready state and the state hash are unchanged");
+
+  // 14(e)/(privacy): nothing B receives contains A's draft or epoch
+  // B's own acks are fine; nothing carrying A's draft/epoch may reach B. (1) every ack B received answers a message B itself sent;
+  // (2) outside its own `own` block no message to B has a draft/orders/revision/epoch field.
+  const bSent = rb.log.filter((x) => x.dir === 'c2s' && ['ready', 'cancelReady', 'draft'].includes(x.msg.t)).map((x) => `${x.msg.t === 'draft' ? 'draftAck' : 'readyAck'}:${x.msg.turn}`);
+  const bAcks = rb.log.filter((x) => x.dir === 's2c' && (x.msg.t === 'readyAck' || x.msg.t === 'draftAck'));
+  const orphanAcks = bAcks.filter((x) => !bSent.includes(`${x.msg.t}:${x.msg.turn}`));
+  const PRIVATE = /"(draft|orders|revision|epoch|ackedRevision)":/;
+  const privateHits = rb.log
+    .filter((x) => x.dir === 's2c' && x.msg.t !== 'readyAck' && x.msg.t !== 'draftAck')
+    .filter((x) => {
+      const { own, ...rest } = x.msg;
+      return PRIVATE.test(JSON.stringify(rest));
+    })
+    .map((x) => x.msg.t);
+  const bStateOwn = rb.log.filter((x) => x.dir === 's2c' && x.msg.t === 'state').every((x) => x.msg.own === null || x.msg.player === seatB);
+  const leaked = orphanAcks.length > 0 || privateHits.length > 0;
+  if (leaked) console.log('B privacy offenders:', JSON.stringify({ orphan: orphanAcks.map((x) => [x.msg.t, x.msg.turn]), privateHits }));
+  ok(!leaked && bStateOwn, '14: nothing B receives over its socket contains A\'s draft or readiness epoch (only B\'s own state/acks)');
+  await finishCtx(cA, 'relay-browser-A');
+  await finishCtx(cB, 'relay-browser-B');
+}
+
+// 11. Heartbeats: both seats connected and idle; turn, world and Ready states unchanged
+async function idleRoom() {
+  const { cA, cB, A, B } = await makeRoom('HA', 'HB', { videos: false });
+  const a0 = await M(A);
+  const t0 = Date.now();
+  while (Date.now() - t0 < HEARTBEAT_MS) await sleep(5000);
+  const a1 = await M(A);
+  const b1 = await M(B);
+  ok(a0.turn === a1.turn && a0.hash === a1.hash && a1.hash === b1.hash && a1.ready === false && b1.ready === false, `heartbeats: after ${Math.round((Date.now() - t0) / 1000)} s of idle heartbeats the turn, world and Ready states are unchanged`, JSON.stringify({ a0, a1 }));
+  await finishCtx(cA, 'idle-A');
+  await finishCtx(cB, 'idle-B');
+}
+
+const sections = { solo, hotseat, mobile, room, relay: relayChecks, endless: endlessReplay, start: startBeside, reclaim: reclaimAfterHours, spectator: spectatorTab, roomexport: roomExport, tokens: tokens404AndLeave };
+// SMOKE_CONCURRENCY=n runs at most n sections at once (default: all of them, as before). On a small machine the
+// 11 sections + 2 idle watchers can starve Chrome's screenshots; limiting concurrency changes nothing they assert.
+const CONCURRENCY = Math.max(1, Number(process.env.SMOKE_CONCURRENCY) || Infinity);
+const tasks = [];
+if (ONLY.includes('idle')) {
+  tasks.push(() => idleSolo().catch((e) => ok(false, 'idle solo crashed', e.message)));
+  tasks.push(() => idleRoom().catch((e) => ok(false, 'idle room crashed', e.message)));
+}
+for (const name of ['solo', 'hotseat', 'mobile', 'room', 'relay', 'endless', 'start', 'reclaim', 'spectator', 'roomexport', 'tokens']) {
+  if (ONLY.includes(name)) tasks.push(() => sections[name]().catch((e) => ok(false, `${name}: section crashed`, e.stack?.split('\n').slice(0, 3).join(' / '))));
+}
+{
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) await tasks[next++]();
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker));
+}
+
+// The legacy v2 boundary runs on its own wrangler dev + persisted Durable Objects (scripts/legacy-section.mjs),
+// after the other sections, so it never competes with them for the browser or the machine.
+if (ONLY.includes('legacy')) {
+  await legacySection({ ok, ctx, openPage, finishCtx, shot, M, endBtn, nodeReplay, RAW, pages }).catch((e) => ok(false, 'legacy: section crashed', (e.stack ?? String(e)).split('\n').slice(0, 4).join(' / ')));
+}
+
+// Hygiene: zero console errors/warnings, page errors, CSP violations and failed requests anywhere.
+// Every page's CSP violations were read from the LIVE page in finishCtx, before its context closed.
+for (const rec of pages) {
+  ok(Array.isArray(rec.csp) && rec.csp.length === 0, `hygiene ${rec.tag}: zero CSP violations (read from the live page)`, rec.csp === undefined ? 'never captured' : (rec.csp ?? []).join(' | '));
+}
+// Offline/online and relay-cut sections legitimately fail sockets on purpose; report them separately but strictly for the plain sections.
+const strict = pages.filter((p) => /^(solo|hotseat|mobile|idle|endless|start)[-/]/.test(p.tag));
+for (const rec of strict) ok(rec.issues.length === 0, `hygiene ${rec.tag}: zero console errors/warnings, page errors and failed requests`, rec.issues.slice(0, 4).join(' | '));
+const roomPages = pages.filter((p) => /^room-/.test(p.tag));
+for (const rec of roomPages) {
+  // The dead-room page loads a room that does not exist on purpose: its HTTP 404s and refused upgrade are the test.
+  const expected404 = /\/dead-room$/.test(rec.tag) ? /404|Not Found|Failed to load resource/i : null;
+  const bad = rec.issues.filter((i) => !/WebSocket|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|net::ERR_/i.test(i) && !(expected404 && expected404.test(i)));
+  ok(bad.length === 0, `hygiene ${rec.tag}: zero console errors/warnings and page errors (deliberate offline/relay socket drops excluded)`, bad.slice(0, 4).join(' | '));
+}
+
+// The legacy pages hit a refused upgrade (HTTP 410) on purpose: those load failures are the test, nothing else is excused.
+for (const rec of pages.filter((p) => /^legacy-chrome\//.test(p.tag))) {
+  const bad = rec.issues.filter((i) => /^pageerror:/.test(i) || !/\b410\b|http 409: \S+\/export|Failed to load resource|WebSocket connection to .* failed|WebSocket|ERR_/i.test(i));
+  ok(bad.length === 0, `hygiene ${rec.tag}: zero page errors and unexpected console errors (only the deliberate HTTP 410 refusal excused)`, bad.slice(0, 4).join(' | '));
+}
+
+// Media. Runs once, after every section, so the ffmpeg work never competes with the sections driving Chrome.
+//  1. the raw JSON exports are copied next to (not into) the media directory and the raw recording directory is removed;
+//  2. a page that closes before its first paint records a clip of nothing but white: such a clip is dropped;
+//  3. every remaining clip is re-encoded in place (VP9, 10 fps, at most 960 px wide) so the directory stays within the
+//     collection limits (25 MiB, 64 flat files, no hidden directories), then decoded again frame by frame: every kept
+//     video must show real rendered UI.
+const MEDIA_LIMIT_BYTES = 25 * 1024 * 1024;
+const MEDIA_LIMIT_FILES = 64;
+function shrinkVideo(file) {
+  const tmp = `${file}.tmp.webm`;
+  try {
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', file, '-vf', "fps=10,scale='min(960,iw)':-2", '-c:v', 'libvpx-vp9', '-crf', '40', '-b:v', '0', '-deadline', 'good', '-cpu-used', '5', '-row-mt', '1', '-an', tmp]);
+    renameSync(tmp, file);
+    return true;
+  } catch {
+    rmSync(tmp, { force: true });
+    return false;
+  }
+}
+{
+  try {
+    for (const f of readdirSync(RAW)) if (f.endsWith('.json')) copyFileSync(join(RAW, f), join(MEDIA, '..', f));
+  } catch {
+    // ignore
+  }
+  rmSync(RAW, { recursive: true, force: true });
+  const stats = [];
+  let unshrunk = 0;
+  for (const f of readdirSync(MEDIA).filter((x) => x.endsWith('.webm'))) {
+    const file = join(MEDIA, f);
+    const before = videoStats(file);
+    if (before && before.blank) {
+      rmSync(file, { force: true });
+      droppedBlank.push({ name: f, frames: before.frames, maxRange: before.maxRange, minYmin: before.minYmin, maxYmax: before.maxYmax });
+      continue;
+    }
+    if (!shrinkVideo(file)) unshrunk++;
+    stats.push({ f, st: videoStats(file) });
+  }
+  const kept = stats.map((x) => x.f);
+  const undecodable = stats.filter((x) => !x.st).map((x) => x.f);
+  const blank = stats.filter((x) => x.st && x.st.blank).map((x) => x.f);
+  ok(undecodable.length === 0 && blank.length === 0 && unshrunk === 0, `media: all ${kept.length} kept .webm clips decode and show real rendered UI frames (luma range >= ${BLANK_RANGE} in at least one frame); none is blank`, `kept=${kept.length} undecodable=${undecodable.join(',')} blank=${blank.join(',')} notReencoded=${unshrunk}`);
+  const entries = readdirSync(MEDIA, { withFileTypes: true });
+  const bytes = entries.filter((e) => e.isFile()).reduce((n, e) => n + statSync(join(MEDIA, e.name)).size, 0);
+  const nonFlat = entries.filter((e) => !e.isFile()).map((e) => e.name);
+  ok(entries.length <= MEDIA_LIMIT_FILES && nonFlat.length === 0 && bytes <= MEDIA_LIMIT_BYTES, 'media: the directory is flat, holds at most 64 files, no .raw, and is at most 25 MiB', `files=${entries.length} subdirs=${nonFlat.join(',')} MiB=${(bytes / 1048576).toFixed(2)}`);
+  for (const x of stats) if (x.st) console.log(`      video ${x.f}: ${(statSync(join(MEDIA, x.f)).size / 1048576).toFixed(2)} MiB frames=${x.st.frames} lumaMin=${x.st.minYmin} lumaMax=${x.st.maxYmax} maxFrameRange=${x.st.maxRange}`);
+  for (const d of droppedBlank) console.log(`      dropped blank clip ${d.name}: frames=${d.frames} lumaMin=${d.minYmin} lumaMax=${d.maxYmax} maxFrameRange=${d.maxRange}`);
 }
 
 await browser.close();
-
-check(errors.length === 0, '0 console errors, 0 page errors, 0 failed requests', errors.join(' | '));
-console.log(`\n${receipts.filter((r) => r.ok).length}/${receipts.length} checks passed in ${Math.round((Date.now() - started) / 1000)} s`);
-if (problems.length) {
-  console.log('Problems:\n- ' + problems.join('\n- '));
-  process.exit(1);
-}
+writeFileSync(join(MEDIA, '..', 'smoke-results.json'), JSON.stringify({ at: 'run', fast: FAST, base: BASE, results }, null, 2));
+console.log(`\n${results.filter((r) => r.pass).length} passed, ${failures} failed`);
+process.exit(failures ? 1 : 0);

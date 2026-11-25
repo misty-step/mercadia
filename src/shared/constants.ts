@@ -9,12 +9,13 @@ import type {
   EventKind,
   MatchMode,
   MilestoneKey,
+  PactKind,
   ShopKind,
+  StudyKey,
+  UnitKind,
 } from './types';
 
-export const VERSION = '2.0.0';
-export const TICK_MS = 100;
-export const TICKS_PER_SEC = 10;
+export const VERSION = '3.0.0';
 
 /**
  * The four Houses. `color` is the primary, `dark` the deep trim, `wash` the translucent
@@ -50,11 +51,11 @@ export interface ShopDef {
   cost: number;
   price: number; // base (Fair) ticket
   unitCost: number; // supply cost per sale
-  serviceTicks: number;
+  serviceTicks: number; // service time: sets the per-turn throughput
   servers: number;
   queueCap: [number, number, number];
-  wage: number; // per payroll
-  rent: number; // per payroll
+  wage: number; // per turn is wage × PAYROLLS_PER_TURN
+  rent: number; // per turn is rent × PAYROLLS_PER_TURN
   stockMax: number;
   blurb: string;
 }
@@ -132,7 +133,7 @@ export interface EraDef {
   blurb: string;
 }
 
-/** The four escalating Eras of a dynasty. A match's `quarter` counter is its era (capped at IV). */
+/** The four escalating Eras of a dynasty. The era number (1..4) is derived from the turn. */
 export const ERAS: EraDef[] = [
   { n: 1, roman: 'I', name: 'Founding Charter', short: 'Founding', blurb: 'Claim your corners and found a steady trade.' },
   { n: 2, roman: 'II', name: 'Transit & Trade', short: 'Transit', blurb: 'Commuter and evening waves swell along the tramway.' },
@@ -140,7 +141,7 @@ export const ERAS: EraDef[] = [
   { n: 4, roman: 'IV', name: 'Golden Dynasty', short: 'Golden', blurb: 'Full district prosperity and the final Crown reckoning.' },
 ];
 export const ERA_COUNT = ERAS.length;
-/** The era a match clock is in: quarters past the fourth (Endless) stay in the Golden Dynasty. */
+/** Clamp an era number into I..IV (Endless stays in the Golden Dynasty). */
 export const eraOf = (quarter: number): number => (quarter < 1 ? 1 : quarter > ERA_COUNT ? ERA_COUNT : Math.floor(quarter));
 export const eraDef = (quarter: number): EraDef => ERAS[eraOf(quarter) - 1];
 /** "Era II" */
@@ -189,11 +190,12 @@ export interface CharterDef {
   promoCooldown: number; // × Promo Blitz cooldown
   supplies: number; // × supply cost
   autoPremium: boolean; // false: Auto-Restock carries no convenience premium
+  actions: number; // extra Actions per turn
 }
 
 const charter = (c: Pick<CharterDef, 'key' | 'name' | 'doctrine' | 'blurb' | 'pill'> & Partial<CharterDef>): CharterDef => ({
   quality: 1, upgrade: 1, civicCost: 1, civicPrestige: 1, adoptPrestige: 0, interest: 1, wages: 1, frontage: 1, tourist: 1,
-  promoCost: 1, promoCooldown: 1, supplies: 1, autoPremium: true, ...c,
+  promoCost: 1, promoCooldown: 1, supplies: 1, autoPremium: true, actions: 0, ...c,
 });
 
 export const CHARTERS: Record<CharterKey, CharterDef> = {
@@ -220,7 +222,7 @@ export const CHARTERS: Record<CharterKey, CharterDef> = {
   heralds: charter({
     key: 'heralds', name: 'Market Heralds', doctrine: 'Street promotion',
     blurb: 'Criers and flyers on retainer: Promo Blitzes come cheaper and sooner.',
-    pill: 'Promo −25% · Cooldown −25%', promoCost: 0.75, promoCooldown: 0.75,
+    pill: 'Promo −25% · +1 Action', promoCost: 0.75, promoCooldown: 0.75, actions: 1,
   }),
   provisioners: charter({
     key: 'provisioners', name: 'Harbor Provisioners', doctrine: 'Supply chain',
@@ -232,10 +234,6 @@ export const CHARTER_KEYS = Object.keys(CHARTERS) as CharterKey[];
 export const isCharter = (k: unknown): k is CharterKey => own(CHARTERS, k);
 /** Charters offered to each House at every Council. */
 export const CHARTER_OFFERS = 3;
-/** Councils convene at the close of these eras. */
-export const COUNCIL_ERAS = [1, 2, 3];
-/** Multiplayer Council countdown, in 100 ms beats (18 s). Solo waits for the player. */
-export const COUNCIL_BEATS = 180;
 
 /** A persona's taste for each charter (higher is preferred). */
 export const CHARTER_TASTE: Record<AiPersona, Record<CharterKey, number>> = {
@@ -284,64 +282,110 @@ export const STANCES = [
 ] as const;
 
 export const LEVEL_APPEAL = [1, 1.13, 1.26];
-export const LEVEL_SPEED = [1, 0.88, 0.78];
-/** Extra parallel servers at each level, for halls that seat several guests (arcade, cinema). */
-export const LEVEL_SERVERS = [0, 0, 1];
-export const HALL_SERVERS = 3; // a shop needs at least this many base servers to gain one
+export const LEVEL_CAP = [1, 1.25, 1.5]; // throughput multiplier per level
 export const UPGRADE_COST = [0.6, 0.9]; // × build cost for Lv2, Lv3
 export const SALVAGE = 0.6;
 export const BOOK_VALUE = 0.8; // share of invested capital counted in net worth
 
+// ── Turn economy ──
+export const START_CASH = 900;
+export const PAYROLLS_PER_TURN = 2;
+export const STANCE_COUNT = 4;
 export const PROMO_COST = 80;
-export const PROMO_TICKS = 200;
-export const PROMO_COOLDOWN = 400; // after the blitz ends
-export const PROMO_PULL = 2.4;
-export const PROMO_DESIRE = 1.35; // a running blitz also stirs up appetite for its trade
-
+export const PROMO_TURNS = 2; // the blitz covers the turn it is ordered and the next
+export const PROMO_COOLDOWN = 3; // turns after it ends
+export const PROMO_PULL = 2.0;
+export const PROMO_DESIRE = 1.25;
 export const LOAN_STEP = 400;
 export const LOAN_MAX = 1200;
-export const LOAN_RATE = 0.012; // per payroll
-export const PAYROLL_TICKS = 100;
-/** Interest a standing loan costs over one era, as a fraction (0.18 = 18%). */
-export const loanRatePerQuarter = (quarterTicks: number): number => LOAN_RATE * (quarterTicks / PAYROLL_TICKS);
-/** "18%/era" — the exact per-era rate shown on the Borrow button. */
-export const loanRateLabel = (quarterTicks: number): string =>
-  `${(Math.round(loanRatePerQuarter(quarterTicks) * 1000) / 10).toString()}%/era`;
+export const LOAN_RATE = 0.025; // per turn, on outstanding debt
+export const loanRateLabel = (mult = 1): string => `${(Math.round(LOAN_RATE * mult * 1000) / 10).toString()}% per turn`;
 export const AUTO_RESTOCK_PREMIUM = 1.15;
-export const AUTO_RESTOCK_AT = 0.2;
+export const AUTO_RESTOCK_AT = 0.3;
+export const RESTOCK_BATCH = 12; // units bought by one Barge delivery or Harbor contract
+export const CONTRACT_TURNS = 4;
+export const CONTRACT_DISCOUNT = 0.85;
+export const BARGE_DISCOUNT = 0.7; // delivered supplies cost 30% less
+export const ROUTE_FEE = 14;
+export const ROUTE_MOUTH = 7 + 10 * 12; // canal tile where a Barge enters from the harbor (x7,y10)
 
-export const START_CASH = 900;
+export const SHOP_START_STOCK = 0.5; // × stockMax, included in the build cost
 
-/**
- * Every mode plays the full Era I → IV arc. `quarters` is the number of eras (0 = endless) and
- * `quarterTicks` the length of one era: 150 s in Standard, 66 s in Blitz.
- */
-export const MODES: Record<MatchMode, { name: string; quarters: number; quarterTicks: number; slots: number[]; span: number; blurb: string }> = {
-  blitz: { name: 'Blitz', quarters: 4, quarterTicks: 660, slots: [0.14, 0.64], span: 0.22, blurb: '4 brisk eras · about 5 minutes' },
-  standard: { name: 'Standard', quarters: 4, quarterTicks: 1500, slots: [0.1, 0.42, 0.74], span: 0.18, blurb: '4 deliberate eras · about 10 minutes' },
-  endless: { name: 'Endless', quarters: 0, quarterTicks: 1500, slots: [0.1, 0.42, 0.74], span: 0.18, blurb: 'Play on past Era IV' },
+/** Actions per turn by era (Eras III–IV share seven). */
+export const ACTIONS_BY_ERA = [5, 6, 7, 7];
+export const UNIT_CAP = 6;
+export const START_PLAYERS_MIN = 1;
+export const MAX_PLAYERS = 4;
+
+/** Every mode plays the full Era I → IV arc. */
+export const MODES: Record<MatchMode, { name: string; eraTurns: number; blurb: string }> = {
+  blitz: { name: 'Blitz', eraTurns: 4, blurb: '4 brisk Eras · 16 turns' },
+  standard: { name: 'Standard', eraTurns: 8, blurb: '4 deliberate Eras · 32 turns' },
+  endless: { name: 'Endless', eraTurns: 8, blurb: 'Play on past Era IV' },
 };
-/** Solo speed controls (Pause is separate) and the multiplayer host's pace. */
-export const SOLO_SPEEDS = [0.5, 1, 2, 3];
-export const HOST_SPEEDS = [1, 1.5, 2];
-/** The one-line objective shown when a match begins. */
-export const OBJECTIVE = 'Lead your House across 4 Eras — highest Crown Index wins';
-export const FORECAST_LEAD = 0.05; // of a quarter
-export const TREND_PER_QUARTER = 4; // market-share samples kept per quarter (one per daypart)
-export const TREND_MAX = 96;
-/** Per-tick decay of a shop's lost-customer counters (half-life about 45 s). */
-export const LOST_DECAY = 0.9985;
-/** Ticks between rivalry headlines, so the Chronicle is punchy rather than noisy. */
-export const RIVALRY_QUIET = 150;
-/** Dispatches the Chronicle keeps (the HUD shows the latest three or four). */
-export const CHRONICLE_KEEP = 14;
-/** A lead change is news once the new leader is this many Crown points clear… */
+/** The one-line objective shown for the whole match. */
+export const OBJECTIVE = 'Highest Crown Index after Era IV wins';
+/** Dispatches the Chronicle keeps. */
+export const CHRONICLE_KEEP = 24;
+/** Market-share samples span this many resolved turns. */
+export const SHARE_WINDOW = 4;
+/** The Turn Delta drawer can browse this many recent summaries. */
+export const SUMMARY_KEEP = 4;
+/** A lead change is news once the new leader is this many Crown points clear. */
 export const LEAD_MARGIN = 3;
-/** …and at most once in this many ticks, checked every LEAD_CHECK ticks. */
-export const LEAD_QUIET = 120;
-export const LEAD_CHECK = 10;
-/** No lead-change dispatch before this tick (or a quarter of the era, if shorter). */
-export const LEAD_WARMUP = 300;
+/** Event forecasts print this many turns before the event starts. */
+export const FORECAST_TURNS = 2;
+
+export interface UnitDef {
+  kind: UnitKind;
+  name: string;
+  era: number;
+  cost: number;
+  upkeep: number;
+  move: number;
+  strength: number;
+  cohesion: number;
+  role: string;
+}
+export const UNITS: Record<UnitKind, UnitDef> = {
+  factor: { kind: 'factor', name: 'Factor', era: 1, cost: 90, upkeep: 6, move: 2, strength: 1, cohesion: 1, role: 'Extends your building reach' },
+  watch: { kind: 'watch', name: 'Watch Company', era: 1, cost: 140, upkeep: 12, move: 2, strength: 3, cohesion: 3, role: 'Guards lots and bridges, issues Contests, blockades rival frontage' },
+  barge: { kind: 'barge', name: 'Barge', era: 2, cost: 160, upkeep: 8, move: 4, strength: 1, cohesion: 1, role: 'Runs trade routes from the Harbor Pier to canal-front shops' },
+};
+export const UNIT_KINDS: UnitKind[] = ['factor', 'watch', 'barge'];
+export const BLOCKADE_MULT = 0.5;
+export const DEFEND_BONUS = 1;
+
+export interface PactDef {
+  kind: PactKind;
+  name: string;
+  turns: number;
+  effect: string;
+}
+export const PACTS: Record<PactKind, PactDef> = {
+  truce: { kind: 'truce', name: 'Truce', turns: 6, effect: 'No Contests or blockades between the two Houses' },
+  trade: { kind: 'trade', name: 'Trade Pact', turns: 8, effect: '+10% footfall for adjacent shops · Barge route fees +25%' },
+  rent: { kind: 'rent', name: 'Rent Accord', turns: 8, effect: 'No same-desire shops within 2 tiles of each other' },
+};
+export const PACT_KINDS: PactKind[] = ['truce', 'trade', 'rent'];
+
+export interface StudyDef {
+  key: StudyKey;
+  name: string;
+  points: number;
+  era: number;
+  perk: string;
+}
+export const STUDIES: Record<StudyKey, StudyDef> = {
+  roasting: { key: 'roasting', name: 'Fine Roasting', points: 3, era: 1, perk: 'Roastery and Bistro quality +10%' },
+  drill: { key: 'drill', name: 'Watch Drill', points: 3, era: 1, perk: 'Watch Companies +1 Cohesion' },
+  hydraulics: { key: 'hydraulics', name: 'Canal Hydraulics', points: 4, era: 2, perk: 'Barges move 5 tiles · route fee +50%' },
+  signalling: { key: 'signalling', name: 'Tram Signalling', points: 4, era: 2, perk: 'Tram Stops cost 20% less and deliver +2 riders' },
+  facades: { key: 'facades', name: 'Gilded Façades', points: 5, era: 3, perk: 'Level 3 upgrades cost 20% less · +2 Prestige per Level 3 shop' },
+  ledger: { key: 'ledger', name: 'Ledger Reform', points: 5, era: 3, perk: 'Wages and rent −10%' },
+};
+export const STUDY_KEYS = Object.keys(STUDIES) as StudyKey[];
+export const STUDY_COST = 60;
 
 export const DAYPART_NAMES = ['Morning', 'Noon', 'Golden Hour', 'Twilight'] as const;
 
@@ -360,31 +404,28 @@ export interface ArchDef {
   budget: [number, number];
   sens: number; // price sensitivity exponent
   qlove: number; // quality exponent
-  patience: [number, number]; // ticks
-  wants: [number, number];
-  speed: number; // tiles per tick
   desires: Record<Desire, number>;
 }
 
 export const ARCHS: Record<Archetype, ArchDef> = {
   commuter: {
-    name: 'Commuter', budget: [14, 36], sens: 2.2, qlove: 0.5, patience: [70, 110], wants: [1, 2], speed: 0.125,
+    name: 'Commuter', budget: [14, 36], sens: 2.2, qlove: 0.5,
     desires: { coffee: 6, dining: 1.6, leisure: 1, fashion: 0.3, culture: 0.4, nightlife: 0.6 },
   },
   local: {
-    name: 'Local', budget: [30, 70], sens: 1.7, qlove: 0.9, patience: [100, 160], wants: [1, 2], speed: 0.1,
+    name: 'Local', budget: [30, 70], sens: 1.7, qlove: 0.9, 
     desires: { coffee: 2.6, dining: 2, leisure: 2, fashion: 1.0, culture: 1.5, nightlife: 1.2 },
   },
   foodie: {
-    name: 'Foodie', budget: [50, 120], sens: 1.2, qlove: 1.3, patience: [130, 200], wants: [1, 3], speed: 0.095,
+    name: 'Foodie', budget: [50, 120], sens: 1.2, qlove: 1.3, 
     desires: { coffee: 3, dining: 4, leisure: 0.5, fashion: 0.5, culture: 1, nightlife: 2 },
   },
   tourist: {
-    name: 'Tourist', budget: [80, 200], sens: 0.7, qlove: 1.2, patience: [110, 180], wants: [2, 3], speed: 0.085,
+    name: 'Tourist', budget: [80, 200], sens: 0.7, qlove: 1.2, 
     desires: { coffee: 1.6, dining: 2, leisure: 1.5, fashion: 2.6, culture: 2, nightlife: 1.5 },
   },
   nightowl: {
-    name: 'Night Owl', budget: [40, 110], sens: 1.4, qlove: 0.9, patience: [90, 150], wants: [1, 3], speed: 0.105,
+    name: 'Night Owl', budget: [40, 110], sens: 1.4, qlove: 0.9, 
     desires: { coffee: 0.5, dining: 1.5, leisure: 2.5, fashion: 0.3, culture: 2.5, nightlife: 5 },
   },
 };
@@ -397,9 +438,6 @@ export const ARCH_MIX: [number, number, number, number, number][] = [
   [0.08, 0.22, 0.18, 0.16, 0.36],
 ];
 
-/** Target street population per daypart. */
-export const POP_TARGET = [78, 92, 88, 98];
-export const POP_MAX = 120;
 
 export interface EventDef {
   kind: EventKind;
@@ -489,10 +527,6 @@ export const AURA_MAX = 0.45;
 export const TRANSIT_PULL = 1.1;
 export const TRANSIT_RADIUS = 2;
 
-/** Civic prestige earned through use rather than construction. */
-export const PRESTIGE_LINGER = 0.08; // per citizen who lingers in a park or plaza
-export const PRESTIGE_TRAM = 0.25; // per tram that calls at a player's stop
-export const PRESTIGE_AURA_SALE = 0.03; // per sale made inside a park or plaza aura
 
 export const CROWN = { netWorth: 0.1, share: 3, prestige: 4 };
 
@@ -521,3 +555,8 @@ export const LAST_NAMES = [
   'Aldaia', 'Bellver', 'Casals', 'Dorado', 'Esteve', 'Ferrant', 'Garriga', 'Hortal', 'Isern', 'Julivert',
   'Llobet', 'Marés', 'Noguera', 'Oliva', 'Pruna', 'Quintana', 'Riera', 'Soler', 'Tarrés', 'Vidal',
 ];
+
+/** Shown when a stored room predates the turn engine (a deployed v2 real-time room). */
+export const LEGACY_ROOM_MESSAGE = 'This room is from an older MERCADIA version \u2014 create a new room to play.';
+/** Shown when a persisted match started under an older ruleset and so cannot be exported as the current version. */
+export const INCOMPATIBLE_RULESET_MESSAGE = 'This match started under an older ruleset and cannot be exported as version 5.';

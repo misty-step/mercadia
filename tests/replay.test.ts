@@ -1,0 +1,206 @@
+import { describe, expect, it } from 'vitest';
+import { SUMMARY_KEEP } from '../src/shared/constants';
+import { createGame, stateHash } from '../src/shared/game';
+import { LocalMatch } from '../src/shared/local';
+import { MATCH_EXPORT_VERSION, assertExportVersion, replayMatch, replayMatchExport, type MatchExport } from '../src/shared/replay';
+import { canonicalOrders, resolveTurn } from '../src/shared/resolve';
+import type { MatchConfig, Order } from '../src/shared/types';
+import { config, draftRng, genDraft } from './helpers';
+
+function playLocal(cfg: MatchConfig, humanSeed?: number): LocalMatch {
+  const m = new LocalMatch(cfg);
+  const rngs = cfg.players.map((_, i) => draftRng(humanSeed ?? 0, `p${i}`));
+  const all: string[] = [];
+  while (m.game.phase !== 'ended') {
+    cfg.players.forEach((p, i) => {
+      if (p.kind === 'human') m.setDraft(i, humanSeed === undefined ? [] : genDraft(m.game, i, rngs[i], 7));
+    });
+    const s = m.endTurn();
+    all.push(s.hash);
+  }
+  return m;
+}
+
+describe('replay equivalence', () => {
+  it.each([
+    ['full AI-vs-AI standard match', config(61, 'standard', ['ai', 'ai', 'ai', 'ai']), undefined],
+    ['full AI-vs-AI blitz match', config(62, 'blitz', ['ai', 'ai', 'ai']), undefined],
+    ['solo with generated human orders', config(63, 'standard', ['human', 'ai', 'ai', 'ai']), 63],
+    ['hotseat with generated human orders', config(64, 'blitz', ['human', 'human', 'ai']), 64],
+  ] as const)('%s: replay from config and log reproduces every hash, summary and the winner', (_name, cfg, humanSeed) => {
+    const m = playLocal(cfg, humanSeed);
+    const exp: MatchExport = JSON.parse(JSON.stringify(m.export())); // survives the wire
+    const rep = replayMatch(exp.config, exp.log);
+    expect(rep.hashes).toEqual(exp.hashes);
+    expect(rep.hashes).toHaveLength(m.game.mode === 'blitz' ? 16 : 32);
+    expect(stateHash(rep.game)).toBe(m.hash());
+    expect(rep.game.winner).toBe(m.game.winner);
+    expect(rep.game.standings).toEqual(m.game.standings);
+    expect(rep.summaries.slice(-SUMMARY_KEEP)).toEqual(m.summaries);
+    expect(rep.game.phase).toBe('ended');
+  });
+
+  it('the log is the canonical committed orders: replay does not need the AI at all', () => {
+    const m = playLocal(config(65, 'blitz', ['ai', 'ai']));
+    // An AI-free replay (the resolver is fed the log; planAI is never consulted for committed orders).
+    let g = createGame(m.config);
+    m.log.forEach((orders, i) => {
+      g = resolveTurn(g, orders).game;
+      expect(stateHash(g)).toBe(m.hashes[i]);
+    });
+  });
+
+  it('a different log diverges', () => {
+    const m = playLocal(config(66, 'blitz', ['human', 'ai']), 66);
+    const tampered = JSON.parse(JSON.stringify(m.log)) as Order[][][];
+    tampered[0][0] = [{ t: 'borrow' }];
+    const rep = replayMatch(m.config, tampered);
+    expect(rep.hashes[0]).not.toBe(m.hashes[0]);
+  });
+
+  it('state hash and summary are the same through two independent runs of one log', () => {
+    const m = playLocal(config(67, 'standard', ['human', 'ai', 'ai']), 67);
+    const a = replayMatch(m.config, m.log);
+    const b = replayMatch(JSON.parse(JSON.stringify(m.config)), JSON.parse(JSON.stringify(m.log)));
+    expect(a.hashes).toEqual(b.hashes);
+    expect(a.summaries).toEqual(b.summaries);
+  });
+});
+
+describe('LocalMatch (solo and hotseat host)', () => {
+  it('End Turn resolves exactly one turn, and drafts are cleared for the next', () => {
+    const m = new LocalMatch(config(68, 'standard', ['human', 'ai']));
+    const h0 = m.hash();
+    m.setDraft(0, [{ t: 'borrow' }]);
+    expect(m.hash()).toBe(h0); // planning does not change the world
+    const s = m.endTurn();
+    expect(s.from).toBe(1);
+    expect(m.game.turn).toBe(2);
+    expect(m.drafts[0]).toEqual([]);
+    expect(m.log).toHaveLength(1);
+    expect(m.summary).toBe(s);
+    expect(m.game.players[0].debt).toBeGreaterThanOrEqual(400);
+  });
+
+  it('keeps only the recent summaries and can continue in Endless once finished', () => {
+    const m = playLocal(config(69, 'blitz', ['ai', 'ai']));
+    expect(m.summaries).toHaveLength(SUMMARY_KEEP);
+    expect(m.continueEndless()).toBe(true);
+    expect(m.game.phase).toBe('planning');
+    m.endTurn();
+    expect(m.game.turn).toBe(18);
+    expect(new LocalMatch(config(1, 'blitz', ['ai', 'ai'])).continueEndless()).toBe(false);
+  });
+
+  it('local and server hosts produce identical state for identical inputs', () => {
+    const cfg = config(70, 'blitz', ['human', 'ai', 'ai']);
+    const m = new LocalMatch(cfg);
+    let g = createGame(cfg);
+    const rng1 = draftRng(70, 'x');
+    const rng2 = draftRng(70, 'x');
+    for (let t = 0; t < 16; t++) {
+      m.setDraft(0, genDraft(m.game, 0, rng1, 6));
+      m.endTurn();
+      g = resolveTurn(g, canonicalOrders(g, [genDraft(g, 0, rng2, 6)])).game;
+      expect(m.hash()).toBe(stateHash(g));
+    }
+  });
+});
+
+describe('Continue in Endless is part of the canonical record', () => {
+  for (const [name, cfg, humanSeed] of [
+    ['blitz solo with generated orders', config(71, 'blitz', ['human', 'ai', 'ai']), 71],
+    ['standard AI-only', config(72, 'standard', ['ai', 'ai', 'ai', 'ai']), undefined],
+  ] as const) {
+    it(`${name}: a post-Endless export replays every turn bit-for-bit`, () => {
+      const m = playLocal(cfg, humanSeed);
+      const finished: MatchExport = JSON.parse(JSON.stringify(m.export()));
+      expect(finished.endlessAt).toBeUndefined(); // a plain finished export is unchanged
+      expect(replayMatch(finished.config, finished.log, finished.endlessAt).hashes).toEqual(finished.hashes);
+
+      const n = m.log.length;
+      expect(m.continueEndless()).toBe(true);
+      const rngs = cfg.players.map((_, i) => draftRng(humanSeed ?? 0, `endless${i}`));
+      for (let k = 0; k < 3; k++) {
+        cfg.players.forEach((p, i) => {
+          if (p.kind === 'human') m.setDraft(i, humanSeed === undefined ? [] : genDraft(m.game, i, rngs[i], 7));
+        });
+        m.endTurn();
+      }
+      const exp: MatchExport = JSON.parse(JSON.stringify(m.export()));
+      expect(exp.version).toBe(MATCH_EXPORT_VERSION);
+      expect(exp.version).toBe(5);
+      expect(exp.endlessAt).toEqual([n]);
+      expect(exp.log).toHaveLength(n + 3);
+      const rep = replayMatch(exp.config, exp.log, exp.endlessAt);
+      expect(rep.hashes).toEqual(exp.hashes);
+      expect(rep.hashes).toHaveLength(n + 3);
+      expect(stateHash(rep.game)).toBe(m.hash());
+      expect(rep.game.phase).toBe('planning');
+      expect(rep.game.endless).toBe(true);
+      expect(rep.game.turn).toBe(m.game.turn);
+      expect(rep.summaries.slice(-SUMMARY_KEEP)).toEqual(m.summaries);
+    });
+  }
+
+  it('without the recorded continuation the post-Endless batch cannot replay (the old failure)', () => {
+    const m = playLocal(config(73, 'blitz', ['ai', 'ai']));
+    m.continueEndless();
+    m.endTurn();
+    expect(() => replayMatch(m.config, m.log)).toThrow(/over/);
+    expect(replayMatch(m.config, m.log, m.endlessAt).hashes).toEqual(m.hashes);
+  });
+
+  it('a continuation recorded on a match that is still running is rejected', () => {
+    const m = new LocalMatch(config(74, 'blitz', ['ai', 'ai']));
+    m.endTurn();
+    expect(() => replayMatch(m.config, m.log, [1])).toThrow(/not over/);
+  });
+
+  it('a continuation right at the end of the log (no further turn played) still lands in planning', () => {
+    const m = playLocal(config(75, 'blitz', ['ai', 'ai']));
+    m.continueEndless();
+    const rep = replayMatch(m.config, m.log, m.export().endlessAt);
+    expect(rep.game.phase).toBe('planning');
+    expect(stateHash(rep.game)).toBe(m.hash());
+  });
+});
+
+describe('export version (MATCH_EXPORT_VERSION = 5)', () => {
+  const standardExport = (): MatchExport => JSON.parse(JSON.stringify(playLocal(config(81, 'standard', ['ai', 'ai', 'ai', 'ai'])).export()));
+
+  it('current exports are version 5 and round-trip bit-for-bit (Standard, Blitz, Endless with endlessAt)', () => {
+    expect(MATCH_EXPORT_VERSION).toBe(5);
+    const std = standardExport();
+    expect(std.version).toBe(5);
+    expect(replayMatchExport(std).hashes).toEqual(std.hashes);
+    const blitz: MatchExport = JSON.parse(JSON.stringify(playLocal(config(82, 'blitz', ['ai', 'ai', 'ai'])).export()));
+    expect(blitz.version).toBe(5);
+    expect(replayMatchExport(blitz).hashes).toEqual(blitz.hashes);
+    const m = playLocal(config(83, 'blitz', ['ai', 'ai']));
+    m.continueEndless();
+    m.endTurn();
+    const endless: MatchExport = JSON.parse(JSON.stringify(m.export()));
+    expect(endless.version).toBe(5);
+    expect(endless.endlessAt).toHaveLength(1);
+    const rep = replayMatchExport(endless);
+    expect(rep.hashes).toEqual(endless.hashes);
+    expect(stateHash(rep.game)).toBe(m.hash());
+  });
+
+  it.each([3, 4, 2, 6, undefined, '5'])('version %s fails fast with an explicit incompatible-version error, never a silent hash mismatch', (v) => {
+    const exp = { ...standardExport(), version: v } as unknown as MatchExport;
+    expect(() => replayMatchExport(exp)).toThrow(/Incompatible match export version .*replays version 5 exports only \(ruleset changed/);
+    expect(() => assertExportVersion(exp)).toThrow(/Incompatible match export version/);
+  });
+
+  it.each([3, 4])('a legacy version %s fixture (an export file as an older build wrote it) is rejected with the explicit version in the message', (v) => {
+    // The Pass 3 (version 4) initial world: seat-keyed start tiles, Turn 1 hash 34928f5d384bd1a0 for seed 7 (4 seats).
+    const legacy = { version: v, config: config(7, 'standard', ['human', 'ai', 'ai', 'ai']), log: [[[], [], [], []]], hashes: ['34928f5d384bd1a0'] } as unknown as MatchExport;
+    expect(() => replayMatchExport(legacy)).toThrow(new RegExp(`Incompatible match export version ${v}: this build replays version 5 exports only`));
+  });
+
+  it('the version 4 -> 5 bump is real: the current initial world differs from the Pass 3 (version 4) one', () => {
+    expect(stateHash(createGame(config(7, 'standard', ['human', 'ai', 'ai', 'ai'])))).not.toBe('34928f5d384bd1a0');
+  });
+});

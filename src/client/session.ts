@@ -1,284 +1,425 @@
-// A Session is whatever is feeding the city on screen: the attract-mode district behind the
-// title, a solo match simulated in this browser, or a multiplayer room on the server.
-// All three fill the same CityView through the same snapshot path.
-import { advance } from '../shared/ai';
-import { AI_ORDER, AI_PERSONAS } from '../shared/constants';
-import { CityView, SnapEncoder, type ClientMsg, type LobbyView, type ServerMsg } from '../shared/protocol';
-import { applyCommand, closeCouncil, continueEndless, createGame } from '../shared/sim';
-import type { Command, Fx, GameState, MatchMode, PlayerSetup } from '../shared/types';
-import { HEARTBEAT_MS, SeatToken, browserStores } from './seat-token';
+// Session: the client's single source of truth for a match (solo, hotseat or network room).
+//
+// Solo and hotseat wrap LocalMatch (the same pure core the room authority runs). A room session
+// is a WebSocket client around RoomClient (session-core.ts), which reconciles every authority
+// message by turn, revision and readiness epoch. A room session never computes a turn locally.
+import { actionsFor, createGame, stateHash } from '../shared/game';
+import { LocalMatch } from '../shared/local';
+import { parseDraft, pruneDraft, queueOrder, readyBlock, reorderDraft, undoOrder } from '../shared/orders';
+import { INCOMPATIBLE_RULESET_MESSAGE, LEGACY_ROOM_MESSAGE } from '../shared/constants';
+import type { ClientMsg, SeatStatus, ServerMsg } from '../shared/protocol';
+import type { MatchExport } from '../shared/replay';
+import type { Game, MatchMode, MatchConfig, Order } from '../shared/types';
+import type { EndTurnState, Session, SessionOptions, SessionView, StatusLine } from './contracts';
+import { RoomClient, type DraftCache, type Notice } from './session-core';
+import { HEARTBEAT_MS, SeatToken, browserStores, type KV } from './seat-token';
 
-export interface Session {
-  readonly kind: 'attract' | 'solo' | 'multi';
-  readonly view: CityView;
-  /** Player index this client controls, or -1. */
-  me: number;
-  speed: number;
-  paused: boolean;
-  /** Advance local time and return feedback events that arrived since the last call. */
-  update(now: number): Fx[];
-  /** Interpolation factor between the last two snapshots. */
-  alpha(now: number): number;
-  command(cmd: Command): void;
-  setSpeed(v: number): void;
-  togglePause(): void;
-  rematch(): void;
-  endless(): void;
-  /** Solo: leave the Era Council once a charter is chosen. Multiplayer: the room decides. */
-  advanceCouncil(): void;
-  dispose(): void;
-  onReject: (err: string) => void;
-  /** A command of ours went through (solo: it was applied; multiplayer: it was sent). */
-  onAccept: () => void;
+const NOTICE_TTL_MS = 20000;
+const PING_MS = 15000;
+const DEAD_AFTER_MS = 40000;
+const BACKOFF_FIRST_MS = 500;
+const BACKOFF_MAX_MS = 8000;
+
+let placeholder: Game | null = null;
+/** The board shown before a room's match starts (the lobby has no world yet). */
+function placeholderGame(): Game {
+  placeholder ??= createGame({
+    seed: 1,
+    mode: 'standard',
+    players: [
+      { name: 'You', house: 0, kind: 'human', persona: null },
+      { name: 'Rival', house: 1, kind: 'ai', persona: 'vesper' },
+    ],
+  });
+  return placeholder;
 }
 
-const STEP_MS = 100;
+const nullFn = (): void => {};
 
-/** Solo and attract mode: the simulation runs right here. */
-export class LocalSession implements Session {
-  readonly view = new CityView();
-  me: number;
-  speed = 1;
-  paused = false;
-  onReject: (err: string) => void = () => undefined;
-  onAccept: () => void = () => undefined;
-  state: GameState;
-  private enc = new SnapEncoder();
-  private acc = 0;
-  private lastNow = 0;
-  private snapAt = 0;
-  private interval = STEP_MS;
-  private pending: Fx[] = [];
-  private matchNo = 0;
+// ───────────────────────────── Shared plumbing ─────────────────────────────
 
-  constructor(
-    readonly kind: 'attract' | 'solo',
-    private setups: PlayerSetup[],
-    private mode: MatchMode,
-    private seed: number,
-  ) {
-    this.me = kind === 'solo' ? 0 : -1;
-    this.state = this.fresh();
+abstract class Base implements Session {
+  protected listeners = new Set<(v: SessionView) => void>();
+  protected current!: SessionView;
+
+  get view(): SessionView {
+    return this.current;
   }
 
-  private fresh(): GameState {
-    const state = createGame({ seed: (this.seed + this.matchNo * 7919) >>> 0, mode: this.mode, players: this.setups });
-    this.enc.reset();
-    this.view.apply(this.enc.encode(state, true, this.speed));
-    this.acc = 0;
-    return state;
+  subscribe(fn: (v: SessionView) => void): () => void {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
   }
 
-  private push(now: number): void {
-    const snap = this.enc.encode(this.state, false, this.speed);
-    this.state.fx = [];
-    const fx = this.view.apply(snap);
-    for (const f of fx) this.pending.push(f);
-    // Snapshots carry the ledgers whenever money moves. The simulation is right here, so the
-    // solo Ledger drawer also reads them fresh on every push: it always reconciles with cash in hand.
-    this.view.ledgers = this.state.players.map((p) => ({ cur: p.ledger, last: p.lastLedger, total: p.totalLedger }));
-    this.interval = Math.min(260, Math.max(30, now - this.snapAt));
-    this.snapAt = now;
+  protected abstract build(): SessionView;
+
+  /** Rebuild the immutable view snapshot and tell subscribers. */
+  protected emit(): void {
+    this.current = this.build();
+    for (const fn of [...this.listeners]) fn(this.current);
   }
 
-  update(now: number): Fx[] {
-    const dt = this.lastNow ? Math.min(250, now - this.lastNow) : 0;
-    this.lastNow = now;
-    if (!this.paused && this.state.phase === 'playing') {
-      this.acc += (dt * this.speed) / STEP_MS;
-      let steps = Math.min(8, Math.floor(this.acc));
-      if (steps > 0) {
-        this.acc -= steps;
-        if (this.acc > 2) this.acc = 0; // tab was asleep: do not fast-forward
-        while (steps-- > 0) advance(this.state);
-        this.push(now);
-      }
+  abstract queue(order: Order): { ok: true } | { ok: false; reason: string };
+  abstract undo(index: number): void;
+  abstract clear(): void;
+  abstract reorder(from: number, to: number): void;
+  abstract endTurn(): void;
+  abstract beginTurn(): void;
+  abstract continueEndless(): void;
+  abstract rematch(): void;
+  abstract leave(): void;
+  abstract exportMatch(): MatchExport | null;
+  abstract exportMatchAsync(): Promise<MatchExport | null>;
+  get exportNotice(): string {
+    return '';
+  }
+  abstract lobby: Session['lobby'];
+}
+
+const noLobby: Session['lobby'] = {
+  setName: nullFn,
+  setHouse: nullFn,
+  setSeatAi: nullFn,
+  setAiFill: nullFn,
+  setMode: nullFn,
+  start: nullFn,
+};
+
+// ───────────────────────────── Solo and hotseat ─────────────────────────────
+
+class LocalSession extends Base {
+  lobby = noLobby;
+  private match: LocalMatch;
+  private humans: number[];
+  /** Index into `humans` of the seat planning now. */
+  private cur = 0;
+  private handoff: number | null = null;
+  /** Hotseat: player index of the first seat of the next turn while the table reads the Turn Delta. */
+  private tableDelta: number | null = null;
+  private resolutions = 0;
+  private notices: Notice[] = [];
+  private noticeN = 0;
+  private pruned = '';
+  private revs: number[];
+
+  constructor(private mode: 'solo' | 'hotseat', private config: MatchConfig) {
+    super();
+    this.match = new LocalMatch(config);
+    this.humans = this.pickHumans();
+    this.revs = this.match.game.players.map(() => 0);
+    this.emit();
+  }
+
+  private pickHumans(): number[] {
+    const all = this.match.game.players.flatMap((p, i) => (p.kind === 'human' ? [i] : []));
+    if (all.length === 0) return [0];
+    return this.mode === 'solo' ? [all[0]] : all;
+  }
+
+  private get seat(): number {
+    return this.handoff ?? this.humans[this.cur];
+  }
+
+  private note(text: string): void {
+    this.notices.push({ id: ++this.noticeN, text, tone: 'error' });
+    while (this.notices.length > 6) this.notices.shift();
+  }
+
+  private seatStatuses(): SeatStatus[] {
+    return this.match.game.players.map((p, i) => {
+      const hi = this.humans.indexOf(i);
+      const planning = this.handoff !== null ? this.humans.indexOf(this.handoff) : this.cur;
+      // Hotseat: seats that have already planned this round read as done; AI seats always do.
+      const ready = p.kind === 'ai' || (this.humans.length > 1 && hi >= 0 && hi < planning);
+      return { kind: p.kind, name: p.name, house: p.house, ready, connected: true };
+    });
+  }
+
+  protected build(): SessionView {
+    const g = this.match.game;
+    const seat = this.seat;
+    const hidden = this.handoff !== null || this.tableDelta !== null;
+    const ended = g.phase === 'ended';
+    const draft = hidden ? [] : this.match.drafts[seat] ?? [];
+    const plan = hidden || ended ? null : pruneDraft(g, seat, draft).plan;
+    const player = g.players[seat];
+    let status: StatusLine;
+    let endTurn: EndTurnState;
+    if (ended) {
+      status = { text: 'Match over', tone: 'info' };
+      endTurn = { label: 'Match over', enabled: false, kind: 'end' };
+    } else if (this.tableDelta !== null) {
+      // The table reads the Turn Delta first; no seat's plan is on screen.
+      const next = g.players[this.tableDelta];
+      status = { text: `Turn ${g.turn - 1} \u2192 ${g.turn} resolved \u00b7 Pass to ${next.name} next`, tone: 'info' };
+      endTurn = { label: `Pass to ${next.name}`, enabled: true, kind: 'end' };
+    } else if (hidden) {
+      status = { text: `Pass to ${player.name}`, tone: 'info' };
+      endTurn = { label: `Pass to ${player.name}`, enabled: false, kind: 'end' };
+    } else {
+      status = { text: 'Your turn', tone: 'info' };
+      const block = readyBlock(g, seat, draft);
+      endTurn = block ? { label: block, enabled: false, kind: 'end' } : { label: 'End Turn', enabled: true, kind: 'end' };
     }
-    if (!this.pending.length) return this.pending;
-    const out = this.pending;
-    this.pending = [];
-    return out;
+    const rev = hidden ? 0 : this.revs[seat];
+    return {
+      mode: this.mode,
+      game: g,
+      hash: this.match.hash(),
+      summary: this.match.summary,
+      summaries: this.match.summaries.slice(),
+      resolutions: this.resolutions,
+      seat,
+      draft: draft.slice(),
+      revision: rev,
+      ackedRevision: rev,
+      plan,
+      actions: plan ? { used: plan.actionsMax - plan.actions, max: plan.actionsMax } : { used: 0, max: hidden ? 0 : actionsFor(g, player) },
+      projectedCash: plan ? plan.cash : player.cash,
+      ready: false,
+      status,
+      endTurn,
+      seats: this.seatStatuses(),
+      notices: this.notices.slice(),
+      pruned: this.pruned,
+      handoff: this.handoff === null ? null : { player: this.handoff },
+      tableDelta: this.tableDelta === null ? null : { next: this.tableDelta },
+      roomCode: '',
+      lobby: null,
+      host: false,
+      ended,
+    };
   }
 
-  alpha(now: number): number {
-    if (this.paused || this.state.phase !== 'playing') return 1;
-    return Math.min(1, Math.max(0, (now - this.snapAt) / this.interval));
+  private editable(): boolean {
+    return this.handoff === null && this.tableDelta === null && this.match.game.phase !== 'ended';
   }
 
-  command(cmd: Command): void {
-    if (this.me < 0) return;
-    const res = applyCommand(this.state, this.me, cmd);
-    if (!res.ok) {
-      this.onReject(res.err ?? 'Rejected');
+  private setDraft(orders: Order[]): void {
+    const seat = this.seat;
+    this.match.setDraft(seat, orders);
+    this.revs[seat]++;
+  }
+
+  queue(order: Order): { ok: true } | { ok: false; reason: string } {
+    if (!this.editable()) return { ok: false, reason: this.handoff !== null || this.tableDelta !== null ? 'Begin the turn first' : 'The match is over' };
+    const r = queueOrder(this.match.game, this.seat, this.match.drafts[this.seat], order);
+    if (!r.ok) return r;
+    this.pruned = '';
+    this.setDraft(r.draft);
+    this.emit();
+    return { ok: true };
+  }
+
+  undo(index: number): void {
+    if (!this.editable()) return;
+    const draft = this.match.drafts[this.seat];
+    if (index < 0 || index >= draft.length) return;
+    const r = undoOrder(this.match.game, this.seat, draft, index);
+    const n = r.removed.length;
+    this.pruned = n === 0 ? '' : `Removed ${n} dependent order${n === 1 ? '' : 's'}`;
+    this.setDraft(r.kept);
+    this.emit();
+  }
+
+  clear(): void {
+    if (!this.editable() || this.match.drafts[this.seat].length === 0) return;
+    this.pruned = '';
+    this.setDraft([]);
+    this.emit();
+  }
+
+  reorder(from: number, to: number): void {
+    if (!this.editable()) return;
+    const draft = this.match.drafts[this.seat];
+    if (from === to || from < 0 || from >= draft.length) return;
+    const r = reorderDraft(this.match.game, this.seat, draft, from, to);
+    if (r.removed.length > 0) {
+      this.note('Cannot reorder: later orders depend on this one');
+      this.emit();
       return;
     }
-    this.onAccept();
-    // Show the result at once, even while paused.
-    this.push(performance.now());
+    this.pruned = '';
+    this.setDraft(r.kept);
+    this.emit();
   }
 
-  setSpeed(v: number): void {
-    this.speed = v;
-    this.paused = false;
-  }
-
-  togglePause(): void {
-    this.paused = !this.paused;
-  }
-
-  /**
-   * Run the simulation forward at once (smoke checks and screenshots). Deterministic: an Era
-   * Council met on the way is closed with whatever is chosen (the steward's pick otherwise) and
-   * costs no ticks. With `hold`, the warp stops as a Council opens so it can be inspected.
-   * Returns the number of ticks actually advanced.
-   */
-  warp(ticks: number, hold = false): number {
-    let done = 0;
-    while (done < ticks && this.state.phase !== 'ended') {
-      if (this.state.phase === 'council') {
-        if (hold) break;
-        closeCouncil(this.state);
-        this.push(performance.now());
-        continue;
-      }
-      advance(this.state);
-      done++;
-      if (done % 20 === 0) this.push(performance.now());
-    }
-    this.push(performance.now());
-    return done;
-  }
-
-  advanceCouncil(): void {
-    const c = this.state.council;
-    if (this.state.phase !== 'council' || !c) return;
-    if (this.me >= 0 && c.picks[this.me] == null) {
-      this.onReject('Choose a Dynasty Charter first');
+  endTurn(): void {
+    const g = this.match.game;
+    if (g.phase === 'ended' || this.handoff !== null) return;
+    if (this.tableDelta !== null) {
+      // The table has read the Turn Delta: now cover the screen for the first seat's private planning.
+      this.handoff = this.tableDelta;
+      this.tableDelta = null;
+      this.emit();
       return;
     }
-    closeCouncil(this.state);
-    this.push(performance.now());
+    if (readyBlock(g, this.seat, this.match.drafts[this.seat])) return;
+    this.pruned = '';
+    if (this.cur < this.humans.length - 1) {
+      // Hotseat: pass the device to the next human seat; this seat's draft stays hidden.
+      this.cur++;
+      this.handoff = this.humans[this.cur];
+    } else {
+      this.match.endTurn(); // resolves exactly once
+      this.resolutions++;
+      this.revs = this.match.game.players.map(() => 0);
+      this.cur = 0;
+      this.handoff = null;
+      this.tableDelta = this.humans.length > 1 && this.match.game.phase !== 'ended' ? this.humans[0] : null;
+    }
+    this.emit();
+  }
+
+  beginTurn(): void {
+    if (this.handoff === null) return;
+    this.handoff = null;
+    this.emit();
+  }
+
+  continueEndless(): void {
+    if (!this.match.continueEndless()) return;
+    this.cur = 0;
+    this.tableDelta = null;
+    this.handoff = this.humans.length > 1 ? this.humans[0] : null;
+    this.emit();
   }
 
   rematch(): void {
-    this.matchNo++;
-    this.paused = false;
-    this.state = this.fresh();
+    this.config = { ...this.config, seed: (this.config.seed + 7919) >>> 0 };
+    this.match = new LocalMatch(this.config);
+    this.humans = this.pickHumans();
+    this.revs = this.match.game.players.map(() => 0);
+    this.cur = 0;
+    this.handoff = null;
+    this.tableDelta = null;
+    this.pruned = '';
+    this.notices = [];
+    this.emit();
   }
 
-  endless(): void {
-    if (continueEndless(this.state)) {
-      this.enc.reset();
-      this.view.apply(this.enc.encode(this.state, true, this.speed));
-      this.push(performance.now());
-    }
+  leave(): void {
+    this.listeners.clear();
   }
 
-  dispose(): void {
-    this.paused = true;
+  exportMatch(): MatchExport | null {
+    return this.match.log.length > 0 ? this.match.export() : null;
+  }
+
+  async exportMatchAsync(): Promise<MatchExport | null> {
+    return this.exportMatch();
   }
 }
 
-/** One human against 1–3 AI tycoons. */
-export function soloSetups(name: string, rivals: number): PlayerSetup[] {
-  const out: PlayerSetup[] = [{ name: name || 'You', house: 0, kind: 'human' }];
-  for (let i = 0; i < Math.max(1, Math.min(3, rivals)); i++) {
-    const persona = AI_ORDER[i];
-    out.push({ name: AI_PERSONAS[persona].name, house: i + 1, kind: 'ai', persona });
+// ───────────────────────────── Network room ─────────────────────────────
+
+const draftKey = (code: string): string => `mercadia:draft:${code}`;
+
+function loadCache(kv: KV | null, code: string): DraftCache | null {
+  try {
+    const raw = kv?.getItem(draftKey(code));
+    if (!raw) return null;
+    const v = JSON.parse(raw) as Partial<DraftCache>;
+    const orders = parseDraft(v.orders);
+    if (!orders || !Number.isInteger(v.turn) || !Number.isInteger(v.revision) || !Number.isInteger(v.matchNo)) return null;
+    return { turn: v.turn as number, revision: v.revision as number, orders, matchNo: v.matchNo as number };
+  } catch {
+    return null;
   }
-  return out;
 }
 
-/** The district behind the title screen: four AI Houses, playing forever. */
-export function attractSetups(): PlayerSetup[] {
-  return [0, 1, 2, 3].map((i) => {
-    const persona = AI_ORDER[i % AI_ORDER.length];
-    return { name: AI_PERSONAS[persona].name, house: i, kind: 'ai' as const, persona };
-  });
+function newTabId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  return c?.randomUUID ? c.randomUUID() : `tab-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
 }
 
-export interface NetEvents {
-  onLobby(lobby: LobbyView): void;
-  onWelcome(seat: number, player: number): void;
-  onStatus(status: 'connecting' | 'open' | 'reconnecting' | 'closed', detail?: string): void;
-}
-
-/** A multiplayer room: the server simulates, this client renders and sends commands. */
-export class NetSession implements Session {
-  readonly kind = 'multi' as const;
-  readonly view = new CityView();
-  me = -1;
-  seat = -1;
-  speed = 1;
-  paused = false;
-  lobby: LobbyView | null = null;
-  onReject: (err: string) => void = () => undefined;
-  onAccept: () => void = () => undefined;
+class RoomSession extends Base {
+  private core: RoomClient;
+  private code: string;
+  private name: string | undefined;
   private ws: WebSocket | null = null;
-  private pending: Fx[] = [];
-  private snapAt = 0;
-  private interval = STEP_MS;
-  private closed = false;
-  private retries = 0;
-  private retryTimer: number | null = null;
-  private pingTimer: number | null = null;
-  private beatTimer: number | null = null;
-  private playerId: string | null;
+  private opened = false;
+  private welcomed = false;
+  private stopped = false;
+  private attempts = 0;
+  private playerId: string | null = null;
+  /** True only while this session holds an actual player seat; a spectator never owns the seat token. */
+  private seated = false;
+  private lastRx = 0;
+  private pingSeq = 0;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private beatTimer: ReturnType<typeof setInterval> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private noticeTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private seenNotice = 0;
   private token: SeatToken;
-  private onHide = (): void => {
-    if (this.playerId) this.token.release(this.playerId);
-  };
+  private store: KV | null;
+  private exportNoticeText = '';
 
-  constructor(
-    readonly code: string,
-    private name: string,
-    private events: NetEvents,
-  ) {
-    // The seat's reconnect token lives in localStorage (sessionStorage as a fallback), so
-    // closing the tab, or a phone evicting it, and reopening ?room=CODE reclaims the seat.
+  constructor(private opts: SessionOptions) {
+    super();
+    this.code = (opts.roomCode ?? '').toUpperCase();
+    this.name = opts.name;
     const stores = browserStores();
-    this.token = new SeatToken(code, stores.local, stores.session, Math.random().toString(36).slice(2) + Date.now().toString(36));
-    this.playerId = this.token.load(Date.now());
-    window.addEventListener('pagehide', this.onHide);
-    this.connect();
+    this.store = stores.local ?? stores.session;
+    this.token = new SeatToken(this.code, stores.local, stores.session, newTabId());
+    this.core = new RoomClient({
+      send: (m) => this.send(m),
+      cache: loadCache(this.store, this.code),
+      onCache: (c) => this.writeCache(c),
+    });
+    if (!/^[A-Z]{4}$/.test(this.code)) this.core.fail('Room not found');
+    this.emit();
+    if (!this.core.failure) this.connect();
   }
 
-  private saveId(id: string): void {
-    this.playerId = id;
-    this.token.save(id, Date.now());
-    if (this.beatTimer === null) {
-      this.beatTimer = window.setInterval(() => {
-        if (this.playerId && !this.closed) this.token.beat(this.playerId, Date.now());
-      }, HEARTBEAT_MS);
+  private writeCache(c: DraftCache | null): void {
+    try {
+      if (c) this.store?.setItem(draftKey(this.code), JSON.stringify(c));
+      else this.store?.removeItem(draftKey(this.code));
+    } catch {
+      // storage unavailable: the draft simply is not cached
     }
   }
 
-  get isHost(): boolean {
-    return !!this.lobby && this.seat >= 0 && this.lobby.host === this.seat;
+  private url(): string {
+    const loc = (globalThis as { location?: { protocol: string; host: string } }).location;
+    const proto = loc && loc.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${loc?.host ?? 'localhost'}/ws/rooms/${this.code}`;
   }
+
+  // ── Transport ──
 
   private connect(): void {
-    if (this.closed) return;
-    this.events.onStatus(this.retries ? 'reconnecting' : 'connecting');
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    if (this.stopped) return;
+    const url = this.url();
     let ws: WebSocket;
     try {
-      ws = new WebSocket(`${proto}//${location.host}/ws/rooms/${this.code}`);
+      ws = this.opts.socketFactory ? this.opts.socketFactory(url) : new WebSocket(url);
     } catch {
-      this.scheduleRetry();
+      this.scheduleReconnect();
       return;
     }
     this.ws = ws;
-    ws.addEventListener('open', () => {
-      this.retries = 0;
-      this.events.onStatus('open');
-      const hello: ClientMsg = { t: 'hello', name: this.name };
-      if (this.playerId) hello.playerId = this.playerId;
-      ws.send(JSON.stringify(hello));
-      if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
-      this.pingTimer = window.setInterval(() => this.send({ t: 'ping', at: Date.now() }), 20000);
-    });
-    ws.addEventListener('message', (ev) => {
+    this.opened = false;
+    this.welcomed = false;
+    const onOpen = (): void => {
+      if (this.ws !== ws || this.opened) return;
+      this.opened = true;
+      this.lastRx = Date.now();
+      this.core.open();
+      this.playerId = this.playerId ?? this.token.load(Date.now());
+      const hello: ClientMsg = { t: 'hello', playerId: this.playerId ?? undefined, name: this.name, lastTurn: this.core.helloTurn() || undefined };
+      this.send(hello);
+      this.pingTimer = setInterval(() => this.tick(), PING_MS);
+      this.emit();
+    };
+    ws.onopen = onOpen;
+    ws.onmessage = (ev: MessageEvent) => {
+      if (this.ws !== ws) return;
+      this.lastRx = Date.now();
       if (typeof ev.data !== 'string') return;
       let msg: ServerMsg;
       try {
@@ -286,155 +427,294 @@ export class NetSession implements Session {
       } catch {
         return;
       }
-      this.receive(msg);
-    });
-    ws.addEventListener('close', (ev) => {
+      if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return;
+      this.onMessage(msg);
+    };
+    ws.onerror = nullFn; // the close event follows and drives reconnect
+    ws.onclose = (ev: CloseEvent) => {
       if (this.ws !== ws) return;
-      this.ws = null;
-      if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
-      this.pingTimer = null;
-      if (this.closed) return;
-      if (ev.code === 4004) {
-        this.closed = true;
-        this.events.onStatus('closed', 'That room no longer exists.');
-        return;
-      }
-      if (ev.code === 4001) {
-        this.closed = true;
-        this.events.onStatus('closed', 'This seat was opened in another tab.');
-        return;
-      }
-      this.scheduleRetry();
-    });
-    ws.addEventListener('error', () => {
-      // 'close' follows and handles the retry
-    });
+      this.onClosed(ev?.code ?? 1006);
+    };
+    if (ws.readyState === 1) onOpen();
   }
 
-  private scheduleRetry(): void {
-    if (this.closed) return;
-    if (this.retries >= 6) {
-      this.closed = true;
-      this.events.onStatus('closed', 'Lost the connection to the room.');
+  private send(msg: ClientMsg): void {
+    if (!this.ws || !this.opened) return;
+    try {
+      this.ws.send(JSON.stringify(msg));
+    } catch {
+      // the close handler will reconnect
+    }
+  }
+
+  /** Heartbeat: transport only. A silent socket is dropped so the reconnect path takes over. */
+  private tick(): void {
+    if (!this.ws || !this.opened) return;
+    if (Date.now() - this.lastRx > DEAD_AFTER_MS) {
+      try {
+        this.ws.close();
+      } catch {
+        // already closed
+      }
       return;
     }
-    const wait = Math.min(4000, 500 * Math.pow(1.7, this.retries));
-    this.retries++;
-    this.events.onStatus('reconnecting');
-    this.retryTimer = window.setTimeout(() => this.connect(), wait);
+    this.send({ t: 'ping', at: ++this.pingSeq });
   }
 
-  private receive(msg: ServerMsg): void {
-    switch (msg.t) {
-      case 'welcome':
-        this.saveId(msg.playerId);
-        this.seat = msg.seat;
-        this.me = msg.player;
-        this.lobby = msg.lobby;
-        this.speed = msg.lobby.speed;
-        this.events.onWelcome(msg.seat, msg.player);
-        this.events.onLobby(msg.lobby);
-        break;
-      case 'lobby':
-        this.lobby = msg.lobby;
-        this.speed = msg.lobby.speed;
-        this.events.onLobby(msg.lobby);
-        break;
-      case 'snap': {
-        const now = performance.now();
-        const fx = this.view.apply(msg);
-        for (const f of fx) this.pending.push(f);
-        this.interval = Math.min(300, Math.max(40, this.snapAt ? now - this.snapAt : STEP_MS));
-        this.snapAt = now;
-        break;
-      }
-      case 'reject':
-      case 'error':
-        this.onReject(msg.err);
-        break;
-      default:
-        break;
-    }
+  private stopTimers(): void {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    if (this.beatTimer) clearInterval(this.beatTimer);
+    this.pingTimer = null;
+    this.beatTimer = null;
   }
 
-  send(msg: ClientMsg): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
-  }
-
-  update(_now: number): Fx[] {
-    if (!this.pending.length) return this.pending;
-    const out = this.pending;
-    this.pending = [];
-    return out;
-  }
-
-  alpha(now: number): number {
-    return Math.min(1, Math.max(0, (now - this.snapAt) / this.interval));
-  }
-
-  command(cmd: Command): void {
-    if (this.me < 0) {
-      this.onReject('Spectators cannot act');
+  private onClosed(code: number): void {
+    const wasOpen = this.opened;
+    const welcomed = this.welcomed;
+    this.stopTimers();
+    this.opened = false;
+    this.welcomed = false;
+    this.ws = null;
+    this.core.close();
+    if (this.stopped) return;
+    if (code === 4004) {
+      this.token.forget(); // the authority says the room is gone: drop only this room's token
+      this.core.fail('Room not found');
+    } else if (code === 4001) {
+      this.core.fail('This seat is open in another tab');
+    } else if (!wasOpen || !welcomed) {
+      void this.checkRoom();
+      this.emit();
       return;
     }
-    this.onAccept(); // optimistic: a refusal arrives as its own message
-    this.send({ t: 'cmd', cmd });
+    this.emit();
+    if (!this.core.failure) this.scheduleReconnect();
   }
 
-  setSpeed(v: number): void {
-    this.send({ t: 'speed', speed: v });
+  /** A socket that never opened: HTTP 404 on the upgrade means there is no such room, 410 a room from an older version. */
+  private async checkRoom(): Promise<void> {
+    let status = 0;
+    try {
+      const f = (globalThis as { fetch?: typeof fetch }).fetch;
+      if (f) status = (await f(`/api/rooms/${this.code}`)).status;
+    } catch {
+      // offline: keep retrying
+    }
+    if (this.stopped) return;
+    if (status === 404 || status === 410) {
+      // A confirmed 404 / 410: the room is gone (or cannot be played), so its (now useless) seat token goes
+      // too. Only this room's token: other rooms' tokens stay. No reconnect is scheduled.
+      this.token.forget();
+      this.core.fail(status === 410 ? LEGACY_ROOM_MESSAGE : 'Room not found');
+      this.emit();
+      return;
+    }
+    this.scheduleReconnect();
   }
 
-  togglePause(): void {
-    // A shared city has no pause.
+  private scheduleReconnect(): void {
+    if (this.stopped || this.retryTimer) return;
+    const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_FIRST_MS * 2 ** this.attempts);
+    this.attempts++;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this.connect();
+    }, delay);
   }
 
+  private onMessage(msg: ServerMsg): void {
+    if (msg.t === 'welcome') {
+      this.welcomed = true;
+      this.attempts = 0;
+      this.playerId = msg.playerId;
+      this.seated = msg.seat >= 0;
+      if (this.seated) {
+        this.token.save(msg.playerId, Date.now());
+        if (!this.beatTimer) this.beatTimer = setInterval(() => this.token.beat(msg.playerId, Date.now()), HEARTBEAT_MS);
+      } else {
+        // A spectator (a second tab, or a full room) never saves, beats or releases a seat token.
+        if (this.beatTimer) clearInterval(this.beatTimer);
+        this.beatTimer = null;
+      }
+    }
+    this.core.receive(msg);
+    this.emit();
+  }
+
+  // ── View ──
+
+  protected override emit(): void {
+    this.expireNotices();
+    super.emit();
+  }
+
+  private expireNotices(): void {
+    for (const n of this.core.notices) {
+      if (n.id <= this.seenNotice) continue;
+      this.seenNotice = n.id;
+      const t = setTimeout(() => {
+        this.noticeTimers.delete(n.id);
+        this.core.dropNotice(n.id);
+        this.emit();
+      }, NOTICE_TTL_MS);
+      (t as { unref?: () => void }).unref?.();
+      this.noticeTimers.set(n.id, t);
+    }
+  }
+
+  protected build(): SessionView {
+    const c = this.core;
+    const g = c.game ?? placeholderGame();
+    const plan = c.plan();
+    const seats: SeatStatus[] = c.game
+      ? c.seats.map((s, i) => (i === c.player ? { ...s, ready: c.ready } : s))
+      : (c.lobby?.seats ?? []).map((s) => ({ kind: s.kind, name: s.name, house: s.house, ready: false, connected: s.connected }));
+    return {
+      mode: 'room',
+      game: g,
+      hash: c.game ? c.hash : stateHash(g),
+      summary: c.summary,
+      summaries: c.summaries.slice(),
+      resolutions: c.resolutions,
+      seat: c.player,
+      draft: c.draft.slice(),
+      revision: c.revision,
+      ackedRevision: c.ackedRevision,
+      plan,
+      actions: plan ? { used: plan.actionsMax - plan.actions, max: plan.actionsMax } : { used: 0, max: 0 },
+      projectedCash: plan ? plan.cash : c.game && c.player >= 0 ? c.game.players[c.player].cash : 0,
+      ready: c.ready,
+      status: c.status(),
+      endTurn: c.endTurn(),
+      seats,
+      notices: c.notices.slice(),
+      pruned: c.pruned,
+      handoff: null,
+      tableDelta: null,
+      roomCode: this.code,
+      lobby: c.lobby,
+      host: !!c.lobby && c.seat >= 0 && c.lobby.host === c.seat,
+      ended: c.game ? c.phase === 'ended' : false,
+    };
+  }
+
+  // ── Session API ──
+
+  queue(order: Order): { ok: true } | { ok: false; reason: string } {
+    const r = this.core.queue(order);
+    this.emit();
+    return r;
+  }
+  undo(index: number): void {
+    this.core.undo(index);
+    this.emit();
+  }
+  clear(): void {
+    this.core.clear();
+    this.emit();
+  }
+  reorder(from: number, to: number): void {
+    this.core.reorder(from, to);
+    this.emit();
+  }
+  endTurn(): void {
+    this.core.pressEndTurn();
+    this.emit();
+  }
+  beginTurn(): void {}
+  continueEndless(): void {
+    this.send({ t: 'endless' });
+  }
   rematch(): void {
     this.send({ t: 'rematch' });
   }
 
-  endless(): void {
-    this.send({ t: 'endless' });
+  leave(): void {
+    this.stopped = true;
+    this.stopTimers();
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    for (const t of this.noticeTimers.values()) clearTimeout(t);
+    this.noticeTimers.clear();
+    // The seat stays reserved for its token: only the heartbeat is released.
+    if (this.seated && this.playerId) this.token.release(this.playerId);
+    const ws = this.ws;
+    this.ws = null;
+    this.opened = false;
+    try {
+      ws?.close();
+    } catch {
+      // already closed
+    }
+    this.listeners.clear();
   }
 
-  advanceCouncil(): void {
-    // The room closes the Council itself: on the countdown, or once every human has chosen.
+  exportMatch(): MatchExport | null {
+    return null; // a room keeps the canonical log on the authority: see exportMatchAsync
   }
 
-  dispose(): void {
-    this.closed = true;
-    if (this.retryTimer !== null) window.clearTimeout(this.retryTimer);
-    if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
-    if (this.beatTimer !== null) window.clearInterval(this.beatTimer);
-    this.beatTimer = null;
-    window.removeEventListener('pagehide', this.onHide);
-    // The seat stays ours on the server; free the heartbeat so any tab may reclaim it.
-    if (this.playerId) this.token.release(this.playerId);
-    if (this.ws) {
-      try {
-        this.ws.close(1000, 'leaving');
-      } catch {
-        // already gone
+  /**
+   * The authority's canonical public export (GET /api/rooms/:code/export), or null if there is none.
+   * A match that started under an older ruleset answers 409 `incompatible_ruleset`: that surfaces as a
+   * notice (exportNotice) instead of a download.
+   */
+  async exportMatchAsync(): Promise<MatchExport | null> {
+    this.exportNoticeText = '';
+    try {
+      const f = (globalThis as { fetch?: typeof fetch }).fetch;
+      if (!f) return null;
+      const res = await f(`/api/rooms/${this.code}/export`, { cache: 'no-store' });
+      if (!res.ok) {
+        if (res.status === 409) {
+          const body = (await res.json().catch(() => null)) as { code?: string } | null;
+          if (body?.code === 'incompatible_ruleset') this.exportNoticeText = INCOMPATIBLE_RULESET_MESSAGE;
+        }
+        return null;
       }
-      this.ws = null;
+      return (await res.json()) as MatchExport;
+    } catch {
+      return null;
     }
   }
-}
 
-export async function createRoom(): Promise<string> {
-  const res = await fetch('/api/rooms', { method: 'POST' });
-  if (!res.ok) throw new Error('The room service did not answer.');
-  const body = (await res.json()) as { code?: string };
-  if (!body.code) throw new Error('The room service sent no code.');
-  return body.code;
-}
-
-export async function roomExists(code: string): Promise<boolean> {
-  try {
-    const res = await fetch(`/api/rooms/${code}`);
-    await res.text(); // drain the body so the request completes
-    return res.ok;
-  } catch {
-    return false;
+  override get exportNotice(): string {
+    return this.exportNoticeText;
   }
+
+  lobby: Session['lobby'] = {
+    setName: (name) => {
+      this.name = name;
+      this.send({ t: 'lobby', name });
+    },
+    setHouse: (house) => this.send({ t: 'lobby', house }),
+    setSeatAi: (seat, ai) => this.send({ t: 'seat', seat, ai }),
+    setAiFill: (on) => this.send({ t: 'aifill', on }),
+    setMode: (mode: MatchMode) => this.send({ t: 'mode', mode }),
+    start: () => this.send({ t: 'start' }),
+  };
+}
+
+// ───────────────────────────── Public API ─────────────────────────────
+
+export function createSession(opts: SessionOptions): Session {
+  if (opts.mode === 'room') return new RoomSession(opts);
+  const config: MatchConfig =
+    opts.config ??
+    ({
+      seed: 1,
+      mode: 'standard',
+      players: [
+        { name: 'You', house: 0, kind: 'human', persona: null },
+        { name: 'Vesper', house: 1, kind: 'ai', persona: 'vesper' },
+      ],
+    } satisfies MatchConfig);
+  return new LocalSession(opts.mode, config);
+}
+
+/** Create a room on the authority (POST /api/rooms) for the HUD's Create Room button. */
+export async function createRoom(): Promise<{ code: string; joinUrl: string }> {
+  const res = await fetch('/api/rooms', { method: 'POST' });
+  if (!res.ok) throw new Error('Could not open a room');
+  const body = (await res.json()) as { code: string; joinUrl: string };
+  return { code: body.code, joinUrl: body.joinUrl };
 }
