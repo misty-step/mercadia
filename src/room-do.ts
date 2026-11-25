@@ -7,7 +7,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { parseClientMsg, type ServerMsg } from './shared/protocol';
 import { LEGACY_ROOM_MESSAGE } from './shared/constants';
-import { IDLE_PURGE_MS, RoomCore, classifyStoredRoom, isRoomCode, roomAlarmAction, type Outbound } from './shared/room';
+import { IDLE_PURGE_MS, RoomCore, classifyStoredRoom, isRoomCode, parseStoredTimestampMs, roomAlarmAction, type Outbound } from './shared/room';
 import type { Env } from './worker';
 
 interface Attachment {
@@ -239,25 +239,29 @@ export class MercadiaRoom extends DurableObject<Env> {
     // Fail closed: anything that is not a positively validated v3 room is left byte-for-byte as it is.
     // No delete, no write and no reschedule, whether it is a deployed v2 room, a corrupt save, or empty.
     if (this.legacy) return;
-    if (!this.core) {
-      if (this.read('room') != null || this.read('game') != null) this.legacy = true;
-      return;
-    }
-    // Cross-record anomaly: a lobby never carries a world. If one is held in memory or sits in SQLite, this is a
-    // corrupt save, not an idle lobby: isolate it read-only and erase nothing.
-    if (this.core.room.status === 'lobby' && (this.core.game !== null || this.read('game') != null)) {
+    // SQLite is the authority: the record is re-validated at the moment of the decision, so a save that was
+    // damaged after this object woke can never authorize deleteAll().
+    const stored = classifyStoredRoom(this.read('room'), this.read('game'));
+    if (stored.kind === 'legacy') {
       this.legacy = true;
       this.core = null;
       return;
     }
-    const touched = Number(this.read('touched') ?? 0);
-    const idle = touched > 0 ? Date.now() - touched : 0;
+    if (stored.kind !== 'v3' || !this.core) return;
+    // Cross-record anomaly (a lobby that carries a world) is classified legacy above, never purged.
+    const now = Date.now();
+    const rawTouched = this.read('touched');
+    const touched = parseStoredTimestampMs(rawTouched, now);
+    // A recorded but malformed or out-of-range touched time is a corrupt clock, not an idle room: leave every row
+    // as it is and do not reschedule a purge loop.
+    if (rawTouched !== null && touched === null) return;
+    const idle = touched === null ? 0 : Math.max(0, now - touched);
     const sockets = this.ctx.getWebSockets().length;
-    // Purge needs a recorded `touched` (idle time that is not positively known never counts as idle) and a
-    // room + game pair that is positively an idle lobby or a finished match.
-    if (!(touched > 0) || roomAlarmAction(this.core.room, this.core.game, sockets, idle) === 'keep') {
-      const wait = this.core.room.status === 'playing' || sockets > 0 ? IDLE_PURGE_MS : Math.max(60_000, IDLE_PURGE_MS - idle);
-      await this.ctx.storage.setAlarm(Date.now() + wait);
+    // Purge needs a recorded, valid `touched` (idle time that is not positively known never counts as idle) and
+    // a room + game pair that is positively an idle lobby or a finished match.
+    if (touched === null || roomAlarmAction(stored.room, stored.game, sockets, idle) === 'keep') {
+      const wait = stored.room.status === 'playing' || sockets > 0 ? IDLE_PURGE_MS : Math.max(60_000, IDLE_PURGE_MS - idle);
+      await this.ctx.storage.setAlarm(now + wait);
       return;
     }
     this.core = null;

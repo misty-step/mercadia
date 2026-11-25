@@ -256,6 +256,20 @@ describe.each([
       return { room: JSON.stringify(c.room), game: JSON.stringify(game), touched: String(Date.now() - 7 * 3600 * 1000) };
     },
   ],
+  [
+    'Case E: a started Turn 2 room whose game.standings[0].player = game.players.length',
+    (): Record<string, string> => {
+      const c = new RoomCore('ABCD', 7);
+      c.join(null, 'Ada', () => 'p1');
+      c.handle('p1', { t: 'start' });
+      c.handle('p1', { t: 'draft', turn: 1, revision: 1, orders: [{ t: 'borrow' }] });
+      c.handle('p1', { t: 'ready', turn: 1, revision: 1, epoch: 0 });
+      expect(c.game!.turn).toBe(2);
+      const game = JSON.parse(JSON.stringify(c.game));
+      game.standings[0].player = game.players.length;
+      return { room: JSON.stringify(c.room), game: JSON.stringify(game), touched: String(Date.now() - 7 * 3600 * 1000) };
+    },
+  ],
 ])('MercadiaRoom over %s', (_name, build) => {
   let d: ReturnType<typeof make>;
   let before: string;
@@ -303,6 +317,60 @@ describe('MercadiaRoom restore() and alarm() fail closed', () => {
     expect(d.storage.deleteAll).not.toHaveBeenCalled();
     expect(snapshot(d.kv)).toBe(before);
     expect((await d.room.fetch(req('/summary'))).status).toBe(410);
+  });
+
+  it('Case F: a malformed hex touched on an unstarted lobby is never read as idle: no delete, no write, no reschedule', async () => {
+    const hex = '0x' + (Date.now() - 7 * 3600 * 1000).toString(16);
+    const d = make({ room: JSON.stringify(new RoomCore('ABCD', 7).room), touched: hex });
+    const before = snapshot(d.kv);
+    expect((await d.room.fetch(req('/summary'))).status).toBe(200);
+    await d.room.alarm();
+    expect(d.storage.deleteAll).not.toHaveBeenCalled();
+    expect(d.storage.setAlarm).not.toHaveBeenCalled();
+    expect(d.writes).toEqual([]);
+    expect(snapshot(d.kv)).toBe(before);
+    expect(d.kv.get('touched')).toBe(hex);
+    expect((await d.room.fetch(req('/summary'))).status).toBe(200);
+  });
+
+  it('Case F: every other non-canonical touched (seconds, float, padded, exponent, far future) also fails closed', async () => {
+    const now = Date.now();
+    for (const touched of ['1', String(Math.floor((now - 7 * 3600 * 1000) / 1000)), String(now - 7 * 3600 * 1000) + '.5', ' ' + (now - 7 * 3600 * 1000), '1e12', String(now + 10 * 86_400_000), '', 'abc']) {
+      const d = make({ room: JSON.stringify(new RoomCore('ABCD', 7).room), touched });
+      const before = snapshot(d.kv);
+      await d.room.alarm();
+      expect(d.storage.deleteAll, touched).not.toHaveBeenCalled();
+      expect(d.storage.setAlarm, touched).not.toHaveBeenCalled();
+      expect(snapshot(d.kv), touched).toBe(before);
+      expect((await d.room.fetch(req('/summary'))).status, touched).toBe(200);
+    }
+  });
+
+  it('alarm() re-validates SQLite at fire time: a room corrupted after the object woke is isolated, never purged', async () => {
+    const c = new RoomCore('ABCD', 7);
+    c.join(null, 'Ada', () => 'p1');
+    c.handle('p1', { t: 'start' });
+    c.handle('p1', { t: 'draft', turn: 1, revision: 1, orders: [{ t: 'borrow' }] });
+    c.handle('p1', { t: 'ready', turn: 1, revision: 1, epoch: 0 });
+    c.room.status = 'ended';
+    const ended = JSON.parse(JSON.stringify(c.game));
+    ended.phase = 'ended';
+    const d = make({ room: JSON.stringify(c.room), game: JSON.stringify(ended), touched: String(Date.now() - 7 * 3600 * 1000) });
+    ended.standings[0].player = 9;
+    d.kv.set('game', JSON.stringify(ended)); // damaged after restore() accepted it
+    const before = snapshot(d.kv);
+    await d.room.alarm();
+    expect(d.storage.deleteAll).not.toHaveBeenCalled();
+    expect(d.storage.setAlarm).not.toHaveBeenCalled();
+    expect(snapshot(d.kv)).toBe(before);
+    expect((await d.room.fetch(req('/summary'))).status).toBe(410);
+  });
+
+  it('a canonical decimal aged touched on a valid idle lobby still purges', async () => {
+    const d = make({ room: JSON.stringify(new RoomCore('ABCD', 7).room), touched: String(Date.now() - 7 * 3600 * 1000) });
+    await d.room.alarm();
+    expect(d.storage.deleteAll).toHaveBeenCalledTimes(1);
+    expect((await d.room.fetch(req('/summary'))).status).toBe(404);
   });
 
   it('alarm() never purges an idle lobby that has no recorded touched time', async () => {

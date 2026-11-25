@@ -2,10 +2,10 @@
 // storage; every decision (drafts, Ready, epochs, exactly-once resolution) is made here, one
 // message at a time. There is no tick, no timer and no clock: the world changes only inside
 // a resolution, which runs when the last human seat's Ready is recorded.
-import { AI_ORDER, AI_PERSONAS, HOUSES, INCOMPATIBLE_RULESET_MESSAGE, SUMMARY_KEEP } from './constants';
+import { AI_ORDER, AI_PERSONAS, BUILD_KINDS, CHARTER_KEYS, EVENT_KINDS, HOUSES, INCOMPATIBLE_RULESET_MESSAGE, PACT_KINDS, STUDY_KEYS, SUMMARY_KEEP, UNIT_KINDS } from './constants';
 import { computeStandings, createGame, stateHash } from './game';
 import { N } from './map';
-import { readyBlock } from './orders';
+import { parseOrder, readyBlock } from './orders';
 import type { ClientMsg, LobbyView, OwnSeat, SeatStatus, ServerMsg } from './protocol';
 import { canonicalOrders, continueEndless, resolveTurn } from './resolve';
 import { shortHash } from './hash';
@@ -97,18 +97,38 @@ export type StoredRoom = { kind: 'empty' } | { kind: 'v3'; room: RoomState; game
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isStr = (v: unknown): v is string => typeof v === 'string';
+const isIndexIn = (v: unknown, lo: number, hiExclusive: number): boolean => isInt(v) && v >= lo && v < hiExclusive;
+
+const VALID_PERSONAS: ReadonlySet<string> = new Set(Object.keys(AI_PERSONAS));
+const VALID_CHARTERS: ReadonlySet<string> = new Set(CHARTER_KEYS);
+const VALID_STUDIES: ReadonlySet<string> = new Set(STUDY_KEYS);
+const VALID_BUILD_KINDS: ReadonlySet<string> = new Set(BUILD_KINDS);
+const VALID_UNIT_KINDS: ReadonlySet<string> = new Set(UNIT_KINDS);
+const VALID_PACT_KINDS: ReadonlySet<string> = new Set(PACT_KINDS);
+const VALID_EVENT_KINDS: ReadonlySet<string> = new Set(EVENT_KINDS);
+const VALID_MODES: ReadonlySet<string> = new Set(['standard', 'blitz', 'endless']);
+const VALID_DISPATCH_CATS: ReadonlySet<string> = new Set(['era', 'milestone', 'charter', 'lead', 'event', 'rival', 'promo', 'build', 'market', 'pact', 'contest']);
+const VALID_SUMMARY_SECTIONS: ReadonlySet<string> = new Set(['movement', 'combat', 'production', 'treasury', 'events']);
+const isPersonaOrNull = (v: unknown): boolean => v === null || (isStr(v) && VALID_PERSONAS.has(v));
+const allIn = (v: unknown, set: ReadonlySet<string>): boolean => Array.isArray(v) && v.every((k) => isStr(k) && set.has(k));
 
 function isValidSeat(s: unknown): boolean {
   return (
     isObject(s) &&
     (s.kind === 'open' || s.kind === 'human' || s.kind === 'ai') &&
     typeof s.name === 'string' &&
-    typeof s.house === 'number' &&
+    isIndexIn(s.house, 0, HOUSES.length) &&
+    isPersonaOrNull(s.persona) &&
     (s.playerId === null || typeof s.playerId === 'string') &&
     typeof s.connected === 'boolean' &&
     typeof s.aiFill === 'boolean'
   );
 }
+
+/** A draft or logged order list: every order must parse. Nothing is silently dropped. */
+const isOrderList = (v: unknown): boolean => Array.isArray(v) && v.every((o) => parseOrder(o) !== null);
 
 /** Every field the turn engine reads from a stored room, checked structurally. Nothing is repaired or defaulted. */
 function isValidRoomState(room: Record<string, unknown>): boolean {
@@ -116,55 +136,101 @@ function isValidRoomState(room: Record<string, unknown>): boolean {
     typeof room.code === 'string' &&
     isRoomCode(room.code) &&
     (room.status === 'lobby' || room.status === 'playing' || room.status === 'ended') &&
-    (room.mode === 'standard' || room.mode === 'blitz' || room.mode === 'endless') &&
+    isStr(room.mode) &&
+    VALID_MODES.has(room.mode) &&
     typeof room.seed === 'number' &&
     Number.isFinite(room.seed) &&
     isInt(room.host) &&
     room.host >= 0 &&
     room.host < 4 &&
     isInt(room.matchNo) &&
+    room.matchNo >= 0 &&
     isInt(room.lastResolved) &&
+    room.lastResolved >= 0 &&
     !('speed' in room) &&
     !('acc' in room) &&
     Array.isArray(room.seats) &&
     room.seats.length === 4 &&
     room.seats.every(isValidSeat) &&
     Array.isArray(room.playerOf) &&
-    room.playerOf.every((n) => typeof n === 'number') &&
+    room.playerOf.length === 4 &&
+    room.playerOf.every((n) => isIndexIn(n, -1, 4)) &&
     Array.isArray(room.drafts) &&
-    room.drafts.every((d) => isObject(d) && Array.isArray(d.orders) && typeof d.revision === 'number') &&
+    room.drafts.every((d) => isObject(d) && isOrderList(d.orders) && isInt(d.revision) && d.revision >= 0) &&
     Array.isArray(room.ready) &&
     room.ready.every((b) => typeof b === 'boolean') &&
     Array.isArray(room.epochs) &&
-    room.epochs.every((n) => typeof n === 'number') &&
+    room.epochs.every((n) => isInt(n) && n >= 0) &&
     Array.isArray(room.log) &&
     Array.isArray(room.hashes) &&
-    Array.isArray(room.summaries)
+    room.hashes.every(isStr) &&
+    Array.isArray(room.summaries) &&
+    (room.endlessAt === undefined || (Array.isArray(room.endlessAt) && room.endlessAt.every((n) => isInt(n) && n >= 0))) &&
+    (room.exportVersion === undefined || (isInt(room.exportVersion) && room.exportVersion >= 1)) &&
+    (room.config === null || isObject(room.config))
   );
 }
 
-const isObjectArray = (v: unknown): boolean => Array.isArray(v) && v.every(isObject);
-const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
-
 function isValidPlayer(p: unknown, i: number): boolean {
+  if (
+    !(
+      isObject(p) &&
+      p.id === i &&
+      typeof p.name === 'string' &&
+      isIndexIn(p.house, 0, 4) &&
+      (p.kind === 'human' || p.kind === 'ai') &&
+      isPersonaOrNull(p.persona) &&
+      isFiniteNum(p.cash) &&
+      isFiniteNum(p.debt) &&
+      isFiniteNum(p.prestige) &&
+      allIn(p.charters, VALID_CHARTERS) &&
+      Array.isArray(p.milestones) &&
+      p.milestones.every(isInt) &&
+      isFiniteNum(p.dividend) &&
+      (p.study === null || (isStr(p.study) && VALID_STUDIES.has(p.study))) &&
+      isFiniteNum(p.studyPoints) &&
+      allIn(p.studies, VALID_STUDIES) &&
+      Array.isArray(p.sales) &&
+      p.sales.every(isFiniteNum) &&
+      isObject(p.stats)
+    )
+  ) {
+    return false;
+  }
+  const st = p.stats as Record<string, unknown>;
+  return ['served', 'lost', 'built', 'promos', 'budgetSales', 'cornerRevenue', 'civicBuilt'].every((k) => isFiniteNum(st[k]));
+}
+
+function isValidStanding(s: unknown, n: number): boolean {
   return (
-    isObject(p) &&
-    p.id === i &&
-    typeof p.name === 'string' &&
-    isInt(p.house) &&
-    p.house >= 0 &&
-    p.house < 4 &&
-    (p.kind === 'human' || p.kind === 'ai') &&
-    isFiniteNum(p.cash) &&
-    isFiniteNum(p.debt) &&
-    isFiniteNum(p.prestige) &&
-    Array.isArray(p.charters) &&
-    Array.isArray(p.milestones) &&
-    Array.isArray(p.studies) &&
-    Array.isArray(p.sales) &&
-    p.sales.every(isFiniteNum) &&
-    isObject(p.stats)
+    isObject(s) &&
+    isIndexIn(s.player, 0, n) &&
+    isFiniteNum(s.crown) &&
+    isFiniteNum(s.netWorth) &&
+    isFiniteNum(s.share) &&
+    isFiniteNum(s.shareComponent) &&
+    isFiniteNum(s.worthComponent) &&
+    isFiniteNum(s.prestigeComponent) &&
+    isFiniteNum(s.prestige)
   );
+}
+
+/** One Standing per player, each player exactly once. */
+function isValidStandings(v: unknown, n: number): boolean {
+  return Array.isArray(v) && v.length === n && v.every((s) => isValidStanding(s, n)) && new Set(v.map((s: Record<string, unknown>) => s.player)).size === n;
+}
+
+function isValidBuilding(b: unknown, n: number): boolean {
+  if (!isObject(b)) return false;
+  if (!(isInt(b.id) && isIndexIn(b.owner, 0, n) && isIndexIn(b.tile, 0, N))) return false;
+  if (!(isStr(b.kind) && VALID_BUILD_KINDS.has(b.kind))) return false;
+  if (!(isInt(b.level) && b.level >= 1 && b.level <= 3 && isInt(b.stance) && b.stance >= 0 && b.stance <= 3)) return false;
+  if (!(isFiniteNum(b.stock) && typeof b.auto === 'boolean' && isInt(b.promoUntil) && isInt(b.promoReady) && isInt(b.contractUntil))) return false;
+  if (!(isFiniteNum(b.invested) && isInt(b.builtTurn) && isFiniteNum(b.lastSales) && isFiniteNum(b.lastServed))) return false;
+  const lost = b.lastLost;
+  if (!(isObject(lost) && isFiniteNum(lost.tooPricey) && isFiniteNum(lost.queueFull) && isFiniteNum(lost.outOfStock) && isFiniteNum(lost.blockaded))) return false;
+  if (!(Array.isArray(b.lastArch) && b.lastArch.every(isFiniteNum))) return false;
+  return ['lastRiders', 'lastBoosted', 'lastBoostedSales', 'carry', 'served', 'revenue'].every((k) => isFiniteNum(b[k]));
 }
 
 /** Every nested record and array the engine and the client read from a stored Game, checked structurally. */
@@ -173,7 +239,8 @@ function isValidGame(g: unknown): boolean {
   if (
     g.version !== 3 ||
     !isInt(g.seed) ||
-    !(g.mode === 'standard' || g.mode === 'blitz' || g.mode === 'endless') ||
+    !isStr(g.mode) ||
+    !VALID_MODES.has(g.mode) ||
     !isInt(g.turn) ||
     g.turn < 1 ||
     !(g.phase === 'planning' || g.phase === 'ended') ||
@@ -182,38 +249,100 @@ function isValidGame(g: unknown): boolean {
     g.nextId < 1 ||
     !isInt(g.dispatchN) ||
     g.dispatchN < 0 ||
-    !isInt(g.winner) ||
-    g.winner < -1 ||
     'tick' in g
   ) {
     return false;
   }
-  if (!(g.council === null || (isObject(g.council) && isInt(g.council.era) && Array.isArray(g.council.offers)))) return false;
   if (!Array.isArray(g.players) || g.players.length < 1 || g.players.length > 4) return false;
   if (!g.players.every(isValidPlayer)) return false;
   const n = g.players.length;
-  const owned = (o: Record<string, unknown>): boolean => isInt(o.id) && isInt(o.owner) && o.owner >= 0 && o.owner < n && isInt(o.tile) && o.tile >= 0 && o.tile < N;
-  if (!Array.isArray(g.units) || !g.units.every((u) => isObject(u) && owned(u) && (u.kind === 'factor' || u.kind === 'watch' || u.kind === 'barge') && isInt(u.cohesion))) return false;
-  if (!Array.isArray(g.buildings) || !g.buildings.every((b) => isObject(b) && owned(b) && typeof b.kind === 'string' && isInt(b.level))) return false;
-  return isObjectArray(g.pacts) && isObjectArray(g.proposals) && isObjectArray(g.events) && isObjectArray(g.chronicle) && isObjectArray(g.standings) && isObjectArray(g.trend) && isObjectArray(g.honours);
+  if (!(isInt(g.winner) && g.winner >= -1 && g.winner < n && isInt(g.leader) && g.leader >= -1 && g.leader < n)) return false;
+  const owned = (o: Record<string, unknown>): boolean => isInt(o.id) && isIndexIn(o.owner, 0, n) && isIndexIn(o.tile, 0, N);
+  if (!Array.isArray(g.units)) return false;
+  if (!g.units.every((u) => isObject(u) && owned(u) && isStr(u.kind) && VALID_UNIT_KINDS.has(u.kind) && isInt(u.cohesion) && isInt(u.route) && u.route >= 0 && typeof u.fought === 'boolean')) return false;
+  if (!Array.isArray(g.buildings) || !g.buildings.every((b) => isValidBuilding(b, n))) return false;
+  if (!Array.isArray(g.pacts) || !g.pacts.every((x) => isObject(x) && isInt(x.id) && isStr(x.kind) && VALID_PACT_KINDS.has(x.kind) && isIndexIn(x.a, 0, n) && isIndexIn(x.b, 0, n) && isInt(x.from) && isInt(x.to))) return false;
+  if (!Array.isArray(g.proposals) || !g.proposals.every((x) => isObject(x) && isInt(x.id) && isStr(x.kind) && VALID_PACT_KINDS.has(x.kind) && isIndexIn(x.from, 0, n) && isIndexIn(x.to, 0, n) && isInt(x.turn))) return false;
+  if (!Array.isArray(g.events) || !g.events.every((x) => isObject(x) && isStr(x.kind) && VALID_EVENT_KINDS.has(x.kind) && isInt(x.announced) && isInt(x.start) && isInt(x.end))) return false;
+  const c = g.council;
+  if (!(c === null || (isObject(c) && isInt(c.era) && Array.isArray(c.offers) && c.offers.length === n && c.offers.every((row) => allIn(row, VALID_CHARTERS))))) return false;
+  if (!Array.isArray(g.chronicle) || !g.chronicle.every((d) => isObject(d) && isInt(d.n) && isInt(d.turn) && isStr(d.cat) && VALID_DISPATCH_CATS.has(d.cat) && isStr(d.head) && isStr(d.pill) && isIndexIn(d.player, -1, n) && isIndexIn(d.tile, -1, N))) return false;
+  if (!Array.isArray(g.trend) || !g.trend.every((t) => isObject(t) && isInt(t.turn) && isInt(t.era) && Array.isArray(t.share) && t.share.length === n && t.share.every(isFiniteNum) && Array.isArray(t.crown) && t.crown.length === n && t.crown.every(isFiniteNum))) return false;
+  if (!isValidStandings(g.standings, n)) return false;
+  return Array.isArray(g.honours) && g.honours.every((h) => isObject(h) && (h.key === 'corner' || h.key === 'shark' || h.key === 'patron') && isStr(h.title) && isStr(h.detail) && isIndexIn(h.player, 0, n));
+}
+
+function isValidTurnSummary(sum: unknown, n: number): boolean {
+  if (!(isObject(sum) && isInt(sum.from) && isInt(sum.to) && isStr(sum.hash) && isInt(sum.era) && isStr(sum.headline))) return false;
+  if (!Array.isArray(sum.lines) || !sum.lines.every((l) => isObject(l) && isInt(l.n) && isStr(l.section) && VALID_SUMMARY_SECTIONS.has(l.section) && isStr(l.text) && isStr(l.value) && isIndexIn(l.player, -1, n) && isIndexIn(l.tile, -1, N))) return false;
+  if (
+    !Array.isArray(sum.cash) ||
+    !sum.cash.every((c) => isObject(c) && isIndexIn(c.player, 0, n) && ['opening', 'income', 'costs', 'upkeep', 'financing', 'closing'].every((k) => isFiniteNum(c[k])))
+  ) {
+    return false;
+  }
+  if (!isValidStandings(sum.standings, n)) return false;
+  if (
+    !Array.isArray(sum.scores) ||
+    !sum.scores.every((c) => isObject(c) && isIndexIn(c.player, 0, n) && ['prevRank', 'nextRank', 'rankDelta', 'prevCrown', 'crown', 'crownDelta', 'worthDelta', 'shareDelta', 'prestigeDelta'].every((k) => isFiniteNum(c[k])))
+  ) {
+    return false;
+  }
+  return Array.isArray(sum.committed) && sum.committed.length === n && sum.committed.every((c) => isInt(c) && c >= 0);
+}
+
+function isValidConfig(cfg: unknown, n: number): boolean {
+  return (
+    isObject(cfg) &&
+    isInt(cfg.seed) &&
+    isStr(cfg.mode) &&
+    VALID_MODES.has(cfg.mode) &&
+    Array.isArray(cfg.players) &&
+    cfg.players.length === n &&
+    cfg.players.every((p) => isObject(p) && isStr(p.name) && isIndexIn(p.house, 0, 4) && (p.kind === 'human' || p.kind === 'ai') && isPersonaOrNull(p.persona))
+  );
 }
 
 /** The room and its world must describe the same match. Nothing is repaired: any mismatch is a corrupt save. */
 function isCoherent(room: RoomState, game: Game | null): boolean {
-  if (room.status === 'lobby') return game === null;
+  if (room.status === 'lobby') {
+    return game === null && room.config === null && room.summary === null && room.summaries.length === 0;
+  }
   if (game === null) return false;
   if (room.status === 'playing' && game.phase !== 'planning') return false;
   if (room.status === 'ended' && game.phase !== 'ended') return false;
   const n = game.players.length;
-  return (
-    room.drafts.length === n &&
-    room.ready.length === n &&
-    room.epochs.length === n &&
-    room.playerOf.every((idx) => Number.isInteger(idx) && idx >= -1 && idx < n) &&
-    room.lastResolved >= 0 &&
-    room.lastResolved === game.turn - 1 &&
-    room.hashes.length === room.lastResolved
-  );
+  if (
+    !(
+      room.drafts.length === n &&
+      room.ready.length === n &&
+      room.epochs.length === n &&
+      room.playerOf.every((idx) => Number.isInteger(idx) && idx >= -1 && idx < n) &&
+      room.lastResolved === game.turn - 1 &&
+      room.hashes.length === room.lastResolved
+    )
+  ) {
+    return false;
+  }
+  if (!isValidConfig(room.config, n)) return false;
+  if (room.log.length !== room.lastResolved) return false;
+  if (!room.log.every((turn) => Array.isArray(turn) && turn.length === n && turn.every(isOrderList))) return false;
+  if (room.lastResolved === 0 ? room.summary !== null : !isValidTurnSummary(room.summary, n)) return false;
+  return room.summaries.every((s) => isValidTurnSummary(s, n));
+}
+
+const MIN_STORED_MS = Date.UTC(2020, 0, 1);
+
+/**
+ * Strictly parse the stored `touched` text: canonical base-10 epoch milliseconds only. Hex, octal, binary,
+ * exponent, float, signed, padded, seconds-sized and far-future values are all corrupt and return null, so a
+ * damaged clock can never be read as "idle for hours".
+ */
+export function parseStoredTimestampMs(raw: string | null, nowMs: number = Date.now()): number | null {
+  if (typeof raw !== 'string' || !/^[1-9]\d{12,13}$/.test(raw)) return null;
+  const ms = Number(raw);
+  if (!Number.isSafeInteger(ms) || ms < MIN_STORED_MS || !(ms <= nowMs + 24 * 60 * 60 * 1000)) return null;
+  return ms;
 }
 
 /**
