@@ -52,6 +52,64 @@ describe('classifyStoredRoom', () => {
     expect(classifyStoredRoom(JSON.stringify({ ...started.room, hashes: 'x' }), gameRaw)).toEqual({ kind: 'legacy' });
   });
 
+  it('Pass 5 case A: a started room missing room.status is legacy, never v3', () => {
+    const started = new RoomCore('ABCD', 7);
+    started.join(null, 'Ada', () => 'p1');
+    started.handle('p1', { t: 'start' });
+    const { status: _drop, ...rest } = started.room;
+    expect(classifyStoredRoom(JSON.stringify(rest), JSON.stringify(started.game))).toEqual({ kind: 'legacy' });
+    expect(classifyStoredRoom(JSON.stringify({ ...started.room, status: 'paused' }), JSON.stringify(started.game))).toEqual({ kind: 'legacy' });
+  });
+
+  it('Pass 5 case B: a lobby with a null (or malformed) seat is legacy, never v3', () => {
+    const lobby = new RoomCore('ABCD', 7);
+    for (const bad of [null, 7, 'open', [], {}, { ...lobby.room.seats[1], kind: 'robot' }, { ...lobby.room.seats[1], name: 3 }, { ...lobby.room.seats[1], playerId: undefined }, { ...lobby.room.seats[1], connected: 'no' }, { ...lobby.room.seats[1], aiFill: 0 }]) {
+      const seats = lobby.room.seats.map((s, i) => (i === 1 ? bad : s));
+      expect(classifyStoredRoom(JSON.stringify({ ...lobby.room, seats }), null)).toEqual({ kind: 'legacy' });
+    }
+    expect(classifyStoredRoom(JSON.stringify({ ...lobby.room, seats: lobby.room.seats.slice(0, 3) }), null)).toEqual({ kind: 'legacy' });
+  });
+
+  it('every other required RoomState field and nested element is validated strictly', () => {
+    const started = new RoomCore('ABCD', 7);
+    started.join(null, 'Ada', () => 'p1');
+    started.handle('p1', { t: 'start' });
+    const gameRaw = JSON.stringify(started.game);
+    const room = started.room as unknown as Record<string, unknown>;
+    const bad: Record<string, unknown> = {
+      mode: 'rush',
+      seed: 'x',
+      host: 4,
+      matchNo: 1.5,
+      lastResolved: '1',
+      playerOf: [0, 'a'],
+      drafts: [null],
+      ready: [1],
+      epochs: ['0'],
+      log: {},
+      hashes: null,
+      summaries: undefined,
+    };
+    for (const [k, v] of Object.entries(bad)) expect(classifyStoredRoom(JSON.stringify({ ...room, [k]: v }), gameRaw)).toEqual({ kind: 'legacy' });
+    expect(classifyStoredRoom(JSON.stringify({ ...room, seed: null }), gameRaw)).toEqual({ kind: 'legacy' });
+    expect(classifyStoredRoom(JSON.stringify({ ...room, host: -1 }), gameRaw)).toEqual({ kind: 'legacy' });
+  });
+
+  it('a started or ended room without its game, and a game that is not a full v3 Game, are legacy', () => {
+    const started = new RoomCore('ABCD', 7);
+    started.join(null, 'Ada', () => 'p1');
+    started.handle('p1', { t: 'start' });
+    const roomRaw = JSON.stringify(started.room);
+    expect(classifyStoredRoom(roomRaw, null)).toEqual({ kind: 'legacy' });
+    expect(classifyStoredRoom(JSON.stringify({ ...started.room, status: 'ended' }), null)).toEqual({ kind: 'legacy' });
+    const g = started.game as unknown as Record<string, unknown>;
+    expect(classifyStoredRoom(roomRaw, JSON.stringify({ ...g, players: 'x' }))).toEqual({ kind: 'legacy' });
+    expect(classifyStoredRoom(roomRaw, JSON.stringify({ ...g, units: null }))).toEqual({ kind: 'legacy' });
+    expect(classifyStoredRoom(roomRaw, 'not json')).toEqual({ kind: 'legacy' });
+    // a stored game with no room at all is also legacy; only (null, null) is empty
+    expect(classifyStoredRoom(null, JSON.stringify(g))).toEqual({ kind: 'legacy' });
+  });
+
   it('a v3 room stored before exportVersion existed is still v3', () => {
     const c = new RoomCore('ABCD', 7);
     c.join(null, 'Ada', () => 'p1');

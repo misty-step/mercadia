@@ -8,6 +8,9 @@
 //      every kv row byte-for-byte untouched (no purge, no tick, no reschedule);
 //   3. drives real Chrome: it stops reconnecting, forgets only that room's token, shows the legacy notice, and
 //      "Create New Room" lands in a fresh, playable v3 room;
+//   3b. Pass 6: a started v3 room whose room.status is missing and a saved v3 lobby with room.seats[1] = null (both with
+//      aged `touched` and a due alarm) answer 410/410/410/409 (never 500) and keep every kv row byte-for-byte after the
+//      alarm; a valid idle v3 lobby is still purged (404) and a valid active v3 match still survives its due alarm;
 //   4. plays a real v5 room, strips its `exportVersion` (a room persisted before the field existed), restarts,
 //      and proves /export answers 409 incompatible_ruleset while the room still resumes and plays.
 //
@@ -237,7 +240,7 @@ export async function legacySection(h) {
   }
 
   // The three rooms: a v2 lobby, a v2 running match, and a real v5 room (later stripped of exportVersion).
-  let LA, LB, PV;
+  let LA, LB, PV, CA, CB, PL, PA;
   let pvSeat = null; // the real room's seat id, held in memory only, never printed
   let before = {};
   try {
@@ -247,7 +250,11 @@ export async function legacySection(h) {
     LA = await mk();
     LB = await mk();
     PV = await mk();
-    ok(new Set([LA, LB, PV]).size === 3 && [LA, LB, PV].every((c) => /^[A-Z]{4}$/.test(c)), 'legacy: three rooms opened through POST /api/rooms on a fresh persisted wrangler dev');
+    CA = await mk();
+    CB = await mk();
+    PL = await mk();
+    PA = await mk();
+    ok(new Set([LA, LB, PV, CA, CB, PL, PA]).size === 7 && [LA, LB, PV, CA, CB, PL, PA].every((c) => /^[A-Z]{4}$/.test(c)), 'legacy: seven rooms opened through POST /api/rooms on a fresh persisted wrangler dev');
 
     // PV: a real v5 match driven over the real protocol, one turn resolved, then exported and replayed.
     {
@@ -267,6 +274,15 @@ export async function legacySection(h) {
       const rp = nodeReplay(join(RAW, 'legacy-pv-v5-export.json'));
       ok(exp.status === 200 && exp.body?.version === 5 && exp.body.log.length === 1 && rp.ok && rp.turnsReplayed === 1 && rp.mismatches.length === 0, 'export guard: a room started under version 5 exports 200 as version 5 and replays bit-for-bit (exit 0)', `http=${exp.status} version=${exp.body?.version} replay=${JSON.stringify({ ok: rp.ok, n: rp.turnsReplayed })}`);
     }
+    // CA and PA: real started v3 matches (Turn 1 planning), driven over the real protocol.
+    for (const code of [CA, PA]) {
+      const s1 = seat(code);
+      await s1.hello('Ada');
+      s1.send({ t: 'start' });
+      await s1.next((m) => m.t === 'state');
+      s1.close();
+    }
+    await sleep(400);
     const pvFile = fileFor(PV);
     const pvRoom = JSON.parse(kvRows(pvFile).find((r) => r.k === 'room').v);
     ok(pvRoom.exportVersion === 5 && pvRoom.lastResolved === 1, 'export guard: the persisted room records exportVersion 5 when its match starts', `exportVersion=${pvRoom.exportVersion}`);
@@ -276,6 +292,7 @@ export async function legacySection(h) {
 
     // ───────── phase 2: stop, inject authentic v2 storage + due alarms, strip exportVersion ─────────
     await stop();
+    const due = Date.now() + 12000;
     const setCode = (raw, code) => JSON.stringify({ ...JSON.parse(raw), code });
     const expected = {
       [LA]: [['room', setCode(V2.lobby.room, LA)]],
@@ -284,13 +301,36 @@ export async function legacySection(h) {
         ['game', V2.running.game],
       ],
     };
-    const due = Date.now() + 9000;
     await writeRows(fileLA, expected[LA], due);
     await writeRows(fileLB, expected[LB], due);
     await patchRoomRow(pvFile, (r) => {
       delete r.exportVersion;
     });
     for (const code of [LA, LB]) before[code] = digest(kvRows(fileFor(code)));
+
+    // Pass 6 corrupt-save reproductions, built from real persisted v3 rows (never from a mock), aged past 6 h, alarm due.
+    const aged = String(Date.now() - 7 * 3600 * 1000);
+    const withRows = (file, edit) => {
+      const rows = new Map(kvRows(file).map((r) => [r.k, r.v]));
+      edit(rows);
+      return [...rows.entries()];
+    };
+    const fileCA = fileFor(CA);
+    const fileCB = fileFor(CB);
+    const filePL = fileFor(PL);
+    const filePA = fileFor(PA);
+    const startedRoomRaw = JSON.parse(kvRows(fileCA).find((r) => r.k === 'room').v);
+    ok(startedRoomRaw.status === 'playing' && kvRows(fileCA).some((r) => r.k === 'game'), 'corrupt saves: the base room for Case A is a real started v3 match with a persisted game', `status=${startedRoomRaw.status}`);
+    const plan = {
+      [CA]: [fileCA, withRows(fileCA, (m) => { const r = JSON.parse(m.get('room')); delete r.status; m.set('room', JSON.stringify(r)); m.set('touched', aged); })],
+      [CB]: [fileCB, withRows(fileCB, (m) => { const r = JSON.parse(m.get('room')); r.seats[1] = null; m.set('room', JSON.stringify(r)); m.set('touched', aged); })],
+      [PL]: [filePL, withRows(filePL, (m) => m.set('touched', aged))],
+      [PA]: [filePA, withRows(filePA, (m) => m.set('touched', aged))],
+    };
+    for (const [file, rows] of Object.values(plan)) await writeRows(file, rows, due);
+    for (const code of [CA, CB, PA]) before[code] = digest(kvRows(plan[code][0]));
+    ok(CA && CB && PL && PA && [CA, CB, PL, PA].every((c) => alarmPending(plan[c][0])), 'corrupt saves: Case A, Case B, a valid idle lobby and a valid active match each hold aged touched (7 h) and a due alarm before the restart');
+    ok(!('status' in JSON.parse(plan[CA][1].find(([k]) => k === 'room')[1])) && plan[CA][1].some(([k]) => k === 'game') && plan[CA][1].some(([k]) => k === 'touched') && JSON.parse(plan[CB][1].find(([k]) => k === 'room')[1]).seats[1] === null, 'corrupt saves: injected exactly Case A (room.status removed; game, history and touched kept) and Case B (room.seats[1] = null)');
     ok(alarmPending(fileLA) && alarmPending(fileLB), 'legacy: both v2 Durable Objects hold a due alarm before the restart (the cleanup alarm v2 itself scheduled)', `lobbyAlarm=${alarmPending(fileLA)} runningAlarm=${alarmPending(fileLB)}`);
     ok(before[LA] === digest(expected[LA].map(([k, v]) => ({ k, v }))) && before[LB] === digest(expected[LB].map(([k, v]) => ({ k, v }))), 'legacy: the injected rows are exactly the authentic v2 records (lobby: room only; running match: room + game with tick 200)', `lobbyRows=${kvRows(fileLA).length} runningRows=${kvRows(fileLB).length}`);
     ok(JSON.parse(expected[LB][1][1]).tick === 200 && 'speed' in JSON.parse(expected[LB][0][1]) && 'acc' in JSON.parse(expected[LB][0][1]), 'legacy: the injected v2 match is a real-time record (speed, acc, tick)');
@@ -307,13 +347,21 @@ export async function legacySection(h) {
       const init = await get(`/__do/${code}/init?code=${code}`, { method: 'POST' });
       ok(init.status === 409 && init.body?.error === 'Room exists', `legacy ${code === LA ? 'lobby' : 'running match'}: the Durable Object's POST /init answers HTTP 409 (the Worker would draw another code)`, `http=${init.status}`);
     }
+    // Pass 6: both corrupt saves are isolated (410/410/410/409, never 500).
+    for (const [code, label] of [[CA, 'Case A (started v3 room missing room.status)'], [CB, 'Case B (v3 lobby with room.seats[1] = null)']]) {
+      const sum = await get(`/api/rooms/${code}`);
+      const exp = await get(`/api/rooms/${code}/export`);
+      const up = await rawUpgradeStatus(code);
+      const init = await get(`/__do/${code}/init?code=${code}`, { method: 'POST' });
+      ok(sum.status === 410 && exp.status === 410 && up.status === 410 && !up.upgraded && init.status === 409, `corrupt save ${label}: /summary 410, /export 410, /ws 410 (no upgrade), /init 409, never 500`, `summary=${sum.status} export=${exp.status} ws=${up.status} init=${init.status}`);
+    }
     // A brand-new code on the same running build is a normal v3 room.
     const fresh = await get('/api/rooms', { method: 'POST' });
     ok(fresh.status === 201 && ![LA, LB].includes(fresh.body?.code), 'legacy: creating a room through the Worker on the same instance still yields a fresh v3 room (HTTP 201)', `http=${fresh.status}`);
     // The injected alarms fire (and a v2 room is never purged, advanced or rescheduled).
     let consumed = false;
     for (let i = 0; i < 80 && !consumed; i++) {
-      consumed = !alarmPending(fileLA) && !alarmPending(fileLB);
+      consumed = !alarmPending(fileLA) && !alarmPending(fileLB) && !alarmPending(fileCA) && !alarmPending(fileCB);
       if (!consumed) await sleep(500);
     }
     if (!consumed && process.env.LEGACY_DEBUG) {
@@ -325,6 +373,22 @@ export async function legacySection(h) {
     }
     ok(consumed, 'legacy: the due alarms on both v2 Durable Objects fired and were not rescheduled (no purge cycle, no simulation)', `consumed=${consumed}`);
     ok(digest(kvRows(fileLA)) === before[LA] && digest(kvRows(fileLB)) === before[LB], 'legacy: after restore, /summary, /export, /ws, /init and the fired alarm every SQLite kv row is byte-for-byte identical (SHA-256 per row; no deleteAll, no touched row, no tick)', `lobbyIntact=${digest(kvRows(fileLA)) === before[LA]} runningIntact=${digest(kvRows(fileLB)) === before[LB]}`);
+
+    ok(digest(kvRows(fileCA)) === before[CA] && digest(kvRows(fileCB)) === before[CB], 'corrupt saves: after the routes and the fired due alarm, every SQLite kv row of Case A (room, game, touched) and Case B is byte-for-byte identical (SHA-256 per row; no deleteAll)', `caseA=${digest(kvRows(fileCA)) === before[CA]} caseB=${digest(kvRows(fileCB)) === before[CB]} rowsA=${kvRows(fileCA).length} rowsB=${kvRows(fileCB).length}`);
+    ok(kvRows(fileCA).length === 3 && kvRows(fileCA).map((r) => r.k).sort().join() === 'game,room,touched', 'corrupt saves: Case A still has all three SQLite rows (room, game, touched)');
+    {
+      // Valid rooms keep their normal housekeeping: the idle v3 lobby is purged, the active match survives and re-arms.
+      let settled = false;
+      for (let i = 0; i < 60 && !settled; i++) {
+        settled = (await get(`/api/rooms/${PL}`)).status === 404;
+        if (!settled) await sleep(500);
+      }
+      const lobbyGone = (await get(`/api/rooms/${PL}`)).status === 404;
+      const act = await get(`/api/rooms/${PA}`);
+      ok(lobbyGone, 'valid rooms: an abandoned idle v3 lobby (7 h, nobody connected) is still purged by its due alarm (HTTP 404)', `http=${(await get(`/api/rooms/${PL}`)).status}`);
+      ok(act.status === 200 && act.body?.status === 'playing' && act.body?.turn === 1 && digest(kvRows(filePA)) === before[PA], 'valid rooms: an active v3 match with 7 h idle survives its due alarm (HTTP 200, playing, Turn 1, kv rows identical)', `http=${act.status} status=${act.body?.status} turn=${act.body?.turn}`);
+      ok(alarmPending(filePA), 'valid rooms: the surviving active match re-armed its housekeeping alarm');
+    }
 
     // ───────── export guard on the real running path ─────────
     {

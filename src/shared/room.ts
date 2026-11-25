@@ -72,9 +72,8 @@ export const IDLE_PURGE_MS = 6 * 60 * 60 * 1000;
  * whether or not a socket happens to be connected when the alarm fires.
  */
 export function roomAlarmAction(room: Pick<RoomState, 'status'>, sockets: number, idleMs: number): 'keep' | 'purge' {
-  if (sockets > 0) return 'keep';
-  if (room.status === 'playing') return 'keep';
-  return idleMs >= IDLE_PURGE_MS ? 'purge' : 'keep';
+  // Fail closed: only a positively recognised idle lobby or finished room is ever purged.
+  return sockets === 0 && (room.status === 'lobby' || room.status === 'ended') && idleMs >= IDLE_PURGE_MS ? 'purge' : 'keep';
 }
 
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -90,6 +89,57 @@ export type StoredRoom = { kind: 'empty' } | { kind: 'v3'; room: RoomState; game
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
+const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+
+function isValidSeat(s: unknown): boolean {
+  return (
+    isObject(s) &&
+    (s.kind === 'open' || s.kind === 'human' || s.kind === 'ai') &&
+    typeof s.name === 'string' &&
+    typeof s.house === 'number' &&
+    (s.playerId === null || typeof s.playerId === 'string') &&
+    typeof s.connected === 'boolean' &&
+    typeof s.aiFill === 'boolean'
+  );
+}
+
+/** Every field the turn engine reads from a stored room, checked structurally. Nothing is repaired or defaulted. */
+function isValidRoomState(room: Record<string, unknown>): boolean {
+  return (
+    typeof room.code === 'string' &&
+    isRoomCode(room.code) &&
+    (room.status === 'lobby' || room.status === 'playing' || room.status === 'ended') &&
+    (room.mode === 'standard' || room.mode === 'blitz' || room.mode === 'endless') &&
+    typeof room.seed === 'number' &&
+    Number.isFinite(room.seed) &&
+    isInt(room.host) &&
+    room.host >= 0 &&
+    room.host < 4 &&
+    isInt(room.matchNo) &&
+    isInt(room.lastResolved) &&
+    !('speed' in room) &&
+    !('acc' in room) &&
+    Array.isArray(room.seats) &&
+    room.seats.length === 4 &&
+    room.seats.every(isValidSeat) &&
+    Array.isArray(room.playerOf) &&
+    room.playerOf.every((n) => typeof n === 'number') &&
+    Array.isArray(room.drafts) &&
+    room.drafts.every((d) => isObject(d) && Array.isArray(d.orders) && typeof d.revision === 'number') &&
+    Array.isArray(room.ready) &&
+    room.ready.every((b) => typeof b === 'boolean') &&
+    Array.isArray(room.epochs) &&
+    room.epochs.every((n) => typeof n === 'number') &&
+    Array.isArray(room.log) &&
+    Array.isArray(room.hashes) &&
+    Array.isArray(room.summaries)
+  );
+}
+
+function isValidGame(g: unknown): boolean {
+  return isObject(g) && g.version === 3 && typeof g.turn === 'number' && (g.phase === 'planning' || g.phase === 'ended') && Array.isArray(g.players) && Array.isArray(g.units) && !('tick' in g);
+}
+
 /**
  * Pure, strict classifier for what a Durable Object's SQLite `kv` holds under 'room' and 'game'.
  *  - empty:  neither key exists (a brand-new object).
@@ -103,25 +153,13 @@ export function classifyStoredRoom(roomRaw: string | null, gameRaw: string | nul
   try {
     const room: unknown = JSON.parse(roomRaw);
     if (!isObject(room)) return { kind: 'legacy' };
-    if (
-      typeof room.code !== 'string' ||
-      !isRoomCode(room.code) ||
-      typeof room.seed !== 'number' ||
-      typeof room.lastResolved !== 'number' ||
-      !Array.isArray(room.drafts) ||
-      !Array.isArray(room.ready) ||
-      !Array.isArray(room.epochs) ||
-      !Array.isArray(room.log) ||
-      !Array.isArray(room.hashes) ||
-      !Array.isArray(room.seats) ||
-      'speed' in room ||
-      'acc' in room
-    )
-      return { kind: 'legacy' };
+    if (!isValidRoomState(room)) return { kind: 'legacy' };
+    // A started or finished room cannot exist without its world.
+    if ((room.status === 'playing' || room.status === 'ended') && gameRaw == null) return { kind: 'legacy' };
     let game: Game | null = null;
     if (gameRaw != null) {
       const g: unknown = JSON.parse(gameRaw);
-      if (!isObject(g) || g.version !== 3 || typeof g.turn !== 'number' || (g.phase !== 'planning' && g.phase !== 'ended') || 'tick' in g) return { kind: 'legacy' };
+      if (!isValidGame(g)) return { kind: 'legacy' };
       game = g as unknown as Game;
     }
     return { kind: 'v3', room: room as unknown as RoomState, game };

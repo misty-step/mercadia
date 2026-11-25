@@ -52,14 +52,21 @@ export class MercadiaRoom extends DurableObject<Env> {
       return;
     }
     if (stored.kind === 'empty') return;
-    this.core = new RoomCore(stored.room.code, stored.room.seed, { room: stored.room, game: stored.game });
-    // Connection flags come from the sockets that actually survived.
-    const live = new Set<string>();
-    for (const ws of this.ctx.getWebSockets()) {
-      const id = (ws.deserializeAttachment() as Attachment | null)?.playerId;
-      if (id) live.add(id);
+    try {
+      const core = new RoomCore(stored.room.code, stored.room.seed, { room: stored.room, game: stored.game });
+      // Connection flags come from the sockets that actually survived.
+      const live = new Set<string>();
+      for (const ws of this.ctx.getWebSockets()) {
+        const id = (ws.deserializeAttachment() as Attachment | null)?.playerId;
+        if (id) live.add(id);
+      }
+      for (const seat of core.room.seats) seat.connected = !!seat.playerId && live.has(seat.playerId);
+      this.core = core;
+    } catch {
+      // Stored but unusable: fail closed into the same read-only isolation as a legacy room. Never a 500.
+      this.core = null;
+      this.legacy = true;
     }
-    for (const seat of this.core.room.seats) seat.connected = !!seat.playerId && live.has(seat.playerId);
   }
 
   /** One transaction: room (drafts, Ready flags, epochs, log, summary, last resolved turn) and the world. */
@@ -229,12 +236,18 @@ export class MercadiaRoom extends DurableObject<Env> {
    * for hours are erased. A match in progress is never erased — its seats wait for their players.
    */
   override async alarm(): Promise<void> {
-    if (this.legacy) return; // a legacy v2 room is never purged, advanced or rescheduled
+    // Fail closed: anything that is not a positively validated v3 room is left byte-for-byte as it is.
+    // No delete, no write and no reschedule, whether it is a deployed v2 room, a corrupt save, or empty.
+    if (this.legacy) return;
+    if (!this.core) {
+      if (this.read('room') != null || this.read('game') != null) this.legacy = true;
+      return;
+    }
     const touched = Number(this.read('touched') ?? 0);
     const idle = touched > 0 ? Date.now() - touched : IDLE_PURGE_MS;
-    const action = this.core ? roomAlarmAction(this.core.room, this.ctx.getWebSockets().length, idle) : 'purge';
-    if (action === 'keep') {
-      const wait = this.core?.room.status === 'playing' || this.ctx.getWebSockets().length > 0 ? IDLE_PURGE_MS : Math.max(60_000, IDLE_PURGE_MS - idle);
+    const sockets = this.ctx.getWebSockets().length;
+    if (roomAlarmAction(this.core.room, sockets, idle) === 'keep') {
+      const wait = this.core.room.status === 'playing' || sockets > 0 ? IDLE_PURGE_MS : Math.max(60_000, IDLE_PURGE_MS - idle);
       await this.ctx.storage.setAlarm(Date.now() + wait);
       return;
     }

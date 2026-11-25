@@ -741,6 +741,12 @@ describe('room retention alarm (PRODUCT.md "Seat reclaim")', () => {
     expect(roomAlarmAction({ status: 'ended' }, 0, IDLE_PURGE_MS - 1)).toBe('keep');
     expect(roomAlarmAction({ status: 'ended' }, 0, IDLE_PURGE_MS)).toBe('purge');
   });
+  it('fails closed: a missing or unrecognised status is never purged', () => {
+    for (const status of [undefined, null, '', 'paused', 'LOBBY', 3]) {
+      expect(roomAlarmAction({ status } as never, 0, long)).toBe('keep');
+    }
+    expect(roomAlarmAction({} as never, 0, long)).toBe('keep');
+  });
 });
 
 describe('authority-scoped public export (GET /api/rooms/:code/export)', () => {

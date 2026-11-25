@@ -214,3 +214,101 @@ describe('export guard for matches that started under an older ruleset', () => {
   });
 
 });
+
+// Pass 5 Cold Critic reproductions: a corrupt v3 save is isolated read-only, never a 500 and never purged.
+describe.each([
+  [
+    'Case A: a started v3 room whose room.status is missing',
+    (): Record<string, string> => {
+      const c = new RoomCore('ABCD', 7);
+      c.join(null, 'Ada', () => 'p1');
+      c.handle('p1', { t: 'start' });
+      const { status: _drop, ...rest } = c.room;
+      return { room: JSON.stringify(rest), game: JSON.stringify(c.game), touched: String(Date.now() - 7 * 3600 * 1000) };
+    },
+  ],
+  [
+    'Case B: a saved v3 lobby with a null element in room.seats',
+    (): Record<string, string> => {
+      const c = new RoomCore('ABCD', 7);
+      const room = JSON.parse(JSON.stringify(c.room));
+      room.seats[1] = null;
+      return { room: JSON.stringify(room), touched: String(Date.now() - 7 * 3600 * 1000) };
+    },
+  ],
+])('MercadiaRoom over %s', (_name, build) => {
+  let d: ReturnType<typeof make>;
+  let before: string;
+  beforeEach(() => {
+    d = make(build());
+    before = snapshot(d.kv);
+  });
+  const untouched = (): void => {
+    expect(snapshot(d.kv)).toBe(before);
+    expect(d.writes).toEqual([]);
+    expect(d.storage.deleteAll).not.toHaveBeenCalled();
+    expect(d.storage.setAlarm).not.toHaveBeenCalled();
+  };
+
+  it('is isolated: 410 on /summary, /export and /ws, 409 on /init, never 500', async () => {
+    expect((d.room as unknown as { core: unknown }).core).toBeNull();
+    expect((await d.room.fetch(req('/summary'))).status).toBe(410);
+    expect((await d.room.fetch(req('/export'))).status).toBe(410);
+    expect((await d.room.fetch(req('/ws/rooms/ABCD', { upgrade: true }))).status).toBe(410);
+    expect((await d.room.fetch(req('/init?code=ABCD', { method: 'POST' }))).status).toBe(409);
+    expect(d.ctx.acceptWebSocket).not.toHaveBeenCalled();
+    untouched();
+  });
+
+  it('a due alarm (aged touched, > 6 h) leaves every SQLite row byte-for-byte intact', async () => {
+    await d.room.alarm();
+    untouched();
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 90 * 24 * 3600 * 1000);
+    await d.room.alarm();
+    vi.useRealTimers();
+    untouched();
+  });
+});
+
+describe('MercadiaRoom restore() and alarm() fail closed', () => {
+  it('hydration that throws (here: the socket attachment scan) becomes an isolated room instead of an HTTP 500', async () => {
+    const f = fakeCtx({ room: JSON.stringify(new RoomCore('ABCD', 7).room), touched: String(Date.now() - 7 * 3600 * 1000) });
+    f.ctx.getWebSockets = () => {
+      throw new Error('boom');
+    };
+    const before = snapshot(f.kv);
+    const room = new MercadiaRoom(f.ctx as never, {} as never);
+    expect((await room.fetch(req('/summary'))).status).toBe(410);
+    expect((await room.fetch(req('/export'))).status).toBe(410);
+    expect((await room.fetch(req('/init?code=ABCD', { method: 'POST' }))).status).toBe(409);
+    await room.alarm();
+    expect(snapshot(f.kv)).toBe(before);
+    expect(f.writes).toEqual([]);
+    expect(f.storage.deleteAll).not.toHaveBeenCalled();
+  });
+
+  it('alarm() on a genuinely empty object writes and deletes nothing', async () => {
+    const d = make({});
+    await d.room.alarm();
+    expect(d.writes).toEqual([]);
+    expect(d.storage.deleteAll).not.toHaveBeenCalled();
+    expect(d.storage.setAlarm).not.toHaveBeenCalled();
+  });
+
+  it('alarm() still purges a positively validated idle v3 lobby, and keeps a started match', async () => {
+    const lobby = make({ room: JSON.stringify(new RoomCore('ABCD', 7).room), touched: String(Date.now() - 7 * 3600 * 1000) });
+    await lobby.room.alarm();
+    expect(lobby.storage.deleteAll).toHaveBeenCalledTimes(1);
+    expect((await lobby.room.fetch(req('/summary'))).status).toBe(404);
+
+    const c = new RoomCore('WXYZ', 7);
+    c.join(null, 'Ada', () => 'p1');
+    c.handle('p1', { t: 'start' });
+    const live = make({ room: JSON.stringify(c.room), game: JSON.stringify(c.game), touched: String(Date.now() - 7 * 3600 * 1000) });
+    await live.room.alarm();
+    expect(live.storage.deleteAll).not.toHaveBeenCalled();
+    expect(live.storage.setAlarm).toHaveBeenCalledTimes(1);
+    expect((await live.room.fetch(req('/summary'))).status).toBe(200);
+  });
+});
