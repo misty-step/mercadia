@@ -554,7 +554,6 @@ async function endlessReplay() {
         const open = await ensureDeltaOpen(page);
         ok(deltaOpenOk(open), 'score delta (desktop): the Turn Delta drawer is open, opaque, on screen and on top before the 1440×900 capture', JSON.stringify(open));
         await shot(page, '20-turn-delta-rank-and-components-1440x900');
-        await page.locator('#h-drawer').screenshot({ path: join(MEDIA, '21-turn-delta-drawer-crop.png') });
       }
     }
   }
