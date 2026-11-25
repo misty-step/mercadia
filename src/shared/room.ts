@@ -2,7 +2,7 @@
 // storage; every decision (drafts, Ready, epochs, exactly-once resolution) is made here, one
 // message at a time. There is no tick, no timer and no clock: the world changes only inside
 // a resolution, which runs when the last human seat's Ready is recorded.
-import { AI_ORDER, AI_PERSONAS, HOUSES, SUMMARY_KEEP } from './constants';
+import { AI_ORDER, AI_PERSONAS, HOUSES, INCOMPATIBLE_RULESET_MESSAGE, SUMMARY_KEEP } from './constants';
 import { createGame, stateHash } from './game';
 import { readyBlock } from './orders';
 import type { ClientMsg, LobbyView, OwnSeat, SeatStatus, ServerMsg } from './protocol';
@@ -43,6 +43,12 @@ export interface RoomState {
   hashes: string[]; // full state hash after each resolved turn
   /** Log lengths at which the host chose Continue in Endless (absent in rooms stored before this field). */
   endlessAt?: number[];
+  /**
+   * The MATCH_EXPORT_VERSION the running match was started under. Absent in rooms whose match started
+   * before this field existed: those rooms resume and play normally, but their hashes were produced under
+   * an older ruleset, so they are never exported (relabelled) as the current version.
+   */
+  exportVersion?: number;
   config: { seed: number; mode: MatchMode; players: { name: string; house: number; kind: 'human' | 'ai'; persona: AiPersona | null }[] } | null;
 }
 
@@ -79,6 +85,52 @@ export function makeRoomCode(random: () => number): string {
   return code;
 }
 export const isRoomCode = (code: string): boolean => /^[A-Z]{4}$/.test(code);
+
+export type StoredRoom = { kind: 'empty' } | { kind: 'v3'; room: RoomState; game: Game | null } | { kind: 'legacy' };
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * Pure, strict classifier for what a Durable Object's SQLite `kv` holds under 'room' and 'game'.
+ *  - empty:  neither key exists (a brand-new object).
+ *  - v3:     'room' is a complete turn-engine RoomState (and 'game', if present, is a v3 Game).
+ *  - legacy: anything else that is stored, including deployed v2 real-time rooms and corrupt records.
+ * Legacy storage is never read as v3, never simulated, and never written or deleted.
+ */
+export function classifyStoredRoom(roomRaw: string | null, gameRaw: string | null): StoredRoom {
+  if (roomRaw == null && gameRaw == null) return { kind: 'empty' };
+  if (roomRaw == null) return { kind: 'legacy' };
+  try {
+    const room: unknown = JSON.parse(roomRaw);
+    if (!isObject(room)) return { kind: 'legacy' };
+    if (
+      typeof room.code !== 'string' ||
+      !isRoomCode(room.code) ||
+      typeof room.seed !== 'number' ||
+      typeof room.lastResolved !== 'number' ||
+      !Array.isArray(room.drafts) ||
+      !Array.isArray(room.ready) ||
+      !Array.isArray(room.epochs) ||
+      !Array.isArray(room.log) ||
+      !Array.isArray(room.hashes) ||
+      !Array.isArray(room.seats) ||
+      'speed' in room ||
+      'acc' in room
+    )
+      return { kind: 'legacy' };
+    let game: Game | null = null;
+    if (gameRaw != null) {
+      const g: unknown = JSON.parse(gameRaw);
+      if (!isObject(g) || g.version !== 3 || typeof g.turn !== 'number' || (g.phase !== 'planning' && g.phase !== 'ended') || 'tick' in g) return { kind: 'legacy' };
+      game = g as unknown as Game;
+    }
+    return { kind: 'v3', room: room as unknown as RoomState, game };
+  } catch {
+    return { kind: 'legacy' };
+  }
+}
+
+export type ExportResult = { ok: true; export: MatchExport } | { ok: false; code: 'not_started' | 'incompatible_ruleset'; error: string };
 
 export function cleanName(raw: unknown, fallback: string): string {
   if (typeof raw !== 'string') return fallback;
@@ -163,8 +215,19 @@ export class RoomCore {
    * Null until the match has started.
    */
   exportMatch(): MatchExport | null {
+    const res = this.tryExport();
+    return res.ok ? res.export : null;
+  }
+
+  /**
+   * Like exportMatch, but says why there is nothing to export. A match whose hashes were produced under an
+   * older ruleset (no recorded exportVersion, or one that is not the current version) is never stamped with
+   * the current version: that would label historical hashes a replay cannot reproduce.
+   */
+  tryExport(): ExportResult {
     const r = this.room;
-    if (!r.config || r.status === 'lobby') return null;
+    if (!r.config || r.status === 'lobby') return { ok: false, code: 'not_started', error: 'The match has not started yet' };
+    if (r.exportVersion !== MATCH_EXPORT_VERSION) return { ok: false, code: 'incompatible_ruleset', error: INCOMPATIBLE_RULESET_MESSAGE };
     const exp: MatchExport = {
       version: MATCH_EXPORT_VERSION,
       config: {
@@ -176,7 +239,7 @@ export class RoomCore {
       hashes: r.hashes.slice(),
     };
     if (r.endlessAt && r.endlessAt.length > 0) exp.endlessAt = r.endlessAt.slice();
-    return exp;
+    return { ok: true, export: exp };
   }
 
   serialize(): { room: RoomState; game: Game | null } {
@@ -294,6 +357,7 @@ export class RoomCore {
     r.log = [];
     r.hashes = [];
     r.endlessAt = [];
+    r.exportVersion = MATCH_EXPORT_VERSION;
     this.resetTurnState();
   }
 

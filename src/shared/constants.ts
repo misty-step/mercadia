@@ -555,3 +555,8 @@ export const LAST_NAMES = [
   'Aldaia', 'Bellver', 'Casals', 'Dorado', 'Esteve', 'Ferrant', 'Garriga', 'Hortal', 'Isern', 'Julivert',
   'Llobet', 'Marés', 'Noguera', 'Oliva', 'Pruna', 'Quintana', 'Riera', 'Soler', 'Tarrés', 'Vidal',
 ];
+
+/** Shown when a stored room predates the turn engine (a deployed v2 real-time room). */
+export const LEGACY_ROOM_MESSAGE = 'This room is from an older MERCADIA version \u2014 create a new room to play.';
+/** Shown when a persisted match started under an older ruleset and so cannot be exported as the current version. */
+export const INCOMPATIBLE_RULESET_MESSAGE = 'This match started under an older ruleset and cannot be exported as version 5.';

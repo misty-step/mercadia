@@ -3,7 +3,7 @@
 // main.ts never mutates game state: every order goes through session.queue, and the Council
 // card, handoff screen and Final Edition are pure functions of the session view.
 import type { Hit, Session, SessionView } from './contracts';
-import { AI_PERSONAS } from '../shared/constants';
+import { AI_PERSONAS, LEGACY_ROOM_MESSAGE } from '../shared/constants';
 import { createGame } from '../shared/game';
 import { canonicalOrders, resolveTurn } from '../shared/resolve';
 import type { CharterKey, Game } from '../shared/types';
@@ -153,7 +153,7 @@ function boot(): void {
   async function exportMatch(): Promise<void> {
     const exp = await session?.exportMatchAsync();
     if (!exp) {
-      screens.toast('There is no match log to export yet.', 'error');
+      screens.toast(session?.exportNotice || 'There is no match log to export yet.', 'error');
       return;
     }
     const url = URL.createObjectURL(new Blob([JSON.stringify(exp, null, 2)], { type: 'application/json' }));
@@ -216,7 +216,8 @@ function boot(): void {
     if (!s) return;
 
     if (v.mode === 'room') {
-      const terminal = v.status.tone === 'error' && (v.status.text === 'Room not found' || v.status.text === 'This seat is open in another tab');
+      const legacy = v.status.tone === 'error' && v.status.text === LEGACY_ROOM_MESSAGE;
+      const terminal = v.status.tone === 'error' && (legacy || v.status.text === 'Room not found' || v.status.text === 'This seat is open in another tab');
       if (terminal) {
         destroyHud();
         council.close();
@@ -226,10 +227,15 @@ function boot(): void {
         showMenu(`err:${v.status.text}`, () =>
           screens.showNotice(
             {
-              title: v.status.text === 'Room not found' ? 'No such room' : 'Seat in use',
-              body: v.status.text === 'Room not found' ? `There is no room with the code ${v.roomCode || 'you entered'}. Check the code, or create a new room.` : 'This seat is open in another tab of this browser. Close that tab, or return to the title and start fresh.',
+              title: legacy ? 'Older room' : v.status.text === 'Room not found' ? 'No such room' : 'Seat in use',
+              body: legacy
+                ? LEGACY_ROOM_MESSAGE
+                : v.status.text === 'Room not found'
+                  ? `There is no room with the code ${v.roomCode || 'you entered'}. Check the code, or create a new room.`
+                  : 'This seat is open in another tab of this browser. Close that tab, or return to the title and start fresh.',
               tone: 'error',
-              action: { label: 'Back to title', run: () => leaveToTitle() },
+              action: legacy ? { label: 'Create New Room', run: () => void createFreshRoom() } : { label: 'Back to title', run: () => leaveToTitle() },
+              secondary: legacy ? { label: 'Back to Title', run: () => leaveToTitle() } : undefined,
             },
             demoGame(),
           ),
@@ -311,6 +317,16 @@ function boot(): void {
         demoGame(),
       ),
     );
+  }
+
+  /** From a room that cannot be played (an older version's room): open a fresh room and enter its lobby. */
+  async function createFreshRoom(): Promise<void> {
+    try {
+      const { code } = await createRoom();
+      joinRoom(code, true);
+    } catch {
+      screens.toast('Could not open a room. Try again.', 'error');
+    }
   }
 
   function toHotseat(): void {

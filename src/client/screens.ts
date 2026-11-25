@@ -403,12 +403,17 @@ export class Screens {
 
   // ── Connecting / terminal room errors ──
 
-  showNotice(o: { title: string; body: string; status?: string; tone?: 'error' | 'wait'; action?: { label: string; run(): void } }, game: Game): void {
+  showNotice(o: { title: string; body: string; status?: string; tone?: 'error' | 'wait'; action?: { label: string; run(): void }; secondary?: { label: string; run(): void } }, game: Game): void {
     const panel = h('section', { class: 'menu-panel notice-panel', 'aria-labelledby': 'nt-h' },
       h('p', { class: 'eyebrow', text: 'Mercadia' }),
       h('h1', { class: 'panel-title serif', id: 'nt-h', text: o.title }),
       h('p', { class: `notice-body${o.tone === 'error' ? ' is-error' : ''}`, role: o.tone === 'error' ? 'alert' : 'status', text: o.body }),
-      o.action ? h('div', { class: 'btn-row' }, h('button', { class: 'btn btn-primary', type: 'button', onclick: () => o.action?.run() }, o.action.label)) : null,
+      o.action
+        ? h('div', { class: 'btn-row' },
+            h('button', { class: 'btn btn-primary', type: 'button', onclick: () => o.action?.run() }, o.action.label),
+            o.secondary ? h('button', { class: 'btn btn-quiet', type: 'button', onclick: () => o.secondary?.run() }, o.secondary.label) : null,
+          )
+        : null,
     );
     this.setPanel(panel);
     this.inspect(game, null);

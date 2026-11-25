@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Session, SessionView } from '../src/client/contracts';
 import { RoomClient } from '../src/client/session-core';
 import { createSession } from '../src/client/session';
+import { INCOMPATIBLE_RULESET_MESSAGE, LEGACY_ROOM_MESSAGE } from '../src/shared/constants';
 import { createGame, stateHash } from '../src/shared/game';
 import { queueOrder } from '../src/shared/orders';
 import type { ClientMsg, ServerMsg } from '../src/shared/protocol';
@@ -909,6 +910,33 @@ describe('confirmed 404 and Leave', () => {
     expect(sess.map.has(PID('WXYZ'))).toBe(true);
   });
 
+  it('a confirmed 410 (a room from an older version) clears only that room\'s token, never reconnects, and says so', async () => {
+    vi.useFakeTimers();
+    (globalThis as { fetch?: unknown }).fetch = vi.fn(async () => ({ status: 410 }));
+    const local = kv();
+    local.map.set(PID('LEGA'), JSON.stringify({ id: 'gone', at: 1, beat: 1, tab: 't' }));
+    local.map.set(PID('WXYZ'), JSON.stringify({ id: 'keep', at: 1, beat: 1, tab: 't' }));
+    (globalThis as { localStorage?: unknown }).localStorage = local;
+    const sess = kv();
+    (globalThis as { sessionStorage?: unknown }).sessionStorage = sess;
+    sess.map.set(PID('LEGA'), 'gone');
+    sess.map.set(PID('WXYZ'), 'keep');
+    const auth = new Authority();
+    const s = createSession({ mode: 'room', roomCode: 'LEGA', socketFactory: auth.factory });
+    sessions.push(s);
+    auth.last().drop(1006); // the 410 upgrade never opens a socket
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    expect(s.view.status).toEqual({ text: LEGACY_ROOM_MESSAGE, tone: 'error' });
+    expect(LEGACY_ROOM_MESSAGE).toBe('This room is from an older MERCADIA version \u2014 create a new room to play.');
+    expect(local.map.has(PID('LEGA'))).toBe(false);
+    expect(sess.map.has(PID('LEGA'))).toBe(false);
+    expect(local.map.has(PID('WXYZ'))).toBe(true);
+    expect(sess.map.has(PID('WXYZ'))).toBe(true);
+    // no reconnect storm: no further socket is ever opened
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(auth.sockets).toHaveLength(1);
+  });
+
   it('a non-404 (offline or 5xx) check keeps the token and retries', async () => {
     vi.useFakeTimers();
     (globalThis as { fetch?: unknown }).fetch = vi.fn(async () => ({ status: 503 }));
@@ -956,6 +984,18 @@ describe('room export from the authority', () => {
       throw new Error('offline');
     });
     expect(await a.s.exportMatchAsync()).toBeNull();
+  });
+
+  it('surfaces the authority\'s incompatible_ruleset refusal as a notice instead of a download', async () => {
+    const auth = new Authority();
+    const a = client(auth, 'Ann');
+    (globalThis as { fetch?: unknown }).fetch = vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ ok: false, code: 'incompatible_ruleset', error: 'x' }) }));
+    expect(await a.s.exportMatchAsync()).toBeNull();
+    expect(a.s.exportNotice).toBe(INCOMPATIBLE_RULESET_MESSAGE);
+    expect(INCOMPATIBLE_RULESET_MESSAGE).toBe('This match started under an older ruleset and cannot be exported as version 5.');
+    (globalThis as { fetch?: unknown }).fetch = vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ ok: false, error: 'The match has not started yet' }) }));
+    expect(await a.s.exportMatchAsync()).toBeNull();
+    expect(a.s.exportNotice).toBe('');
   });
 
   it('local sessions resolve exportMatchAsync to the same export as exportMatch', async () => {

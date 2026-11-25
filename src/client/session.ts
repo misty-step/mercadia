@@ -6,6 +6,7 @@
 import { actionsFor, createGame, stateHash } from '../shared/game';
 import { LocalMatch } from '../shared/local';
 import { parseDraft, pruneDraft, queueOrder, readyBlock, reorderDraft, undoOrder } from '../shared/orders';
+import { INCOMPATIBLE_RULESET_MESSAGE, LEGACY_ROOM_MESSAGE } from '../shared/constants';
 import type { ClientMsg, SeatStatus, ServerMsg } from '../shared/protocol';
 import type { MatchExport } from '../shared/replay';
 import type { Game, MatchMode, MatchConfig, Order } from '../shared/types';
@@ -71,6 +72,9 @@ abstract class Base implements Session {
   abstract leave(): void;
   abstract exportMatch(): MatchExport | null;
   abstract exportMatchAsync(): Promise<MatchExport | null>;
+  get exportNotice(): string {
+    return '';
+  }
   abstract lobby: Session['lobby'];
 }
 
@@ -352,6 +356,7 @@ class RoomSession extends Base {
   private seenNotice = 0;
   private token: SeatToken;
   private store: KV | null;
+  private exportNoticeText = '';
 
   constructor(private opts: SessionOptions) {
     super();
@@ -486,20 +491,21 @@ class RoomSession extends Base {
     if (!this.core.failure) this.scheduleReconnect();
   }
 
-  /** A socket that never opened: HTTP 404 on the upgrade means there is no such room. */
+  /** A socket that never opened: HTTP 404 on the upgrade means there is no such room, 410 a room from an older version. */
   private async checkRoom(): Promise<void> {
-    let missing = false;
+    let status = 0;
     try {
       const f = (globalThis as { fetch?: typeof fetch }).fetch;
-      if (f) missing = (await f(`/api/rooms/${this.code}`)).status === 404;
+      if (f) status = (await f(`/api/rooms/${this.code}`)).status;
     } catch {
       // offline: keep retrying
     }
     if (this.stopped) return;
-    if (missing) {
-      // A confirmed 404: the room is gone, so its (now useless) seat token goes too. Other rooms' tokens stay.
+    if (status === 404 || status === 410) {
+      // A confirmed 404 / 410: the room is gone (or cannot be played), so its (now useless) seat token goes
+      // too. Only this room's token: other rooms' tokens stay. No reconnect is scheduled.
       this.token.forget();
-      this.core.fail('Room not found');
+      this.core.fail(status === 410 ? LEGACY_ROOM_MESSAGE : 'Room not found');
       this.emit();
       return;
     }
@@ -647,17 +653,32 @@ class RoomSession extends Base {
     return null; // a room keeps the canonical log on the authority: see exportMatchAsync
   }
 
-  /** The authority's canonical public export (GET /api/rooms/:code/export), or null if there is none yet. */
+  /**
+   * The authority's canonical public export (GET /api/rooms/:code/export), or null if there is none.
+   * A match that started under an older ruleset answers 409 `incompatible_ruleset`: that surfaces as a
+   * notice (exportNotice) instead of a download.
+   */
   async exportMatchAsync(): Promise<MatchExport | null> {
+    this.exportNoticeText = '';
     try {
       const f = (globalThis as { fetch?: typeof fetch }).fetch;
       if (!f) return null;
       const res = await f(`/api/rooms/${this.code}/export`, { cache: 'no-store' });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        if (res.status === 409) {
+          const body = (await res.json().catch(() => null)) as { code?: string } | null;
+          if (body?.code === 'incompatible_ruleset') this.exportNoticeText = INCOMPATIBLE_RULESET_MESSAGE;
+        }
+        return null;
+      }
       return (await res.json()) as MatchExport;
     } catch {
       return null;
     }
+  }
+
+  override get exportNotice(): string {
+    return this.exportNoticeText;
   }
 
   lobby: Session['lobby'] = {

@@ -93,6 +93,8 @@ export interface Session {
   exportMatch(): MatchExport | null;
   /** Same export, but also works for rooms: a room fetches the authority's canonical public export. */
   exportMatchAsync(): Promise<MatchExport | null>;
+  /** Why the last exportMatchAsync returned nothing, when the authority refused it (else ''). */
+  readonly exportNotice: string;
 
   // Rooms: lobby controls (host only where noted).
   lobby: {

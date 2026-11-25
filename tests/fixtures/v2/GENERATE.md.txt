@@ -1,0 +1,21 @@
+import { RoomCore } from '/tmp/v2src/src/shared/room';
+import { writeFileSync, mkdirSync } from 'node:fs';
+const out = process.argv[2];
+mkdirSync(out, { recursive: true });
+let n = 0;
+const id = () => `00000000-0000-4000-8000-0000000000${(10 + n++)}`;
+function dump(name: string, c: RoomCore) {
+  writeFileSync(`${out}/${name}.room.json`, JSON.stringify(c.room));
+  if (c.game) writeFileSync(`${out}/${name}.game.json`, JSON.stringify(c.game));
+}
+// lobby: one human joined, no game
+const lobby = new RoomCore('LEGA', 123456789);
+lobby.join(null, 'Ada', id);
+dump('lobby', lobby);
+// running match: host starts, 200 ticks of real-time play
+const run = new RoomCore('LEGB', 987654321);
+const j = run.join(null, 'Ada', id);
+run.handle(j.playerId, { t: 'start' } as any);
+for (let i = 0; i < 200; i++) run.step();
+console.log(run.room.status, (run.game as any).tick);
+dump('running', run);

@@ -14,5 +14,5 @@
     "noEmit": true,
     "types": ["@cloudflare/workers-types"]
   },
-  "include": ["src/worker.ts", "src/room-do.ts", "src/shared"]
+  "include": ["src/worker.ts", "src/room-do.ts", "src/shared", "worker-tests", "scripts/legacy-probe-worker.ts"]
 }
