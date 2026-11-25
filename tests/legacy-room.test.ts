@@ -70,6 +70,64 @@ describe('classifyStoredRoom', () => {
     expect(classifyStoredRoom(JSON.stringify({ ...lobby.room, seats: lobby.room.seats.slice(0, 3) }), null)).toEqual({ kind: 'legacy' });
   });
 
+  it('Pass 6 case C: a lobby that still carries a genuine Turn 1 game row is legacy, never v3', () => {
+    const started = new RoomCore('ABCD', 7);
+    started.join(null, 'Ada', () => 'p1');
+    started.handle('p1', { t: 'start' });
+    const gameRaw = JSON.stringify(started.game);
+    expect(classifyStoredRoom(JSON.stringify({ ...started.room, status: 'lobby' }), gameRaw)).toEqual({ kind: 'legacy' });
+    // any other room/game pairing that disagrees is legacy too
+    expect(classifyStoredRoom(JSON.stringify({ ...started.room, status: 'ended' }), gameRaw)).toEqual({ kind: 'legacy' });
+    const ended = { ...(started.game as unknown as Record<string, unknown>), phase: 'ended' };
+    expect(classifyStoredRoom(JSON.stringify(started.room), JSON.stringify(ended))).toEqual({ kind: 'legacy' });
+    // cross-record coherence
+    const room = started.room as unknown as Record<string, unknown>;
+    for (const bad of [{ drafts: [] }, { ready: [] }, { epochs: [0, 0] }, { playerOf: [5, -1, -1, -1] }, { playerOf: [0.5, -1, -1, -1] }, { playerOf: [-2, -1, -1, -1] }, { lastResolved: 3 }, { lastResolved: -1 }, { hashes: ['x'] }]) {
+      expect(classifyStoredRoom(JSON.stringify({ ...room, ...bad }), gameRaw)).toEqual({ kind: 'legacy' });
+    }
+    expect(classifyStoredRoom(JSON.stringify(started.room), gameRaw).kind).toBe('v3');
+  });
+
+  it('Pass 6 case D: a nested null or broken record inside the game is legacy, never v3', () => {
+    const started = new RoomCore('ABCD', 7);
+    started.join(null, 'Ada', () => 'p1');
+    started.handle('p1', { t: 'start' });
+    const roomRaw = JSON.stringify(started.room);
+    const base = JSON.parse(JSON.stringify(started.game)) as Record<string, any>;
+    const mutate = (fn: (g: Record<string, any>) => void): string => {
+      const g = JSON.parse(JSON.stringify(base)) as Record<string, any>;
+      fn(g);
+      return JSON.stringify(g);
+    };
+    const bad: [string, (g: Record<string, any>) => void][] = [
+      ['players[0] = null', (g) => (g.players[0] = null)],
+      ['players[1].cash NaN-ish', (g) => (g.players[1].cash = null)],
+      ['players[0].sales = {}', (g) => (g.players[0].sales = {})],
+      ['players[0].stats missing', (g) => delete g.players[0].stats],
+      ['players[0].id wrong', (g) => (g.players[0].id = 3)],
+      ['players[0].house 9', (g) => (g.players[0].house = 9)],
+      ['players empty', (g) => (g.players = [])],
+      ['units[0] = null', (g) => (g.units[0] = null)],
+      ['units[0].owner out of range', (g) => (g.units[0].owner = 9)],
+      ['units[0].tile out of range', (g) => (g.units[0].tile = 9999)],
+      ['units[0].kind unknown', (g) => (g.units[0].kind = 'ox')],
+      ['buildings[0] = null', (g) => g.buildings.push(null)],
+      ['buildings owner out of range', (g) => g.buildings.push({ id: 1, owner: 7, kind: 'bistro', tile: 3, level: 1 })],
+      ['pacts [null]', (g) => (g.pacts = [null])],
+      ['chronicle [null]', (g) => (g.chronicle = [null])],
+      ['standings [null]', (g) => (g.standings = [null])],
+      ['trend missing', (g) => delete g.trend],
+      ['honours null', (g) => (g.honours = null)],
+      ['council malformed', (g) => (g.council = { era: 'x' })],
+      ['turn 0', (g) => (g.turn = 0)],
+      ['nextId 0', (g) => (g.nextId = 0)],
+      ['winner -2', (g) => (g.winner = -2)],
+      ['endless not boolean', (g) => (g.endless = 'no')],
+    ];
+    for (const [label, fn] of bad) expect(classifyStoredRoom(roomRaw, mutate(fn)), label).toEqual({ kind: 'legacy' });
+    expect(classifyStoredRoom(roomRaw, JSON.stringify(base)).kind).toBe('v3');
+  });
+
   it('every other required RoomState field and nested element is validated strictly', () => {
     const started = new RoomCore('ABCD', 7);
     started.join(null, 'Ada', () => 'p1');

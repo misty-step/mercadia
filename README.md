@@ -33,6 +33,8 @@ npm run balance   # headless seeded AI matches through the real resolution code
 `npm run smoke` writes screenshots/videos to `~/chief-evidence/media` (`MEDIA=…`), `FAST=1` shortens the
 idle checks, `ONLY=solo,hotseat,mobile,room,relay,idle` selects sections. The `legacy` section starts its own
 `wrangler dev` (scripts/wrangler.legacy.jsonc, port 8791, throwaway persisted state) and needs `npm run build` first.
+After the sections the smoke drops any recorded clip that never rendered a frame, re-encodes the rest (VP9, 10 fps,
+<= 960 px) and checks every kept video frame by frame with `ffmpeg` `signalstats`, so it needs `ffmpeg` on PATH.
 
 ## Rooms from older versions
 
@@ -41,6 +43,12 @@ A room's Durable Object stores `room` and `game` rows in SQLite `kv` in every ve
 `/export` and the WebSocket answer HTTP 410, its storage is never written, deleted or simulated, and the client
 offers **Create New Room**. A started room persisted before `exportVersion` existed keeps playing but answers
 `409 incompatible_ruleset` on export rather than labelling old hashes as version 5.
+
+Only a coherent, fully valid save resumes. Every nested record of the stored `Game` is checked, `stateHash` and
+`computeStandings` must run on it, and the room and game must agree (a `lobby` has no game row, `playing` pairs with a
+`planning` game, `ended` with an `ended` one, and drafts/ready/epochs/playerOf/lastResolved/hashes match the players
+and turn). Anything else is legacy (410/409), and the cleanup alarm purges only an idle lobby with no game or a finished
+room with an ended game, never an anomaly.
 
 ## Layout
 

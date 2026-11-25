@@ -3,7 +3,8 @@
 // message at a time. There is no tick, no timer and no clock: the world changes only inside
 // a resolution, which runs when the last human seat's Ready is recorded.
 import { AI_ORDER, AI_PERSONAS, HOUSES, INCOMPATIBLE_RULESET_MESSAGE, SUMMARY_KEEP } from './constants';
-import { createGame, stateHash } from './game';
+import { computeStandings, createGame, stateHash } from './game';
+import { N } from './map';
 import { readyBlock } from './orders';
 import type { ClientMsg, LobbyView, OwnSeat, SeatStatus, ServerMsg } from './protocol';
 import { canonicalOrders, continueEndless, resolveTurn } from './resolve';
@@ -70,10 +71,16 @@ export const IDLE_PURGE_MS = 6 * 60 * 60 * 1000;
  * What the room's cleanup alarm does. PRODUCT.md "Seat reclaim": seats are never timed out or handed
  * to AI mid-match and the room simply waits, so a started match that has not ended is never erased,
  * whether or not a socket happens to be connected when the alarm fires.
+ * The decision is made on the room AND its game together: an idle lobby is purged only when it has no
+ * world at all, and a finished room only when its world is positively an ended one. A lobby that still
+ * carries a game row, or any other pairing, is an anomaly and is kept.
  */
-export function roomAlarmAction(room: Pick<RoomState, 'status'>, sockets: number, idleMs: number): 'keep' | 'purge' {
+export function roomAlarmAction(room: Pick<RoomState, 'status'>, game: Pick<Game, 'phase'> | null | undefined, sockets: number, idleMs: number): 'keep' | 'purge' {
   // Fail closed: only a positively recognised idle lobby or finished room is ever purged.
-  return sockets === 0 && (room.status === 'lobby' || room.status === 'ended') && idleMs >= IDLE_PURGE_MS ? 'purge' : 'keep';
+  if (sockets !== 0 || !(idleMs >= IDLE_PURGE_MS)) return 'keep';
+  if (room.status === 'lobby' && game === null) return 'purge';
+  if (room.status === 'ended' && game != null && game.phase === 'ended') return 'purge';
+  return 'keep';
 }
 
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -136,8 +143,77 @@ function isValidRoomState(room: Record<string, unknown>): boolean {
   );
 }
 
+const isObjectArray = (v: unknown): boolean => Array.isArray(v) && v.every(isObject);
+const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+function isValidPlayer(p: unknown, i: number): boolean {
+  return (
+    isObject(p) &&
+    p.id === i &&
+    typeof p.name === 'string' &&
+    isInt(p.house) &&
+    p.house >= 0 &&
+    p.house < 4 &&
+    (p.kind === 'human' || p.kind === 'ai') &&
+    isFiniteNum(p.cash) &&
+    isFiniteNum(p.debt) &&
+    isFiniteNum(p.prestige) &&
+    Array.isArray(p.charters) &&
+    Array.isArray(p.milestones) &&
+    Array.isArray(p.studies) &&
+    Array.isArray(p.sales) &&
+    p.sales.every(isFiniteNum) &&
+    isObject(p.stats)
+  );
+}
+
+/** Every nested record and array the engine and the client read from a stored Game, checked structurally. */
 function isValidGame(g: unknown): boolean {
-  return isObject(g) && g.version === 3 && typeof g.turn === 'number' && (g.phase === 'planning' || g.phase === 'ended') && Array.isArray(g.players) && Array.isArray(g.units) && !('tick' in g);
+  if (!isObject(g)) return false;
+  if (
+    g.version !== 3 ||
+    !isInt(g.seed) ||
+    !(g.mode === 'standard' || g.mode === 'blitz' || g.mode === 'endless') ||
+    !isInt(g.turn) ||
+    g.turn < 1 ||
+    !(g.phase === 'planning' || g.phase === 'ended') ||
+    typeof g.endless !== 'boolean' ||
+    !isInt(g.nextId) ||
+    g.nextId < 1 ||
+    !isInt(g.dispatchN) ||
+    g.dispatchN < 0 ||
+    !isInt(g.winner) ||
+    g.winner < -1 ||
+    'tick' in g
+  ) {
+    return false;
+  }
+  if (!(g.council === null || (isObject(g.council) && isInt(g.council.era) && Array.isArray(g.council.offers)))) return false;
+  if (!Array.isArray(g.players) || g.players.length < 1 || g.players.length > 4) return false;
+  if (!g.players.every(isValidPlayer)) return false;
+  const n = g.players.length;
+  const owned = (o: Record<string, unknown>): boolean => isInt(o.id) && isInt(o.owner) && o.owner >= 0 && o.owner < n && isInt(o.tile) && o.tile >= 0 && o.tile < N;
+  if (!Array.isArray(g.units) || !g.units.every((u) => isObject(u) && owned(u) && (u.kind === 'factor' || u.kind === 'watch' || u.kind === 'barge') && isInt(u.cohesion))) return false;
+  if (!Array.isArray(g.buildings) || !g.buildings.every((b) => isObject(b) && owned(b) && typeof b.kind === 'string' && isInt(b.level))) return false;
+  return isObjectArray(g.pacts) && isObjectArray(g.proposals) && isObjectArray(g.events) && isObjectArray(g.chronicle) && isObjectArray(g.standings) && isObjectArray(g.trend) && isObjectArray(g.honours);
+}
+
+/** The room and its world must describe the same match. Nothing is repaired: any mismatch is a corrupt save. */
+function isCoherent(room: RoomState, game: Game | null): boolean {
+  if (room.status === 'lobby') return game === null;
+  if (game === null) return false;
+  if (room.status === 'playing' && game.phase !== 'planning') return false;
+  if (room.status === 'ended' && game.phase !== 'ended') return false;
+  const n = game.players.length;
+  return (
+    room.drafts.length === n &&
+    room.ready.length === n &&
+    room.epochs.length === n &&
+    room.playerOf.every((idx) => Number.isInteger(idx) && idx >= -1 && idx < n) &&
+    room.lastResolved >= 0 &&
+    room.lastResolved === game.turn - 1 &&
+    room.hashes.length === room.lastResolved
+  );
 }
 
 /**
@@ -162,7 +238,14 @@ export function classifyStoredRoom(roomRaw: string | null, gameRaw: string | nul
       if (!isValidGame(g)) return { kind: 'legacy' };
       game = g as unknown as Game;
     }
-    return { kind: 'v3', room: room as unknown as RoomState, game };
+    const typed = room as unknown as RoomState;
+    if (!isCoherent(typed, game)) return { kind: 'legacy' };
+    if (game) {
+      // The engine's own read-only invariants: a Game that cannot be hashed or scored is not resumable.
+      stateHash(game);
+      computeStandings(game);
+    }
+    return { kind: 'v3', room: typed, game };
   } catch {
     return { kind: 'legacy' };
   }

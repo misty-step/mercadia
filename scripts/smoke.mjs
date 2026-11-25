@@ -12,7 +12,7 @@
 // securitypolicyviolation events and zero failed network/WebSocket requests.
 import { chromium } from 'playwright-core';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { legacySection } from './legacy-section.mjs';
@@ -48,6 +48,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const browser = await chromium.launch({ executablePath: CHROME, args: ['--no-sandbox'] });
 const pages = []; // for the final hygiene check
+const droppedBlank = []; // recorded clips that never showed a rendered frame; removed from the media directory at the end
 
 async function ctx(name, { mobile = false, video = true } = {}) {
   const context = await browser.newContext({
@@ -77,6 +78,45 @@ async function openPage(c, tag) {
   });
   pages.push(rec);
   return page;
+}
+
+/**
+ * Decode a recorded clip with ffmpeg `signalstats` and report whether it ever shows real rendered UI: a blank clip
+ * (a page closed before its first paint is all-white, luma 252-255) has no frame whose luma range (YMAX-YMIN)
+ * reaches BLANK_RANGE, while any frame holding text, ink or House colour spans well over 100.
+ * Returns { frames, maxRange, minYmin, maxYmax, blank } or null when ffmpeg cannot decode it.
+ */
+const BLANK_RANGE = 24;
+function videoStats(file) {
+  let out;
+  try {
+    out = execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-vf', 'signalstats,metadata=print:file=-', '-an', '-f', 'null', '-'], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+  } catch {
+    return null;
+  }
+  let frames = 0;
+  let maxRange = 0;
+  let minYmin = 255;
+  let maxYmax = 0;
+  let cur = {};
+  const flush = () => {
+    if (cur.YMIN === undefined || cur.YMAX === undefined) return;
+    frames++;
+    maxRange = Math.max(maxRange, cur.YMAX - cur.YMIN);
+    minYmin = Math.min(minYmin, cur.YMIN);
+    maxYmax = Math.max(maxYmax, cur.YMAX);
+  };
+  for (const line of out.split('\n')) {
+    if (line.startsWith('frame:')) {
+      flush();
+      cur = {};
+      continue;
+    }
+    const m = /^lavfi\.signalstats\.(YMIN|YMAX)=(\d+(?:\.\d+)?)/.exec(line);
+    if (m) cur[m[1]] = Number(m[2]);
+  }
+  flush();
+  return { frames, maxRange, minYmin, maxYmax, blank: frames === 0 || maxRange < BLANK_RANGE };
 }
 
 async function finishCtx(c, videoName, pagesToName = []) {
@@ -1134,7 +1174,11 @@ async function tokens404AndLeave() {
   const back = await M(R);
   ok(back.seat === a0.seat && back.ready === true && back.draft === 1, 'leave: returning to the room link reclaims the reserved seat ' + a0.seat + ' (Ready, one-order draft), never a spectator', JSON.stringify({ seat: back.seat, ready: back.ready, draft: back.draft }));
   await shot(R, '41-seat-reclaimed-after-leave');
-  await finishCtx(cA, 'leave-and-reclaim-A');
+  // This tab only lives for about a second: its recording is a clip of white, so it is closed (and its CSP read) first.
+  // The real walkthrough is leave-and-reclaim-A-1 / -B; this tab's proof is still 41.
+  pages.find((r) => r.page === R).csp = await R.evaluate(() => window.__csp ?? []);
+  await R.close();
+  await finishCtx(cA, 'leave-and-reclaim-A', ['leave-and-reclaim-A-1']);
   await finishCtx(cB, 'leave-and-reclaim-B');
 }
 
@@ -1446,16 +1490,62 @@ for (const rec of roomPages) {
 
 // The legacy pages hit a refused upgrade (HTTP 410) on purpose: those load failures are the test, nothing else is excused.
 for (const rec of pages.filter((p) => /^legacy-chrome\//.test(p.tag))) {
-  const bad = rec.issues.filter((i) => !/\b410\b|http 409: \S+\/export|Failed to load resource|WebSocket connection to .* failed|WebSocket|ERR_/i.test(i));
+  const bad = rec.issues.filter((i) => /^pageerror:/.test(i) || !/\b410\b|http 409: \S+\/export|Failed to load resource|WebSocket connection to .* failed|WebSocket|ERR_/i.test(i));
   ok(bad.length === 0, `hygiene ${rec.tag}: zero page errors and unexpected console errors (only the deliberate HTTP 410 refusal excused)`, bad.slice(0, 4).join(' | '));
 }
 
-await browser.close();
-try {
-  for (const f of readdirSync(RAW)) if (f.endsWith('.json')) copyFileSync(join(RAW, f), join(MEDIA, '..', f));
-} catch {
-  // ignore
+// Media. Runs once, after every section, so the ffmpeg work never competes with the sections driving Chrome.
+//  1. the raw JSON exports are copied next to (not into) the media directory and the raw recording directory is removed;
+//  2. a page that closes before its first paint records a clip of nothing but white: such a clip is dropped;
+//  3. every remaining clip is re-encoded in place (VP9, 10 fps, at most 960 px wide) so the directory stays within the
+//     collection limits (25 MiB, 64 flat files, no hidden directories), then decoded again frame by frame: every kept
+//     video must show real rendered UI.
+const MEDIA_LIMIT_BYTES = 25 * 1024 * 1024;
+const MEDIA_LIMIT_FILES = 64;
+function shrinkVideo(file) {
+  const tmp = `${file}.tmp.webm`;
+  try {
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', file, '-vf', "fps=10,scale='min(960,iw)':-2", '-c:v', 'libvpx-vp9', '-crf', '40', '-b:v', '0', '-deadline', 'good', '-cpu-used', '5', '-row-mt', '1', '-an', tmp]);
+    renameSync(tmp, file);
+    return true;
+  } catch {
+    rmSync(tmp, { force: true });
+    return false;
+  }
 }
+{
+  try {
+    for (const f of readdirSync(RAW)) if (f.endsWith('.json')) copyFileSync(join(RAW, f), join(MEDIA, '..', f));
+  } catch {
+    // ignore
+  }
+  rmSync(RAW, { recursive: true, force: true });
+  const stats = [];
+  let unshrunk = 0;
+  for (const f of readdirSync(MEDIA).filter((x) => x.endsWith('.webm'))) {
+    const file = join(MEDIA, f);
+    const before = videoStats(file);
+    if (before && before.blank) {
+      rmSync(file, { force: true });
+      droppedBlank.push({ name: f, frames: before.frames, maxRange: before.maxRange, minYmin: before.minYmin, maxYmax: before.maxYmax });
+      continue;
+    }
+    if (!shrinkVideo(file)) unshrunk++;
+    stats.push({ f, st: videoStats(file) });
+  }
+  const kept = stats.map((x) => x.f);
+  const undecodable = stats.filter((x) => !x.st).map((x) => x.f);
+  const blank = stats.filter((x) => x.st && x.st.blank).map((x) => x.f);
+  ok(undecodable.length === 0 && blank.length === 0 && unshrunk === 0, `media: all ${kept.length} kept .webm clips decode and show real rendered UI frames (luma range >= ${BLANK_RANGE} in at least one frame); none is blank`, `kept=${kept.length} undecodable=${undecodable.join(',')} blank=${blank.join(',')} notReencoded=${unshrunk}`);
+  const entries = readdirSync(MEDIA, { withFileTypes: true });
+  const bytes = entries.filter((e) => e.isFile()).reduce((n, e) => n + statSync(join(MEDIA, e.name)).size, 0);
+  const nonFlat = entries.filter((e) => !e.isFile()).map((e) => e.name);
+  ok(entries.length <= MEDIA_LIMIT_FILES && nonFlat.length === 0 && bytes <= MEDIA_LIMIT_BYTES, 'media: the directory is flat, holds at most 64 files, no .raw, and is at most 25 MiB', `files=${entries.length} subdirs=${nonFlat.join(',')} MiB=${(bytes / 1048576).toFixed(2)}`);
+  for (const x of stats) if (x.st) console.log(`      video ${x.f}: ${(statSync(join(MEDIA, x.f)).size / 1048576).toFixed(2)} MiB frames=${x.st.frames} lumaMin=${x.st.minYmin} lumaMax=${x.st.maxYmax} maxFrameRange=${x.st.maxRange}`);
+  for (const d of droppedBlank) console.log(`      dropped blank clip ${d.name}: frames=${d.frames} lumaMin=${d.minYmin} lumaMax=${d.maxYmax} maxFrameRange=${d.maxRange}`);
+}
+
+await browser.close();
 writeFileSync(join(MEDIA, '..', 'smoke-results.json'), JSON.stringify({ at: 'run', fast: FAST, base: BASE, results }, null, 2));
 console.log(`\n${results.filter((r) => r.pass).length} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

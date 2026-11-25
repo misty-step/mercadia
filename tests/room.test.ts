@@ -728,24 +728,33 @@ describe('room retention alarm (PRODUCT.md "Seat reclaim")', () => {
   it('never purges a started match, even with every socket away for a very long time', () => {
     const { h } = startedRoom(2);
     expect(h.core.room.status).toBe('playing');
-    expect(roomAlarmAction(h.core.room, 0, long)).toBe('keep');
-    expect(roomAlarmAction(h.core.room, 0, IDLE_PURGE_MS)).toBe('keep');
-    expect(roomAlarmAction(h.core.room, 2, long)).toBe('keep');
+    expect(roomAlarmAction(h.core.room, h.core.game, 0, long)).toBe('keep');
+    expect(roomAlarmAction(h.core.room, h.core.game, 0, IDLE_PURGE_MS)).toBe('keep');
+    expect(roomAlarmAction(h.core.room, h.core.game, 2, long)).toBe('keep');
   });
   it('purges only unstarted lobbies and finished rooms that have sat idle with nobody connected', () => {
     const lobby = new RoomCore('QRST', 1).room;
     expect(lobby.status).toBe('lobby');
-    expect(roomAlarmAction(lobby, 0, IDLE_PURGE_MS - 1)).toBe('keep');
-    expect(roomAlarmAction(lobby, 0, IDLE_PURGE_MS)).toBe('purge');
-    expect(roomAlarmAction(lobby, 1, long)).toBe('keep');
-    expect(roomAlarmAction({ status: 'ended' }, 0, IDLE_PURGE_MS - 1)).toBe('keep');
-    expect(roomAlarmAction({ status: 'ended' }, 0, IDLE_PURGE_MS)).toBe('purge');
+    expect(roomAlarmAction(lobby, null, 0, IDLE_PURGE_MS - 1)).toBe('keep');
+    expect(roomAlarmAction(lobby, null, 0, IDLE_PURGE_MS)).toBe('purge');
+    expect(roomAlarmAction(lobby, null, 1, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, { phase: 'ended' }, 0, IDLE_PURGE_MS - 1)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, { phase: 'ended' }, 0, IDLE_PURGE_MS)).toBe('purge');
+  });
+  it('purges on the room AND its game together: a lobby with any game row, or an ended room without an ended game, is kept', () => {
+    const { h } = startedRoom(2);
+    const lobby = new RoomCore('QRST', 1).room;
+    expect(roomAlarmAction(lobby, h.core.game, 0, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'lobby' }, { phase: 'ended' }, 0, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, null, 0, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'ended' }, { phase: 'planning' }, 0, long)).toBe('keep');
+    expect(roomAlarmAction({ status: 'playing' }, null, 0, long)).toBe('keep');
   });
   it('fails closed: a missing or unrecognised status is never purged', () => {
     for (const status of [undefined, null, '', 'paused', 'LOBBY', 3]) {
-      expect(roomAlarmAction({ status } as never, 0, long)).toBe('keep');
+      expect(roomAlarmAction({ status } as never, null, 0, long)).toBe('keep');
     }
-    expect(roomAlarmAction({} as never, 0, long)).toBe('keep');
+    expect(roomAlarmAction({} as never, null, 0, long)).toBe('keep');
   });
 });
 

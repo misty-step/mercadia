@@ -243,10 +243,19 @@ export class MercadiaRoom extends DurableObject<Env> {
       if (this.read('room') != null || this.read('game') != null) this.legacy = true;
       return;
     }
+    // Cross-record anomaly: a lobby never carries a world. If one is held in memory or sits in SQLite, this is a
+    // corrupt save, not an idle lobby: isolate it read-only and erase nothing.
+    if (this.core.room.status === 'lobby' && (this.core.game !== null || this.read('game') != null)) {
+      this.legacy = true;
+      this.core = null;
+      return;
+    }
     const touched = Number(this.read('touched') ?? 0);
-    const idle = touched > 0 ? Date.now() - touched : IDLE_PURGE_MS;
+    const idle = touched > 0 ? Date.now() - touched : 0;
     const sockets = this.ctx.getWebSockets().length;
-    if (roomAlarmAction(this.core.room, sockets, idle) === 'keep') {
+    // Purge needs a recorded `touched` (idle time that is not positively known never counts as idle) and a
+    // room + game pair that is positively an idle lobby or a finished match.
+    if (!(touched > 0) || roomAlarmAction(this.core.room, this.core.game, sockets, idle) === 'keep') {
       const wait = this.core.room.status === 'playing' || sockets > 0 ? IDLE_PURGE_MS : Math.max(60_000, IDLE_PURGE_MS - idle);
       await this.ctx.storage.setAlarm(Date.now() + wait);
       return;

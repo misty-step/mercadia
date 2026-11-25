@@ -236,6 +236,26 @@ describe.each([
       return { room: JSON.stringify(room), touched: String(Date.now() - 7 * 3600 * 1000) };
     },
   ],
+  [
+    'Case C: a started v3 room whose status is lobby but whose genuine Turn 1 game row is kept',
+    (): Record<string, string> => {
+      const c = new RoomCore('ABCD', 7);
+      c.join(null, 'Ada', () => 'p1');
+      c.handle('p1', { t: 'start' });
+      return { room: JSON.stringify({ ...c.room, status: 'lobby' }), game: JSON.stringify(c.game), touched: String(Date.now() - 7 * 3600 * 1000) };
+    },
+  ],
+  [
+    'Case D: a started v3 room whose game.players[0] is null',
+    (): Record<string, string> => {
+      const c = new RoomCore('ABCD', 7);
+      c.join(null, 'Ada', () => 'p1');
+      c.handle('p1', { t: 'start' });
+      const game = JSON.parse(JSON.stringify(c.game));
+      game.players[0] = null;
+      return { room: JSON.stringify(c.room), game: JSON.stringify(game), touched: String(Date.now() - 7 * 3600 * 1000) };
+    },
+  ],
 ])('MercadiaRoom over %s', (_name, build) => {
   let d: ReturnType<typeof make>;
   let before: string;
@@ -272,6 +292,26 @@ describe.each([
 });
 
 describe('MercadiaRoom restore() and alarm() fail closed', () => {
+  it('alarm() re-checks the room against SQLite: a lobby that gains a game row after restore is isolated, not purged', async () => {
+    const c = new RoomCore('ABCD', 7);
+    c.join(null, 'Ada', () => 'p1');
+    c.handle('p1', { t: 'start' });
+    const d = make({ room: JSON.stringify(new RoomCore('ABCD', 7).room), touched: String(Date.now() - 7 * 3600 * 1000) });
+    d.kv.set('game', JSON.stringify(c.game));
+    const before = snapshot(d.kv);
+    await d.room.alarm();
+    expect(d.storage.deleteAll).not.toHaveBeenCalled();
+    expect(snapshot(d.kv)).toBe(before);
+    expect((await d.room.fetch(req('/summary'))).status).toBe(410);
+  });
+
+  it('alarm() never purges an idle lobby that has no recorded touched time', async () => {
+    const d = make({ room: JSON.stringify(new RoomCore('ABCD', 7).room) });
+    await d.room.alarm();
+    expect(d.storage.deleteAll).not.toHaveBeenCalled();
+    expect(d.storage.setAlarm).toHaveBeenCalledTimes(1);
+  });
+
   it('hydration that throws (here: the socket attachment scan) becomes an isolated room instead of an HTTP 500', async () => {
     const f = fakeCtx({ room: JSON.stringify(new RoomCore('ABCD', 7).room), touched: String(Date.now() - 7 * 3600 * 1000) });
     f.ctx.getWebSockets = () => {
