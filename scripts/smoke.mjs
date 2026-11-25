@@ -4,7 +4,7 @@
 //   npm run build && npm run dev        (in another shell)
 //   npm run smoke                       BASE=http://127.0.0.1:8787  CHROME=/usr/bin/google-chrome
 //
-//   ONLY=solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,idle   run sections selectively
+//   ONLY=solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,legacy,idle   run sections selectively
 //   FAST=1                                      shorten the 2-minute/5-minute idle checks to 20 s (NOT acceptance-grade)
 //   MEDIA=/path                                 directory for videos and screenshots (default ~/chief-evidence/media)
 //
@@ -15,13 +15,14 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { legacySection } from './legacy-section.mjs';
 
 const BASE = process.env.BASE ?? 'http://127.0.0.1:8787';
 const CHROME = process.env.CHROME ?? '/usr/bin/google-chrome';
 const FAST = process.env.FAST === '1';
 const MEDIA = process.env.MEDIA ?? join(homedir(), 'chief-evidence', 'media');
 const RAW = join(MEDIA, '.raw');
-const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,idle').split(',');
+const ONLY = (process.env.ONLY ?? 'solo,hotseat,mobile,room,relay,endless,start,reclaim,spectator,roomexport,tokens,legacy,idle').split(',');
 const IDLE_MS = FAST ? 20_000 : 125_000;
 const HEARTBEAT_MS = FAST ? 30_000 : 300_000;
 mkdirSync(MEDIA, { recursive: true });
@@ -30,10 +31,18 @@ mkdirSync(RAW, { recursive: true });
 
 const results = [];
 let failures = 0;
+// Seat tokens must never reach stdout or smoke-results.json, on pass or on fail. Callers pass booleans and counts;
+// this is the backstop: any UUID, `mercadia:pid:` payload or `"id":` seat-token object in a detail is masked.
+const scrub = (text) =>
+  String(text)
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<redacted-id>')
+    .replace(/\{[^{}]*"id"\s*:[^{}]*\}/g, '<redacted-token>')
+    .replace(/mercadia:pid:[A-Z]{4}["']?\s*[:=]\s*\S+/g, 'mercadia:pid:<redacted>');
 const ok = (cond, name, detail = '') => {
-  results.push({ name, pass: !!cond, detail: String(detail) });
+  const d = scrub(detail);
+  results.push({ name, pass: !!cond, detail: d });
   if (!cond) failures++;
-  console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond || !detail ? '' : '  — ' + detail}`);
+  console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond || !d ? '' : '  — ' + d}`);
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -935,7 +944,7 @@ async function spectatorTab() {
   await sleep(9000);
   const tokT = await tokenOf(T, code);
   const tokA2 = await tokenOf(A, code);
-  ok(tokT.local?.id === tokA.local.id && tokT.session === null, 'spectator tab: after > 4 heartbeats the persisted seat token is still the seated tab\'s (spectator wrote nothing to localStorage or its own sessionStorage)', JSON.stringify({ same: tokT.local?.id === tokA.local.id, spectatorSession: tokT.session }));
+  ok(tokT.local?.id === tokA.local.id && tokT.session === null, 'spectator tab: after > 4 heartbeats the persisted seat token is still the seated tab\'s (spectator wrote nothing to localStorage or its own sessionStorage)', JSON.stringify({ same: tokT.local?.id === tokA.local.id, spectatorHasSessionToken: tokT.session !== null }));
   ok(tokA2.local.tab === tokA.local.tab && tokA2.now - tokA2.local.beat < 4500, 'spectator tab: the seated tab alone keeps the heartbeat fresh', JSON.stringify({ sinceBeatMs: tokA2.now - tokA2.local.beat }));
   await shot(A, '33-spectator-seated-tab-still-ready');
   // Close the seated tab, then the spectator tab.
@@ -1096,9 +1105,17 @@ async function tokens404AndLeave() {
   await P.waitForFunction(() => /No such room/.test(document.body.innerText) && window.__mercadia?.view.status.text === 'Room not found', null, { timeout: 20000 });
   await sleep(500);
   const after404 = await P.evaluate(([d, k]) => ({ deadLocal: localStorage.getItem(`mercadia:pid:${d}`), deadSession: sessionStorage.getItem(`mercadia:pid:${d}`), otherLocal: localStorage.getItem(k) }), [dead, key]);
+  // Only booleans leave this block: the raw token JSON of the dead room and of the live room is never reported.
+  const deadRoomCleared = after404.deadLocal === null && after404.deadSession === null;
+  let otherRoomPreserved = false;
+  try {
+    otherRoomPreserved = !!after404.otherLocal && JSON.parse(after404.otherLocal).id === t0.local.id;
+  } catch {
+    otherRoomPreserved = false;
+  }
   await shot(P, '39-room-not-found-clears-only-that-token');
-  ok(seeded && res404.status === 404 && after404.deadLocal === null && after404.deadSession === null, 'room 404: a confirmed HTTP 404 removed the missing room\'s token from localStorage and sessionStorage', JSON.stringify({ http: res404.status, after404 }));
-  ok(!!after404.otherLocal && JSON.parse(after404.otherLocal).id === t0.local.id, 'room 404: another room\'s token (the live room) is left untouched in localStorage', JSON.stringify({ kept: !!after404.otherLocal }));
+  ok(seeded && res404.status === 404 && deadRoomCleared, 'room 404: a confirmed HTTP 404 removed the missing room\'s token from localStorage and sessionStorage', `seeded=${seeded} http=${res404.status} deadRoomCleared=${deadRoomCleared}`);
+  ok(otherRoomPreserved, 'room 404: another room\'s token (the live room) is left untouched in localStorage', `otherRoomPreserved=${otherRoomPreserved}`);
   pages.find((r) => r.page === P).csp = await P.evaluate(() => window.__csp ?? []);
   await P.close();
   // Explicit Leave: confirm the dialog; the token stays (heartbeat released only).
@@ -1405,6 +1422,12 @@ if (ONLY.includes('idle')) {
 }
 await Promise.all(jobs);
 
+// The legacy v2 boundary runs on its own wrangler dev + persisted Durable Objects (scripts/legacy-section.mjs),
+// after the other sections, so it never competes with them for the browser or the machine.
+if (ONLY.includes('legacy')) {
+  await legacySection({ ok, ctx, openPage, finishCtx, shot, M, endBtn, nodeReplay, RAW, pages }).catch((e) => ok(false, 'legacy: section crashed', (e.stack ?? String(e)).split('\n').slice(0, 4).join(' / ')));
+}
+
 // Hygiene: zero console errors/warnings, page errors, CSP violations and failed requests anywhere.
 // Every page's CSP violations were read from the LIVE page in finishCtx, before its context closed.
 for (const rec of pages) {
@@ -1419,6 +1442,12 @@ for (const rec of roomPages) {
   const expected404 = /\/dead-room$/.test(rec.tag) ? /404|Not Found|Failed to load resource/i : null;
   const bad = rec.issues.filter((i) => !/WebSocket|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|net::ERR_/i.test(i) && !(expected404 && expected404.test(i)));
   ok(bad.length === 0, `hygiene ${rec.tag}: zero console errors/warnings and page errors (deliberate offline/relay socket drops excluded)`, bad.slice(0, 4).join(' | '));
+}
+
+// The legacy pages hit a refused upgrade (HTTP 410) on purpose: those load failures are the test, nothing else is excused.
+for (const rec of pages.filter((p) => /^legacy-chrome\//.test(p.tag))) {
+  const bad = rec.issues.filter((i) => !/\b410\b|http 409: \S+/export|Failed to load resource|WebSocket connection to .* failed|WebSocket|ERR_/i.test(i));
+  ok(bad.length === 0, `hygiene ${rec.tag}: zero page errors and unexpected console errors (only the deliberate HTTP 410 refusal excused)`, bad.slice(0, 4).join(' | '));
 }
 
 await browser.close();
